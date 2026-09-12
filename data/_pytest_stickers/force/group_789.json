@@ -1,0 +1,19 @@
+[
+  {
+    "id": "img1",
+    "segment_type": "image",
+    "segment_data": {
+      "file": "a.jpg",
+      "sub_type": 1
+    },
+    "context_text": "傲娇炸毛",
+    "keywords": [
+      "傲娇",
+      "炸毛"
+    ],
+    "use_count": 1,
+    "collected_at": "",
+    "source_user": "",
+    "local_path": ""
+  }
+]

@@ -1,0 +1,13 @@
+### model
+model_name_or_path: E:/LLM/models/Qwen2.5-3B-Instruct
+adapter_name_or_path: E:/LLM/outputs/gaoleng-3b-lora
+template: qwen
+infer_backend: huggingface
+trust_remote_code: true
+finetuning_type: lora
+# 8GB：3B 推理用 4bit，给 bot/TTS 留显存
+quantization_bit: 4
+quantization_method: bitsandbytes
+
+### infer
+infer_dtype: float16

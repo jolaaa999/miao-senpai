@@ -1,0 +1,1151 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+LLM数据清洗模块
+
+"""
+
+import os
+import json
+import logging
+import argparse
+import re
+import sys
+import shutil
+import csv
+import time
+from contextlib import contextmanager
+from datetime import datetime
+from typing import List, Dict, Any, Optional, Tuple
+from dataclasses import dataclass, asdict
+from pathlib import Path
+from tqdm import tqdm
+import pandas as pd
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
+
+# 添加项目根目录到Python路径
+sys.path.append(os.path.dirname(os.path.dirname(__file__)))
+
+from process_data.default_cleaner import DefaultLLMCleaner
+from utils.config.config import get_config
+from utils.logger.logger import get_logger
+from utils.openai.openai_client import OpenAIClient, LLMDataCleaner
+
+# 获取配置和日志
+config = get_config()
+logger = get_logger('LLM_Data_Cleaner')
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_BACKUP_DIR = PROJECT_ROOT / 'dataset' / 'backup'
+_BACKUP_NOTICE_SHOWN = False
+_BACKUP_LOG_COUNT = 0
+IS_TTY = sys.stdout.isatty()
+
+
+@dataclass
+class Message:
+    """消息数据结构"""
+    role: str
+    content: str
+
+
+@dataclass
+class QaPair:
+    """问答对数据结构"""
+    id: int
+    messages: List[Message]
+    score: Optional[int] = None
+    valid_segments: Optional[List[int]] = None
+    images: Optional[List[str]] = None
+    system_prompt: Optional[str] = None
+
+
+@dataclass
+class QaPairScore:
+    """LLM打分结果"""
+    score: int  # 1-5分
+    reason: Optional[str] = None
+
+
+class _SingleLineProgress:
+    """在命令行单行刷新显示进度"""
+
+    def __init__(self, total: int, desc: str = ""):
+        self.total = max(1, total)
+        self.desc = desc.strip()
+        self.current = 0
+        self._last_len = 0
+        self._closed = False
+        self._needs_render = True
+        self._start_time = time.time()
+        self._extra_text = ""
+        self._render()
+
+    def update(self, step: int = 1, refresh: bool = True) -> None:
+        if step <= 0:
+            return
+        self.current = min(self.total, self.current + step)
+        if refresh:
+            self._render()
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._render()
+        sys.stdout.write('\n')
+        sys.stdout.flush()
+        self._closed = True
+
+    def _render(self) -> None:
+        if self._closed:
+            return
+        percent = self.current / self.total
+        bar_length = 30
+        filled = int(bar_length * percent)
+        bar = '#' * filled + '-' * (bar_length - filled)
+        elapsed = max(0.0, time.time() - self._start_time)
+        eta = self._estimate_eta(elapsed)
+        eta_text = self._format_seconds(eta) if eta is not None else "--:--"
+        desc = f"{self.desc} " if self.desc else ""
+        extra = f" | {self._extra_text}" if self._extra_text else ""
+        text = (
+            f"{desc}[{bar}] {self.current}/{self.total} ({percent * 100:5.1f}%) "
+            f"ETA {eta_text}{extra}"
+        )
+        self._write_line(text)
+
+    def _write_line(self, text: str) -> None:
+        padding = ' ' * max(0, self._last_len - len(text))
+        sys.stdout.write('\r' + text + padding)
+        sys.stdout.flush()
+        self._last_len = len(text)
+
+    def _estimate_eta(self, elapsed: float) -> Optional[int]:
+        if self.current <= 0 or elapsed <= 0:
+            return None
+        rate = self.current / elapsed
+        if rate <= 0:
+            return None
+        remaining = self.total - self.current
+        return max(0, int(remaining / rate))
+
+    @staticmethod
+    def _format_seconds(seconds: int) -> str:
+        hours, rem = divmod(seconds, 3600)
+        minutes, secs = divmod(rem, 60)
+        if hours > 0:
+            return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+        return f"{minutes:02d}:{secs:02d}"
+
+    def _clear_line(self) -> None:
+        sys.stdout.write('\r' + ' ' * self._last_len + '\r')
+        sys.stdout.flush()
+
+    @contextmanager
+    def log_context(self):
+        self._clear_line()
+        try:
+            yield
+        finally:
+            self._render()
+
+    def set_extra(self, text: str, refresh: bool = True) -> None:
+        self._extra_text = text.strip()
+        if refresh:
+            self._render()
+
+    def refresh(self) -> None:
+        self._render()
+
+
+class LLMScoringStrategy:
+    
+    def __init__(self, client: Optional[OpenAIClient] = None, accept_score: int = 2, batch_size: int = None, workers: int = None):
+        """
+        初始化LLM打分策略
+        
+        Args:
+            client: OpenAI客户端实例
+            accept_score: 可接受的最低分数阈值
+            batch_size: 批处理大小
+            workers: 工作线程数
+        """
+        self.client = client or OpenAIClient()
+        self.accept_score = accept_score
+        self.model = config.get('OpenAI_Model', 'default')
+        self.batch_size = batch_size
+        self.workers = workers
+        self.total_prompt_tokens = 0
+        self.total_completion_tokens = 0
+        self._token_lock = threading.Lock()
+        self._progress_display: Optional[_SingleLineProgress] = None
+        self._interactive = IS_TTY
+        self._token_log_interval = 5
+        self._token_log_counter = 0
+    
+    def _log_with_progress(self, level: str, message: str) -> None:
+        log_fn = getattr(logger, level, None)
+        if not callable(log_fn):
+            return
+        progress = self._progress_display
+        if progress:
+            with progress.log_context():
+                log_fn(message)
+        else:
+            log_fn(message)
+
+    def _record_token_usage(self, prompt_tokens: int, completion_tokens: int, refresh: bool = True) -> None:
+        prompt = max(0, prompt_tokens or 0)
+        completion = max(0, completion_tokens or 0)
+        if prompt == 0 and completion == 0:
+            return
+        with self._token_lock:
+            self.total_prompt_tokens += prompt
+            self.total_completion_tokens += completion
+            cumulative_prompt = self.total_prompt_tokens
+            cumulative_completion = self.total_completion_tokens
+        if self._progress_display:
+            extra = (
+                f"tokens 本批 输入 {prompt} 输出 {completion} | "
+                f"累计 输入 {cumulative_prompt} 输出 {cumulative_completion}"
+            )
+            self._progress_display.set_extra(extra, refresh=refresh)
+        else:
+            self._token_log_counter += 1
+            if self._token_log_counter == 1 or self._token_log_counter % self._token_log_interval == 0:
+                self._log_with_progress(
+                    "info",
+                    (
+                        f"LLM打分进度: tokens 本批 输入 {prompt} 输出 {completion}；"
+                        f"累计 输入 {cumulative_prompt} 输出 {cumulative_completion}"
+                    ),
+                )
+        
+    def judge(self, qa_pairs: List[QaPair], on_batch_scored=None) -> None:
+        """
+        对问答对进行LLM打分
+
+        Args:
+            qa_pairs: 问答对列表，会直接修改其score属性
+            on_batch_scored: 每个批次打分完成后的回调函数
+        """
+        logger.info(f"开始LLM打分，共{len(qa_pairs)}个问答对")
+
+        # 构建打分提示词
+        scoring_prompt = self._build_scoring_prompt()
+
+        # 批量处理配置
+        clean_set_args = config.get('clean_set_args', {})
+        openai_api = clean_set_args.get('openai_api', {})
+        batch_size = self.batch_size if self.batch_size is not None else openai_api.get('clean_batch_size', 10)
+        workers = self.workers if self.workers is not None else openai_api.get('clean_workers', 4)
+
+        logger.info(f"实际使用批处理大小: {batch_size}")
+        logger.info(f"实际使用工作线程数: {workers}")
+
+        # 分批处理
+        batches = []
+        for i in range(0, len(qa_pairs), batch_size):
+            batches.append(qa_pairs[i:i + batch_size])
+
+        # 多线程处理批次（可被Ctrl+C安全中断）
+        executor = ThreadPoolExecutor(max_workers=workers)
+        try:
+            # 提交所有任务
+            future_to_batch = {
+                executor.submit(self._score_batch, batch, scoring_prompt): batch
+                for batch in batches
+            }
+
+            # 迭代处理完成的任务，同时允许KeyboardInterrupt打断
+            remaining = set(future_to_batch.keys())
+            progress = _SingleLineProgress(len(batches), desc="LLM打分进度") if batches and self._interactive else None
+            self._progress_display = progress
+            try:
+                while remaining:
+                    # 采用短超时的等待，便于主线程响应Ctrl+C
+                    try:
+                        done, _ = self._wait_futures(remaining, timeout=0.2)
+                    except KeyboardInterrupt:
+                        # 主动快速关闭，不等待未完成任务
+                        self._log_with_progress("warning", "检测到中断，正在取消未开始的任务并快速退出...")
+                        try:
+                            executor.shutdown(wait=False, cancel_futures=True)
+                        except Exception:
+                            pass
+                        raise
+
+                    for future in list(done):
+                        batch = future_to_batch.get(future)
+                        usage: Optional[Tuple[int, int]] = None
+                        try:
+                            usage = future.result()
+                        except Exception as e:
+                            self._log_with_progress("error", f"批次处理失败: {e}")
+                            if batch:
+                                for qa in batch:
+                                    if qa.score is None:
+                                        qa.score = 0
+                        if progress:
+                            progress.update(1, refresh=False)
+                        if usage:
+                            prompt_tokens, completion_tokens = usage
+                            self._record_token_usage(prompt_tokens, completion_tokens, refresh=False)
+                        if on_batch_scored and batch:
+                            on_batch_scored(batch)
+                        if progress:
+                            progress.refresh()
+                        remaining.discard(future)
+            finally:
+                if progress:
+                    progress.close()
+                self._progress_display = None
+        finally:
+            # 避免在__exit__里阻塞等待所有线程结束
+            try:
+                executor.shutdown(wait=False, cancel_futures=True)
+            except Exception:
+                pass
+
+    @staticmethod
+    def _wait_futures(futures_set, timeout: float):
+        """等待一小段时间以检查已完成的future，支持快速响应Ctrl+C。"""
+        from concurrent.futures import wait, FIRST_COMPLETED
+        if not futures_set:
+            return set(), set()
+        done, not_done = wait(futures_set, timeout=timeout, return_when=FIRST_COMPLETED)
+        # 如果在timeout内没有完成的任务，返回空done集合，保持循环可响应
+        return done, (futures_set - done)
+    
+    def _build_scoring_prompt(self) -> str:
+        """构建LLM打分提示词"""
+        return """# 角色
+你是一个数据质量评估员。
+
+# 任务
+你的任务是评估下面提供的聊天记录的**逻辑性**、**相关性**以及**风格代表性**。目标是识别并过滤掉那些回答与问题**明显不匹配**、**逻辑严重混乱**的样本，筛选出具有人类聊天风格独特性与辨识度的样本。请根据以下核心评估点给出一个1到5的整数分数，并将该分数与原始 `id` 一起输出。
+
+**重要考量:**
+1.  **简短回答的有效性:** 请注意，诸如“好的”、“是的”、“收到”、“嗯”、“知道了”等简短的肯定、确认或应答，在合适的语境下是完全**有逻辑且相关的**。**不要仅仅因为回答简短就将其评为低分。** 只有当这类简短回答与【问题/上下文 Q】**明显不符**时，才应考虑低分。
+2.  **处理错别字和自我纠正:** 聊天记录中可能包含常见的打字错误（错别字）或用户先打错字随后又自行纠正的情况（例如，发送“我想去1楼”紧接着又发送“*2楼”进行更正）。在评估时，请**聚焦于用户想要表达的最终意图和信息的核心内容**，而**不应仅仅因为存在错别字或纠正过程就判定为低质量**。。
+
+# 核心评估点 (请在心中衡量,请勿输出到结果中)
+1.  **相关性 (Relevance):** 【回答 A】是否直接回应或恰当地衔接了【问题/上下文 Q】？它是在回答问题，还是完全跑题了？只有当【回答 A】与【问题/上下文 Q】**明显矛盾**、**完全不着边际**（即使考虑上下文也无法合理化），或简短回答**明显不适用于**该【问题/上下文 Q】时，才给予低分。
+2.  **逻辑性 (Coherence):** 【回答 A】本身是否符合基本的逻辑？结合【问题/上下文 Q】来看，这个问答对是否构成了一个符合逻辑的交流片段？是否存在明显的矛盾、混乱的内容？只有当【回答 A】**自身逻辑混乱**、**与Q存在无法解释的矛盾**时，才给予低分。
+3. **风格代表性**  (Style Representativeness): 评估【回答 A】是否展现了自然、独特的人类对话风格特征。回答Ａ是否带有个性化的色彩？关注点包括但不限于：是否体现了特定的语气（如友好、幽默、不耐烦、正式、脏话），是否包含口头禅、俚语、网络用语（如“yyds”、“绝绝子”）、表情符号 Emoji、颜文字、标点符号的特殊使用如“!!!”、“???”、“~”等表达、特定的缩写或短语、非标准的但一致的表达方式（如方言词汇、个人口癖）？
+4. **以相关性和逻辑性为主要评判标准，风格代表性仅仅作为获得5分的必要条件。**
+
+# 评分标准 (1-5分)
+*   **1分 (极差):** 聊天记录中的问答内容完全不相关；逻辑严重混乱/矛盾。
+*   **2分 (差):** 大部分问答相关性很低；存在明显的逻辑问题或不连贯。
+*   **3分 (中等):** 问答相关性一般（可能部分问答跑题或回应不充分）；逻辑上勉强说得通但不够流畅或有瑕疵。
+*   **4分 (良好):** 大部分问答相关性好，回答了问题或恰当衔接，逻辑清晰。
+*   **5分 (优秀):** 问答相关性强，逻辑流畅，包含了显著的、具有辨识度的人类聊天的常用特征（例如情感情绪表达、口头禅、表情符号组合、特有的句子结构、鲜明的语气）
+
+# 输入数据
+```json
+{qa_list}
+
+# 输出要求
+请严格按照以下 JSON 格式输出，包含原始的 id 和你给出的1到5的整数评分 score，不要包含任何其他文字、解释或标签！
+[
+  {{
+    "id": "<这里填入第1条输入数据的id值>",
+    "score": <1-5的整数评分>
+  }},
+  {{
+    "id": "<这里填入第2条输入数据的id值>",
+    "score": <1-5的整数评分>
+  }}
+  …
+]"""
+    
+    def _score_batch(self, batch: List[QaPair], scoring_prompt: str) -> Tuple[int, int]:
+        """
+        批量打分
+        
+        Args:
+            batch: 问答对批次
+            scoring_prompt: 打分提示词
+        """
+        # 构建批量请求
+        qa_list = []
+        id_mapping: Dict[str, QaPair] = {}
+        sequence = 1
+        for qa in batch:
+            if qa.images:  # 包含图片的直接给高分
+                qa.score = 6
+                continue
+            short_id = str(sequence)
+            sequence += 1
+            id_mapping[short_id] = qa
+            
+            messages_str = ""
+            for msg in qa.messages:
+                if msg.role == "user":
+                    messages_str += f"Q: {msg.content}\n"
+                elif msg.role == "assistant":
+                    messages_str += f"A: {msg.content}\n"
+            
+            qa_list.append({
+                "id": short_id,
+                "Q": next((msg.content for msg in qa.messages if msg.role == "user"), ""),
+                "A": next((msg.content for msg in qa.messages if msg.role == "assistant"), "")
+            })
+        
+        if not qa_list:
+            return 0, 0
+            
+        qa_list_json = json.dumps(qa_list, ensure_ascii=False)
+        prompt_text = f"{scoring_prompt}\n\n请评估以下问答对：\n{qa_list_json}"
+        
+        try:
+            response = self.client.chat_completion(
+                messages=[
+                    {"role": "system", "content": scoring_prompt},
+                    {"role": "user", "content": f"请评估以下问答对：\n{qa_list_json}"}
+                ],
+                model=self.model,
+                temperature=config.get("OpenAI_temperature", 0.7),
+                max_tokens=config.get("OpenAI_max_tokens", 10000)
+            )
+
+            usage = response.get("usage") or {}
+            if not usage and response.get("choices"):
+                usage = response["choices"][0].get("usage") or {}
+            prompt_tokens_raw = (
+                usage.get("prompt_tokens")
+                or usage.get("input_tokens")
+                or usage.get("total_prompt_tokens")
+                or usage.get("promptTokens")
+            )
+            completion_tokens_raw = (
+                usage.get("completion_tokens")
+                or usage.get("output_tokens")
+                or usage.get("total_completion_tokens")
+                or usage.get("completionTokens")
+            )
+            try:
+                prompt_tokens = int(prompt_tokens_raw or 0)
+            except (TypeError, ValueError):
+                prompt_tokens = 0
+            try:
+                completion_tokens = int(completion_tokens_raw or 0)
+            except (TypeError, ValueError):
+                completion_tokens = 0
+            # 解析响应
+            content = response.get("choices", [{}])[0].get("message", {}).get("content", "")
+            self._parse_scores(batch, content, id_mapping)
+            return prompt_tokens, completion_tokens
+
+        except Exception as e:
+            # 失败时给默认分数
+            for qa in batch:
+                if qa.score is None:
+                    qa.score = 0
+            raise RuntimeError(f"LLM打分失败: {e}") from e
+    
+    def _parse_scores(self, batch: List[QaPair], content: str, id_mapping: Dict[str, QaPair]) -> None:
+        """
+        解析LLM返回的分数
+        
+        Args:
+            batch: 问答对批次
+            content: LLM返回的内容
+            id_mapping: 短ID到原始问答的映射
+        """
+        try:
+            # 清理内容，移除多余的空白字符
+            content = content.strip()
+            
+            # 尝试解析JSON数组格式
+            if content.startswith('['):
+                scores = json.loads(content)
+                for score_data in scores:
+                    qa_id_raw = score_data.get('id')
+                    qa_id = str(qa_id_raw) if qa_id_raw is not None else None
+                    score = score_data.get('score', 0)
+                    # 确保分数是整数类型
+                    try:
+                        score = int(score)
+                    except (ValueError, TypeError):
+                        score = 0
+                    if qa_id and qa_id in id_mapping:
+                        id_mapping[qa_id].score = score
+            else:
+                # 处理多个JSON对象连在一起的情况
+                # 按行分割并尝试解析每一行
+                lines = [line.strip() for line in content.split('\n') if line.strip()]
+                
+                for line in lines:
+                    # 跳过非JSON行
+                    if not (line.startswith('{') and line.endswith('}')):
+                        continue
+                        
+                    try:
+                        score_data = json.loads(line)
+                        qa_id_raw = score_data.get('id')
+                        qa_id = str(qa_id_raw) if qa_id_raw is not None else None
+                        score = score_data.get('score', 0)
+                        # 确保分数是整数类型
+                        try:
+                            score = int(score)
+                        except (ValueError, TypeError):
+                            score = 0
+                        if qa_id and qa_id in id_mapping:
+                            id_mapping[qa_id].score = score
+                    except json.JSONDecodeError:
+                        # 单行解析失败，继续处理下一行
+                        continue
+                        
+        except json.JSONDecodeError:
+            logger.warning(f"无法解析LLM响应: \n {content}")
+            # 解析失败时给默认分数
+            for qa in batch:
+                if qa.score is None:
+                    qa.score = 0
+    
+    def filter_by_score(self, qa_pairs: List[QaPair]) -> List[QaPair]:
+        """
+        根据分数过滤问答对
+        
+        Args:
+            qa_pairs: 问答对列表
+            
+        Returns:
+            过滤后的问答对列表
+        """
+        filtered = []
+        for qa in qa_pairs:
+            if qa.score is not None:
+                # 确保分数是整数类型，以避免类型比较错误
+                try:
+                    score = int(qa.score)
+                    qa.score = score  # 更新为整数类型
+                    if score >= self.accept_score:
+                        filtered.append(qa)
+                except (ValueError, TypeError):
+                    # 无法转换为整数的分数设为0
+                    qa.score = 0
+                    logger.warning(f"无效分数值已重置为0: {qa.score} (原值: {repr(qa.score)})")
+        
+        logger.info(f"LLM打分过滤完成: {len(filtered)}/{len(qa_pairs)} 个问答对通过筛选")
+        
+        # 统计分数分布
+        scores = [qa.score for qa in qa_pairs if qa.score is not None]
+        if scores:
+            score_series = pd.Series(scores)
+            score_counts = score_series.value_counts().sort_index()
+            logger.info(f"分数分布: {dict(score_counts)}")
+        
+        return filtered
+
+
+# SegmentStrategy类已移除
+
+
+class LLMDataProcessor:
+    """LLM数据处理器主类"""
+    
+    def __init__(self, parser: str = 'scoring', **kwargs):
+        """
+        初始化数据处理器
+        
+        Args:
+            parser: 处理策略类型 ('scoring' 或 'segment')
+            **kwargs: 其他参数
+        """
+        self.parser = parser
+        self.client = OpenAIClient()
+        self.default_cleaner = None
+        
+        # 从配置中读取system prompt
+        self.system_prompt = config.get('system_prompt', '')
+        
+        if parser in {'scoring', 'default'}:
+            accept_score = kwargs.get('accept_score', config.get('accept_score', 2))
+            batch_size = kwargs.get('batch_size', None)
+            workers = kwargs.get('workers', None)
+            self.strategy = LLMScoringStrategy(self.client, accept_score, batch_size, workers)
+            if parser == 'default':
+                self.default_cleaner = DefaultLLMCleaner(
+                    config=config,
+                    qa_cls=QaPair,
+                    message_cls=Message,
+                    system_prompt=self.system_prompt,
+                )
+        elif parser == 'segment':
+            logger.warning("segment策略暂未实现")
+            # 这里可以为未来的segment策略实现预留接口
+            raise NotImplementedError("segment策略暂未实现")
+        else:
+            raise ValueError(f"不支持的处理策略: {parser}")
+    
+    def process_file(self, input_path: str, output_path: str, **kwargs) -> int:
+        """
+        处理文件
+        
+        Args:
+            input_path: 输入文件路径
+            output_path: 输出文件路径
+            **kwargs: 其他参数
+            
+        Returns:
+            处理结果状态码
+        """
+        try:
+            logger.info(f"开始处理文件: {input_path} -> {output_path}")
+            logger.info(f"使用策略: {self.parser}")
+            
+            # 确保输出目录存在
+            os.makedirs(os.path.dirname(output_path), exist_ok=True)
+            
+            if self.parser == 'scoring':
+                return self._process_with_scoring(input_path, output_path, **kwargs)
+            if self.parser == 'default':
+                return self._process_with_default(input_path, output_path, **kwargs)
+            elif self.parser == 'segment':
+                return self._process_with_segment(input_path, output_path, **kwargs)
+            
+        except Exception as e:
+            logger.error(f"文件处理失败: {e}")
+            return 1
+    
+    def _backup_file(self, path: str) -> None:
+        """备份已有文件"""
+        if path and os.path.exists(path):
+            global _BACKUP_NOTICE_SHOWN, _BACKUP_LOG_COUNT
+            backup_dir_cfg = config.get('dataset_backup_dir') or DEFAULT_BACKUP_DIR
+            backup_dir = Path(backup_dir_cfg)
+            if not backup_dir.is_absolute():
+                backup_dir = (PROJECT_ROOT / backup_dir).resolve()
+            backup_dir.mkdir(parents=True, exist_ok=True)
+            timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
+            backup_name = f"{Path(path).name}.{timestamp}.bak"
+            backup_path = backup_dir / backup_name
+            shutil.copy(path, backup_path)
+            relative_path = os.path.relpath(backup_path, PROJECT_ROOT)
+            logger.info(f"已备份文件: {relative_path}")
+            _BACKUP_LOG_COUNT += 1
+            if _BACKUP_LOG_COUNT >= 2 and not _BACKUP_NOTICE_SHOWN:
+                logger.info("分析数据中，请耐心等待1-2分钟")
+                _BACKUP_NOTICE_SHOWN = True
+
+    def _append_qa_pair(self, fp, qa: QaPair) -> None:
+        """追加单个问答对到JSONL文件"""
+        messages = []
+        system_prompt = getattr(qa, 'system_prompt', None)
+        if not system_prompt:
+            system_prompt = getattr(self, 'system_prompt', None)
+        if system_prompt and system_prompt.strip() and system_prompt != "*":
+            messages.append({"role": "system", "content": system_prompt})
+        processed_messages = self._process_messages(qa.messages)
+        messages.extend({"role": msg.role, "content": msg.content} for msg in processed_messages)
+        data = {'messages': messages}
+        if qa.images:
+            data['images'] = qa.images
+        fp.write(json.dumps(data, ensure_ascii=False) + '\n')
+
+    def _process_with_default(self, input_path: str, output_path: str, scored_csv: Optional[str] = None, **kwargs) -> int:
+        """默认结构化 parser，先构建QA再复用打分逻辑"""
+        if not self.default_cleaner:
+            logger.error("LLM清洗失败: 清洗器未初始化")
+            return 1
+        try:
+            # 先备份既有输出，避免构建阶段出错导致原数据丢失
+            self._backup_file(output_path)
+            if scored_csv:
+                self._backup_file(scored_csv)
+
+            qa_pairs = self.default_cleaner.build_qa_pairs(input_path)
+        except Exception as exc:
+            logger.error(f"LLM清洗失败: {exc}")
+            return 1
+        if not qa_pairs:
+            logger.warning("LLM清洗未生成有效问答对")
+            return 1
+        return self._process_with_scoring(
+            input_path=input_path,
+            output_path=output_path,
+            scored_csv=scored_csv,
+            qa_pairs=qa_pairs,
+            skip_backup=True,
+        )
+
+    def _process_with_scoring(
+        self,
+        input_path: str,
+        output_path: str,
+        scored_csv: Optional[str] = None,
+        qa_pairs: Optional[List[QaPair]] = None,
+        skip_backup: bool = False,
+        **kwargs,
+    ) -> int:
+        """
+        使用打分策略处理
+
+        Args:
+            input_path: 输入文件路径
+            output_path: 输出文件路径
+            scored_csv: 完整打分结果CSV路径
+            **kwargs: 其他参数
+
+        Returns:
+            处理结果状态码
+        """
+        try:
+            if qa_pairs is None:
+                qa_pairs = self._load_qa_pairs(input_path)
+
+            if not qa_pairs:
+                logger.warning("没有找到有效的问答对")
+                return 1
+
+            # 备份已有输出文件
+            if not skip_backup:
+                self._backup_file(output_path)
+                if scored_csv:
+                    self._backup_file(scored_csv)
+
+            # 打开输出文件
+            out_fp = open(output_path, 'w', encoding='utf-8')
+            csv_fp = None
+            csv_writer = None
+            if scored_csv:
+                csv_fp = open(scored_csv, 'w', newline='', encoding='utf-8')
+                csv_writer = csv.DictWriter(csv_fp, fieldnames=['id', 'Q', 'A', 'score'])
+                csv_writer.writeheader()
+
+            total = len(qa_pairs)
+            accepted = 0
+
+            def handle_batch(batch: List[QaPair]):
+                nonlocal accepted
+                for qa in batch:
+                    user = next((m.content for m in qa.messages if m.role == 'user'), '')
+                    assistant = next((m.content for m in qa.messages if m.role == 'assistant'), '')
+                    if csv_writer:
+                        csv_writer.writerow({'id': qa.id, 'Q': user, 'A': assistant, 'score': qa.score})
+                    if qa.score is not None and qa.score >= self.strategy.accept_score:
+                        self._append_qa_pair(out_fp, qa)
+                        accepted += 1
+                out_fp.flush()
+                if csv_fp:
+                    csv_fp.flush()
+
+            try:
+                self.strategy.judge(qa_pairs, on_batch_scored=handle_batch)
+            except KeyboardInterrupt:
+                logger.warning("检测到中断，已保存当前进度")
+            finally:
+                out_fp.close()
+                if csv_fp:
+                    csv_fp.close()
+
+            # 分数统计
+            scores = [qa.score for qa in qa_pairs if qa.score is not None]
+            if scores:
+                score_series = pd.Series(scores)
+                score_counts = score_series.value_counts().sort_index()
+                logger.info(f"分数分布: {dict(score_counts)}")
+            logger.info(f"LLM打分过滤完成: {accepted}/{total} 个问答对通过筛选")
+            logger.info(
+                f"LLM累计tokens: 输入 {self.strategy.total_prompt_tokens}，输出 {self.strategy.total_completion_tokens}"
+            )
+            logger.info(f"打分策略处理完成: {output_path}")
+            if scored_csv:
+                logger.info(f"完整打分结果已保存: {scored_csv}")
+            return 0
+
+        except Exception as e:
+            logger.error(f"打分策略处理失败: {e}")
+            return 1
+    
+    def _process_with_segment(self, input_path: str, output_path: str, **kwargs) -> int:
+        """
+        使用句段策略处理
+        
+        Args:
+            input_path: 输入文件路径
+            output_path: 输出文件路径
+            **kwargs: 其他参数
+            
+        Returns:
+            处理结果状态码
+        """
+        logger.warning("segment策略暂未实现")
+        raise NotImplementedError("segment策略暂未实现")
+    
+    def _load_qa_pairs(self, input_path: str) -> List[QaPair]:
+        """
+        加载问答对数据
+        
+        Args:
+            input_path: 输入文件路径或目录路径
+            
+        Returns:
+            问答对列表
+        """
+        qa_pairs = []
+        
+        try:
+            if os.path.isfile(input_path):
+                # 单个文件处理
+                qa_pairs.extend(self._load_qa_pairs_from_file(input_path))
+            elif os.path.isdir(input_path):
+                # 目录处理，遍历所有CSV文件
+                csv_files = []
+                for root, dirs, files in os.walk(input_path):
+                    for file in files:
+                        if file.endswith('.csv'):
+                            csv_files.append(os.path.join(root, file))
+                
+                logger.info(f"找到 {len(csv_files)} 个CSV文件")
+                
+                for csv_file in tqdm(csv_files, desc="加载CSV文件"):
+                    try:
+                        pairs = self._load_qa_pairs_from_csv(csv_file)
+                        qa_pairs.extend(pairs)
+                    except Exception as e:
+                        logger.warning(f"加载CSV文件失败 {csv_file}: {e}")
+                        continue
+            else:
+                logger.error(f"输入路径不存在: {input_path}")
+                return []
+        
+        except Exception as e:
+            logger.error(f"加载问答对失败: {e}")
+            return []
+        
+        logger.info(f"总共加载了 {len(qa_pairs)} 个问答对")
+        return qa_pairs
+    
+    def _load_qa_pairs_from_file(self, file_path: str) -> List[QaPair]:
+        """
+        从单个JSONL文件加载问答对
+        
+        Args:
+            file_path: 文件路径
+            
+        Returns:
+            问答对列表
+        """
+        qa_pairs = []
+        
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                for line_no, line in enumerate(f, 1):
+                    line = line.strip()
+                    if not line:
+                        continue
+                    
+                    try:
+                        data = json.loads(line)
+                        messages = []
+                        
+                        # 解析消息格式
+                        if 'messages' in data:
+                            for msg in data['messages']:
+                                messages.append(Message(
+                                    role=msg.get('role', 'user'),
+                                    content=msg.get('content', '')
+                                ))
+                        elif 'conversations' in data:
+                            # 兼容其他格式
+                            for msg in data['conversations']:
+                                messages.append(Message(
+                                    role=msg.get('from', 'user'),
+                                    content=msg.get('value', '')
+                                ))
+                        
+                        if messages:
+                            qa_pairs.append(QaPair(
+                                id=f"{os.path.basename(file_path)}_{line_no}",
+                                messages=messages,
+                                images=data.get('images', [])
+                            ))
+                    
+                    except json.JSONDecodeError as e:
+                        logger.warning(f"跳过无效JSON行 {line_no}: {e}")
+                        continue
+        
+        except Exception as e:
+            logger.error(f"加载文件失败 {file_path}: {e}")
+            return []
+        
+        return qa_pairs
+    
+    def _load_qa_pairs_from_csv(self, csv_file: str) -> List[QaPair]:
+        """
+        从CSV文件加载问答对
+        
+        Args:
+            csv_file: CSV文件路径
+            
+        Returns:
+            问答对列表
+        """
+        qa_pairs = []
+        
+        try:
+            import pandas as pd
+            df = pd.read_csv(csv_file, encoding='utf-8')
+            
+            # 按时间分组对话
+            conversations = []
+            current_conversation = []
+            
+            for _, row in df.iterrows():
+                # 检查必要字段
+                if pd.isna(row.get('msg', '')) or pd.isna(row.get('is_sender', '')):
+                    continue
+                
+                content = str(row['msg']).strip()
+                is_sender = row.get('is_sender', 0)
+                
+                if not content:
+                    continue
+                
+                # 判断角色：is_sender=1表示发送者（助手），is_sender=0表示接收者（用户）
+                role = 'assistant' if is_sender == 1 else 'user'
+                
+                current_conversation.append(Message(role=role, content=content))
+                
+                # 简单的对话分割逻辑：当遇到用户消息且当前对话不为空时，结束当前对话
+                if role == 'user' and len(current_conversation) > 1:
+                    if current_conversation[-2].role == 'assistant':
+                        # 保存当前对话（去掉最后一条用户消息）
+                        if len(current_conversation) > 1:
+                            conversations.append(current_conversation[:-1])
+                        # 开始新对话
+                        current_conversation = [current_conversation[-1]]
+            
+            # 添加最后一个对话
+            if current_conversation:
+                conversations.append(current_conversation)
+            
+            # 转换为QaPair格式
+            for i, conv in enumerate(conversations):
+                if len(conv) >= 2:  # 至少要有一问一答
+                    qa_pairs.append(QaPair(
+                        id=f"{os.path.basename(csv_file)}_{i}",
+                        messages=conv
+                    ))
+        
+        except Exception as e:
+            logger.error(f"处理CSV文件失败 {csv_file}: {e}")
+            return []
+        
+        return qa_pairs
+    
+    def _load_conversations(self, input_path: str) -> List[Dict[str, Any]]:
+        """
+        加载对话数据
+        
+        Args:
+            input_path: 输入文件路径
+            
+        Returns:
+            对话列表
+        """
+        conversations = []
+        
+        try:
+            with open(input_path, 'r', encoding='utf-8') as f:
+                for line_no, line in enumerate(f, 1):
+                    line = line.strip()
+                    if not line:
+                        continue
+                    
+                    try:
+                        data = json.loads(line)
+                        if 'messages' in data:
+                            conversations.append(data)
+                    
+                    except json.JSONDecodeError as e:
+                        logger.warning(f"跳过无效JSON行 {line_no}: {e}")
+                        continue
+        
+        except FileNotFoundError:
+            logger.error(f"输入文件不存在: {input_path}")
+            return []
+        except Exception as e:
+            logger.error(f"加载对话失败: {e}")
+            return []
+        
+        logger.info(f"加载了 {len(conversations)} 个对话")
+        return conversations
+    
+    def _save_qa_pairs(self, qa_pairs: List[QaPair], output_path: str) -> None:
+        """
+        保存问答对数据
+
+        Args:
+            qa_pairs: 问答对列表
+            output_path: 输出文件路径
+        """
+        try:
+            with open(output_path, 'w', encoding='utf-8') as f:
+                for qa in qa_pairs:
+                    # 构建完整的messages列表，包含system prompt
+                    messages = []
+                    
+                    # 添加系统提示（如果有且不为空）
+                    system_prompt = getattr(self, 'system_prompt', None)
+                    if system_prompt and system_prompt.strip() and system_prompt != "*":
+                        messages.append({"role": "system", "content": system_prompt})
+                    
+                    # 合并连续的user消息并处理空格符
+                    processed_messages = self._process_messages(qa.messages)
+                    
+                    # 添加处理后的对话消息
+                    messages.extend([
+                        {'role': msg.role, 'content': msg.content}
+                        for msg in processed_messages
+                    ])
+                    
+                    data = {
+                        'messages': messages
+                    }
+                    if qa.images:
+                        data['images'] = qa.images
+                    # 移除score字段，不保存到输出
+                    
+                    f.write(json.dumps(data, ensure_ascii=False) + '\n')
+            
+            logger.info(f"保存了 {len(qa_pairs)} 个问答对到 {output_path}")
+            
+        except Exception as e:
+            logger.error(f"保存问答对失败: {e}")
+            raise
+    
+    def _process_messages(self, messages: List[Message]) -> List[Message]:
+        """
+        处理消息：合并连续的相同角色消息并替换空格符为\n
+        
+        Args:
+            messages: 原始消息列表
+            
+        Returns:
+            处理后的消息列表
+        """
+        if not messages:
+            return []
+        
+        processed_messages = []
+        current_role_content = []
+        current_role = None
+        
+        for msg in messages:
+            cleaned_content = self._replace_spaces_with_newlines(msg.content)
+            
+            if msg.role == current_role:
+                # 收集连续的相同角色消息内容
+                current_role_content.append(cleaned_content)
+            else:
+                # 处理之前收集的相同角色消息
+                if current_role_content and current_role:
+                    combined_content = "\n".join(current_role_content)
+                    processed_messages.append(Message(role=current_role, content=combined_content))
+                
+                # 开始收集新角色的消息
+                current_role = msg.role
+                current_role_content = [cleaned_content]
+        
+        # 处理最后剩余的相同角色消息
+        if current_role_content and current_role:
+            combined_content = "\n".join(current_role_content)
+            processed_messages.append(Message(role=current_role, content=combined_content))
+        
+        return processed_messages
+    
+    def _replace_spaces_with_newlines(self, content: str) -> str:
+        """
+        将句子中的空格符替换为\n
+        
+        Args:
+            content: 原始内容
+            
+        Returns:
+            处理后的内容
+        """
+        if not content:
+            return content
+        
+        # 将连续的空格替换为单个换行符
+        # 保留标点符号后的空格，避免破坏句子结构
+        content = re.sub(r'[。！？；，、：] +', lambda m: m.group(0)[0] + '\n', content)
+        # 处理普通空格
+        content = re.sub(r' +', '\n', content)
+        
+        return content.strip()
+    
+    def _save_conversations(self, conversations: List[Dict[str, Any]], output_path: str) -> None:
+        """
+        保存对话数据
+
+        Args:
+            conversations: 对话列表
+            output_path: 输出文件路径
+        """
+        try:
+            with open(output_path, 'w', encoding='utf-8') as f:
+                for conv in conversations:
+                    # 处理对话中的消息
+                    if 'messages' in conv:
+                        messages = [Message(role=msg.get('role', 'user'), content=msg.get('content', ''))
+                                   for msg in conv['messages']]
+                        processed_messages = self._process_messages(messages)
+                        
+                        # 转换为字典格式
+                        conv_data = {
+                            'messages': [
+                                {'role': msg.role, 'content': msg.content}
+                                for msg in processed_messages
+                            ]
+                        }
+                        f.write(json.dumps(conv_data, ensure_ascii=False) + '\n')
+                    else:
+                        f.write(json.dumps(conv, ensure_ascii=False) + '\n')
+            
+            logger.info(f"保存了 {len(conversations)} 个对话到 {output_path}")
+            
+        except Exception as e:
+            logger.error(f"保存对话失败: {e}")
+            raise
+
+
+def main():
+    """主函数"""
+    parser = argparse.ArgumentParser(description='LLM数据清洗工具')
+    parser.add_argument('--input', '-i', required=True, help='输入文件路径')
+    parser.add_argument('--output', '-o', required=True, help='输出文件路径')
+    parser.add_argument('--parser', '-p', choices=['scoring', 'segment'], default='scoring',
+                       help='处理策略: scoring(打分策略) 或 segment(句段策略)')
+    parser.add_argument('--accept-score', type=int, default=2,
+                       help='可接受的最低分数阈值(仅用于scoring策略)')
+    parser.add_argument('--batch-size', type=int, default=10,
+                       help='批处理大小')
+    
+    args = parser.parse_args()
+    
+    # 创建处理器
+    processor = LLMDataProcessor(
+        parser=args.parser,
+        accept_score=args.accept_score,
+        batch_size=args.batch_size
+    )
+    
+    # 处理文件
+    result = processor.process_file(args.input, args.output)
+    
+    if result == 0:
+        logger.info("处理完成")
+    else:
+        logger.error("处理失败")
+    
+    return result
+
+
+if __name__ == '__main__':
+    sys.exit(main())

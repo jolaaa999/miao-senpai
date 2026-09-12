@@ -1,0 +1,576 @@
+"""
+配置管理命令
+
+提供配置文件的初始化、查看、设置和验证功能。
+支持交互式配置向导和配置模板系统。
+"""
+
+import os
+import json
+import shutil
+import argparse
+from typing import Dict, Any, Optional
+from pathlib import Path
+
+from ..core.base import BaseCommand
+from ..core.exceptions import ConfigurationError, ValidationError, FileOperationError
+from ..core.helpers import confirm_action, format_file_size
+from utils.config.config import get_config, ConfigError
+
+
+class ConfigCommand(BaseCommand):
+    """配置管理命令"""
+    
+    def __init__(self):
+        super().__init__("config", "配置管理")
+        self.config_file = "setting.jsonc"
+        self.template_file = "setting_template.jsonc"
+    
+    def execute(self, args: argparse.Namespace) -> int:
+        """执行配置命令"""
+        action = getattr(args, 'config_action', None)
+        
+        if action == 'init':
+            return self._init_config(args)
+        elif action == 'show':
+            return self._show_config(args)
+        elif action == 'set':
+            return self._set_config(args)
+        elif action == 'validate':
+            return self._validate_config(args)
+        else:
+            self.logger.error("未指定配置操作")
+            return 1
+    
+    def _init_config(self, args: argparse.Namespace) -> int:
+        """初始化配置文件"""
+        try:
+            # 检查配置文件是否已存在
+            if os.path.exists(self.config_file):
+                # 如果有--force参数，直接覆盖
+                if getattr(args, 'force', False):
+                    self.logger.info(f"强制覆盖配置文件: {self.config_file}")
+                else:
+                    # 尝试获取用户确认
+                    try:
+                        if not confirm_action(f"配置文件 {self.config_file} 已存在，是否覆盖？", False):
+                            self.logger.info("取消配置初始化")
+                            return 0
+                    except Exception as e:
+                        self.logger.error(f"用户确认失败: {e}")
+                        self.logger.info("配置文件已存在，但无法获取用户确认")
+                        self.logger.info("请使用 --force 参数强制覆盖，或在交互式终端中运行")
+                        return 1
+            
+            # 选择配置模板
+            template_type = getattr(args, 'template', 'basic')
+            
+            if args.interactive:
+                return self._interactive_init(template_type)
+            else:
+                return self._template_init(template_type)
+                
+        except Exception as e:
+            import traceback
+            self.logger.error(f"初始化配置失败: {e}")
+            self.logger.debug(f"详细错误信息: {traceback.format_exc()}")
+            return 1
+    
+    def _template_init(self, template_type: str) -> int:
+        """使用模板初始化配置"""
+        try:
+            if not os.path.exists(self.template_file):
+                self.logger.error(f"配置模板文件不存在: {self.template_file}")
+                return 1
+            
+            # 复制模板文件
+            shutil.copy2(self.template_file, self.config_file)
+            
+            # 根据模板类型进行定制
+            if template_type == 'advanced':
+                self._customize_advanced_config()
+            
+            self.logger.info(f"配置文件已创建: {self.config_file}")
+            self.logger.info("请编辑配置文件以符合您的需求")
+            
+            return 0
+            
+        except Exception as e:
+            raise ConfigurationError(f"创建配置文件失败: {e}")
+    
+    def _interactive_init(self, template_type: str) -> int:
+        """交互式配置初始化"""
+        try:
+            self.logger.info("开始交互式配置向导...")
+            
+            # 首先检查stdin状态
+            import sys
+            self.logger.debug(f"stdin状态检查 - isatty: {sys.stdin.isatty()}, closed: {sys.stdin.closed}")
+            
+            if sys.stdin.closed:
+                self.logger.error("标准输入已关闭，无法进行交互式配置")
+                self.logger.info("请使用非交互模式: python cli.py config init")
+                return 1
+            
+            config_data = self._get_template_config()
+            
+            # 基础配置
+            print("\n=== 基础配置 ===")
+            config_data = self._configure_basic_settings(config_data)
+            
+            # 模型配置  
+            print("\n=== 模型配置 ===")
+            config_data = self._configure_model_settings(config_data)
+            
+            # 数据配置
+            print("\n=== 数据配置 ===")
+            config_data = self._configure_data_settings(config_data)
+            
+            if template_type == 'advanced':
+                # 高级配置
+                print("\n=== 高级配置 ===")
+                config_data = self._configure_advanced_settings(config_data)
+            
+            # 保存配置
+            self._save_config(config_data)
+            
+            self.logger.info(f"交互式配置完成，配置文件已保存: {self.config_file}")
+            return 0
+            
+        except Exception as e:
+            import traceback
+            self.logger.error(f"交互式配置失败: {e}")
+            self.logger.debug(f"详细错误信息: {traceback.format_exc()}")
+            return 1
+    
+    def _get_template_config(self) -> Dict[str, Any]:
+        """获取模板配置"""
+        if os.path.exists(self.template_file):
+            try:
+                with open(self.template_file, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                
+                # 简单的JSONC处理（移除注释）
+                lines = content.split('\n')
+                cleaned_lines = []
+                for line in lines:
+                    if '//' in line and not line.strip().startswith('"'):
+                        line = line[:line.index('//')]
+                    if line.strip():
+                        cleaned_lines.append(line)
+                
+                cleaned_content = '\n'.join(cleaned_lines)
+                return json.loads(cleaned_content)
+                
+            except Exception as e:
+                self.logger.warning(f"无法读取模板文件: {e}")
+        
+        # 默认配置
+        return {
+            "repoid": "Qing-Agent",
+            "branch": "main", 
+            "version": "0.1.0",
+            "model_args": {},
+            "logger_args": {},
+            "data_args": {}
+        }
+    
+    def _configure_basic_settings(self, config_data: Dict[str, Any]) -> Dict[str, Any]:
+        """配置基础设置"""
+        # 项目信息
+        repo_id = self._safe_input(f"项目ID [{config_data.get('repoid', 'Qing-Agent')}]: ")
+        if repo_id:
+            config_data['repoid'] = repo_id
+        
+        version = self._safe_input(f"版本号 [{config_data.get('version', '0.1.0')}]: ")
+        if version:
+            config_data['version'] = version
+        
+        # 日志配置
+        log_level = self._safe_input("日志级别 (DEBUG/INFO/WARNING/ERROR) [INFO]: ")
+        if log_level and log_level.upper() in ['DEBUG', 'INFO', 'WARNING', 'ERROR']:
+            if 'logger_args' not in config_data:
+                config_data['logger_args'] = {}
+            config_data['logger_args']['log_level'] = log_level.upper()
+        
+        language = self._safe_input("界面语言 (zhcn/en) [zhcn]: ")
+        if language and language in ['zhcn', 'en']:
+            if 'logger_args' not in config_data:
+                config_data['logger_args'] = {}
+            config_data['logger_args']['language'] = language
+        
+        return config_data
+    
+    def _configure_model_settings(self, config_data: Dict[str, Any]) -> Dict[str, Any]:
+        """配置模型设置"""
+        if 'model_args' not in config_data:
+            config_data['model_args'] = {}
+        
+        model_path = self._safe_input("基础模型路径 [./model/Qwen3-8B-Base]: ")
+        if model_path:
+            config_data['model_args']['model_path'] = model_path
+        
+        template = self._safe_input("模型模板 (qwen/llama/chatglm) [qwen]: ")
+        if template:
+            config_data['model_args']['template'] = template
+        
+        return config_data
+    
+    def _configure_data_settings(self, config_data: Dict[str, Any]) -> Dict[str, Any]:
+        """配置数据设置"""
+        if 'data_args' not in config_data:
+            config_data['data_args'] = {}
+        
+        # QQ数据配置
+        qq_c2c_db_path = self._safe_input("QQ私聊数据库路径(c2c_msg_table) [./data/chat/qq/original/qq.db]: ")
+        if qq_c2c_db_path:
+            if 'qq_agrs' not in config_data['data_args']:
+                config_data['data_args']['qq_agrs'] = {}
+            config_data['data_args']['qq_agrs']['qq_c2c_db_path'] = qq_c2c_db_path
+
+        qq_group_db_path = self._safe_input("QQ群聊数据库路径(group_msg_table，可选) [./data/chat/qq/original/group_msg_table.sql]: ")
+        if qq_group_db_path:
+            if 'qq_agrs' not in config_data['data_args']:
+                config_data['data_args']['qq_agrs'] = {}
+            config_data['data_args']['qq_agrs']['qq_group_db_path'] = qq_group_db_path
+        
+        qq_number = self._safe_input("AI对应的QQ号码: ")
+        if qq_number:
+            if 'qq_agrs' not in config_data['data_args']:
+                config_data['data_args']['qq_agrs'] = {}
+            config_data['data_args']['qq_agrs']['qq_number_ai'] = qq_number
+        
+        # 数据清洗配置
+        clean_method = self._safe_input("数据清洗方法 (raw/llm) [raw]: ")
+        if clean_method and clean_method in ['raw', 'llm']:
+            if 'clean_set_args' not in config_data['data_args']:
+                config_data['data_args']['clean_set_args'] = {}
+            config_data['data_args']['clean_set_args']['clean_method'] = clean_method
+        
+        return config_data
+    
+    def _configure_advanced_settings(self, config_data: Dict[str, Any]) -> Dict[str, Any]:
+        """配置高级设置"""
+        # 训练配置
+        if 'train_sft_args' not in config_data['data_args']:
+            config_data['data_args']['train_sft_args'] = {}
+        
+        lora_r = self._safe_input("LoRA rank [16]: ")
+        if lora_r and lora_r.isdigit():
+            config_data['data_args']['train_sft_args']['lora_r'] = int(lora_r)
+        
+        lora_alpha = self._safe_input("LoRA alpha [32]: ")
+        if lora_alpha and lora_alpha.isdigit():
+            config_data['data_args']['train_sft_args']['lora_alpha'] = int(lora_alpha)
+        
+        batch_size = self._safe_input("训练批大小 [1]: ")
+        if batch_size and batch_size.isdigit():
+            config_data['data_args']['train_sft_args']['tper_device_train_batch_size'] = int(batch_size)
+        
+        return config_data
+    
+    def _safe_input(self, prompt: str, default: str = "") -> Optional[str]:
+        """安全的输入函数，处理 I/O 异常"""
+        try:
+            import sys
+            # 检查标准输入是否可用
+            if not sys.stdin.isatty():
+                self.logger.warning(f"非交互式环境，跳过输入: {prompt.strip()}")
+                return default
+            
+            response = input(prompt)
+            return response.strip() if response else default
+            
+        except (EOFError, KeyboardInterrupt):
+            self.logger.info("用户取消输入")
+            return None
+        except Exception as e:
+            self.logger.warning(f"输入错误 ({e})，使用默认值")
+            return default
+    
+    def _save_config(self, config_data: Dict[str, Any]) -> None:
+        """保存配置到文件"""
+        try:
+            with open(self.config_file, 'w', encoding='utf-8') as f:
+                json.dump(config_data, f, ensure_ascii=False, indent=4)
+        except Exception as e:
+            raise FileOperationError(f"保存配置文件失败: {e}", self.config_file, "write")
+    
+    def _customize_advanced_config(self) -> None:
+        """定制高级配置"""
+        # 高级配置的特殊处理逻辑
+        pass
+    
+    def _show_config(self, args: argparse.Namespace) -> int:
+        """显示当前配置"""
+        try:
+            format_type = getattr(args, 'format', 'table')
+            
+            config = get_config()
+            config_data = config.all()
+            
+            if format_type == 'json':
+                self._show_config_json(config_data)
+            elif format_type == 'yaml':
+                self._show_config_yaml(config_data)
+            else:  # table
+                self._show_config_table(config_data)
+            
+            return 0
+            
+        except Exception as e:
+            self.logger.error(f"显示配置失败: {e}")
+            return 1
+    
+    def _show_config_json(self, config_data: Dict[str, Any]) -> None:
+        """以JSON格式显示配置"""
+        self.logger.info("显示配置：JSON格式")
+        print(json.dumps(config_data, ensure_ascii=False, indent=2))
+    
+    def _show_config_yaml(self, config_data: Dict[str, Any]) -> None:
+        """以YAML格式显示配置"""
+        try:
+            import yaml
+            self.logger.info("显示配置：YAML格式")
+            print(yaml.dump(config_data, allow_unicode=True, default_flow_style=False))
+        except ImportError:
+            self.logger.warning("YAML模块未安装，使用JSON格式显示")
+            self._show_config_json(config_data)
+    
+    def _show_config_table(self, config_data: Dict[str, Any]) -> None:
+        """以表格格式显示配置"""
+        self.logger.info("显示配置：表格格式")
+        print("当前配置:")
+        print("-" * 80)
+        
+        self._print_config_section("基础配置", {
+            "项目ID": config_data.get('repoid'),
+            "分支": config_data.get('branch'),
+            "版本": config_data.get('version'),
+        })
+        
+        self._print_config_section("模型配置", {
+            "模型路径": config_data.get('model_path'),
+            "模型仓库": config_data.get('model_repo'),
+            "模板": config_data.get('template'),
+            "微调类型": config_data.get('finetuning_type'),
+        })
+        
+        self._print_config_section("日志配置", {
+            "日志级别": config_data.get('log_level'),
+            "语言": config_data.get('language'),
+        })
+        
+        self._print_config_section("数据配置", {
+            "QQ私聊数据库": config_data.get('qq_c2c_db_path') or config_data.get('qq_db_path'),
+            "QQ群聊数据库": config_data.get('qq_group_db_path'),
+            "QQ号码": config_data.get('qq_number_ai'),
+            "清洗方法": config_data.get('clean_method'),
+        })
+        
+        # 显示配置文件信息
+        if os.path.exists(self.config_file):
+            file_stat = os.stat(self.config_file)
+            self.logger.info(f"配置文件信息: {self.config_file}")
+            print(f"\n配置文件: {self.config_file}")
+            print(f"文件大小: {format_file_size(file_stat.st_size)}")
+            print(f"修改时间: {file_stat.st_mtime}")
+    
+    def _print_config_section(self, title: str, items: Dict[str, Any]) -> None:
+        """打印配置部分"""
+        print(f"\n{title}:")
+        for key, value in items.items():
+            if value is not None:
+                print(f"  {key:<15}: {value}")
+    
+    def _set_config(self, args: argparse.Namespace) -> int:
+        """设置配置项"""
+        try:
+            key = args.key
+            value = args.value
+            
+            # 验证配置键
+            if not self._is_valid_config_key(key):
+                self.logger.error(f"无效的配置键: {key}")
+                return 1
+            
+            # 类型转换
+            converted_value = self._convert_config_value(key, value)
+            
+            # 设置配置
+            config = get_config()
+            config.set(key, converted_value)
+            
+            self.logger.info(f"配置项已更新: {key} = {converted_value}")
+            
+            # 保存当前的键值对以便保存时使用
+            self._current_key = key
+            self._current_value = converted_value
+            
+            # 保存到文件
+            self._save_current_config()
+            self.logger.info("配置已保存到文件")
+            
+            return 0
+            
+        except Exception as e:
+            self.logger.error(f"设置配置失败: {e}")
+            return 1
+    
+    def _is_valid_config_key(self, key: str) -> bool:
+        """验证配置键是否有效"""
+        valid_keys = [
+            'log_level', 'language', 'model_path', 'model_repo', 'template',
+            'qq_c2c_db_path', 'qq_group_db_path', 'qq_db_path', 'qq_number_ai', 'clean_method', 'data_path',
+            'lora_r', 'lora_alpha', 'batch_size', 'learning_rate'
+        ]
+        return key in valid_keys
+    
+    def _convert_config_value(self, key: str, value: str) -> Any:
+        """转换配置值类型"""
+        # 布尔值
+        if key in ['trust_remote_code', 'use_qlora', 'fp16'] and value.lower() in ['true', 'false']:
+            return value.lower() == 'true'
+        
+        # 整数值
+        if key in ['lora_r', 'lora_alpha', 'batch_size', 'max_steps', 'logging_steps', 'save_steps']:
+            try:
+                return int(value)
+            except ValueError:
+                raise ValidationError(f"配置项 {key} 需要整数值")
+        
+        # 浮点数值
+        if key in ['learning_rate', 'lora_dropout']:
+            try:
+                return float(value)
+            except ValueError:
+                raise ValidationError(f"配置项 {key} 需要浮点数值")
+        
+        # 字符串值
+        return value
+    
+    def _save_current_config(self) -> None:
+        """保存当前配置到文件"""
+        try:
+            # 读取原始 setting.jsonc 文件
+            if not os.path.exists(self.config_file):
+                self.logger.error(f"配置文件不存在: {self.config_file}")
+                return
+                
+            # 读取现有配置文件
+            with open(self.config_file, 'r', encoding='utf-8') as f:
+                content = f.read()
+            
+            # 解析 JSONC
+            lines = content.split('\n')
+            cleaned_lines = []
+            in_string = False
+            
+            for line in lines:
+                cleaned_line = ""
+                i = 0
+                while i < len(line):
+                    char = line[i]
+                    
+                    if char == '"' and (i == 0 or line[i-1] != '\\'):
+                        in_string = not in_string
+                    
+                    if not in_string and i < len(line) - 1 and line[i:i+2] == '//':
+                        break
+                    
+                    cleaned_line += char
+                    i += 1
+                
+                cleaned_line = cleaned_line.rstrip()
+                if cleaned_line:
+                    cleaned_lines.append(cleaned_line)
+            
+            cleaned_content = '\n'.join(cleaned_lines)
+            original_data = json.loads(cleaned_content)
+            
+            # 获取当前配置
+            config = get_config()
+            updated_value = config.get(getattr(self, '_current_key', None))
+            
+            # 更新对应的配置项
+            if hasattr(self, '_current_key') and hasattr(self, '_current_value'):
+                key = self._current_key
+                value = self._current_value
+                
+                # 根据键名更新对应的配置
+                if key == 'log_level':
+                    original_data['log_level'] = value
+                elif key == 'language':
+                    original_data['language'] = value
+                elif key == 'model_path':
+                    original_data['model_path'] = value
+                elif key == 'model_repo':
+                    original_data['model_repo'] = value
+                elif key == 'template':
+                    original_data['template'] = value
+                # 更多配置项可以在这里添加
+            
+            # 保存更新后的配置
+            with open(self.config_file, 'w', encoding='utf-8') as f:
+                json.dump(original_data, f, ensure_ascii=False, indent=4)
+                
+        except Exception as e:
+            raise FileOperationError(f"保存配置失败: {e}", self.config_file, "write")
+    
+    def _organize_config_data(self, flat_data: Dict[str, Any]) -> Dict[str, Any]:
+        """重新组织平坦的配置数据为嵌套结构"""
+        # 这里需要根据实际的配置结构进行组织
+        # 简化版本，直接返回平坦数据
+        return flat_data
+    
+    def _validate_config(self, args: argparse.Namespace) -> int:
+        """验证配置有效性"""
+        try:
+            # 检查配置文件是否存在
+            if not os.path.exists(self.config_file):
+                self.logger.error(f"配置文件不存在: {self.config_file}")
+                return 1
+            
+            # 尝试加载配置
+            try:
+                config = get_config()
+                self.logger.info("配置文件格式正确")
+            except ConfigError as e:
+                self.logger.error(f"配置文件格式错误: {e}")
+                return 1
+            
+            # 验证关键配置项
+            validation_errors = []
+            
+            # 验证模型路径
+            model_path = config.get('model_path')
+            if model_path and not os.path.exists(model_path):
+                validation_errors.append(f"模型路径不存在: {model_path}")
+            
+            # 验证数据路径
+            qq_c2c_db_path = config.get('qq_c2c_db_path') or config.get('qq_db_path')
+            qq_group_db_path = config.get('qq_group_db_path')
+
+            if qq_c2c_db_path and not os.path.exists(os.path.dirname(qq_c2c_db_path)):
+                validation_errors.append(f"QQ私聊数据库目录不存在: {os.path.dirname(qq_c2c_db_path)}")
+            if qq_group_db_path and not os.path.exists(os.path.dirname(qq_group_db_path)):
+                validation_errors.append(f"QQ群聊数据库目录不存在: {os.path.dirname(qq_group_db_path)}")
+            
+            # 验证日志级别
+            log_level = config.get('log_level')
+            if log_level not in ['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL']:
+                validation_errors.append(f"无效的日志级别: {log_level}")
+            
+            # 报告验证结果
+            if validation_errors:
+                self.logger.error("配置验证失败:")
+                for error in validation_errors:
+                    self.logger.error(f"  - {error}")
+                return 1
+            else:
+                self.logger.info("配置验证通过")
+                return 0
+                
+        except Exception as e:
+            self.logger.error(f"配置验证失败: {e}")
+            return 1

@@ -1,0 +1,35 @@
+{
+  "active_id": "gaoleng_ft",
+  "styles": [
+    {
+      "id": "senpai_default",
+      "name": "默认学姐",
+      "kind": "builtin",
+      "enabled": true,
+      "model": "",
+      "base_url": "",
+      "api_key": "",
+      "system_overlay": "",
+      "source_person": "学姐人设",
+      "qq_data_note": "",
+      "trained_model_ref": "",
+      "notes": "使用 .env 全局模型 + persona.py，不切换微调权重",
+      "updated_at": 1789108879.8114166
+    },
+    {
+      "id": "gaoleng_ft",
+      "name": "高冷女神",
+      "kind": "finetune",
+      "enabled": true,
+      "model": "gaoleng-qwen3b",
+      "base_url": "http://127.0.0.1:8001/v1",
+      "api_key": "gaoleng-local",
+      "system_overlay": "你正在用「高冷女神」的说话习惯回复：语气自然、偏口语，不要突然变成客服腔。",
+      "source_person": "高冷女神",
+      "qq_data_note": "QCE 导出 → MirrorFlow raw clean → Qwen2.5-3B LoRA",
+      "trained_model_ref": "E:/LLM/outputs/gaoleng-3b-lora",
+      "notes": "本地 LLaMA-Factory API：MirrorFlow/start_gaoleng_api.ps1 → http://127.0.0.1:8001/v1（3B）",
+      "updated_at": 1789132821.577266
+    }
+  ]
+}

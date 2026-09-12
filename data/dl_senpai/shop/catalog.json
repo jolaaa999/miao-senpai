@@ -1,0 +1,200 @@
+{
+  "items": [
+    {
+      "id": "blue_lolita",
+      "name": "蓝色洛丽塔",
+      "price": 85,
+      "outfit_en": "elegant blue lolita dress with lace ribbons frills and white petticoat, dominant blue fabric",
+      "thumb_prompt": "fashion catalog thumbnail, elegant blue lolita dress on mannequin, soft pastel blue background, no face"
+    },
+    {
+      "id": "pink_lolita",
+      "name": "粉色洛丽塔",
+      "price": 80,
+      "outfit_en": "elegant pink lolita dress with lace ribbons frills and petticoat, dominant pink fabric",
+      "thumb_prompt": "fashion catalog thumbnail, pink lolita dress on mannequin, soft pink background, no face"
+    },
+    {
+      "id": "white_lolita",
+      "name": "白色洛丽塔",
+      "price": 90,
+      "outfit_en": "elegant white lolita dress with lace ribbons and petticoat, pure white fabric",
+      "thumb_prompt": "fashion catalog thumbnail, white lolita dress on mannequin, cream background, no face"
+    },
+    {
+      "id": "black_lolita",
+      "name": "黑色洛丽塔",
+      "price": 85,
+      "outfit_en": "elegant black lolita dress with lace ribbons and petticoat, dominant black fabric",
+      "thumb_prompt": "fashion catalog thumbnail, black lolita dress on mannequin, dark gray background, no face"
+    },
+    {
+      "id": "green_lolita",
+      "name": "绿色洛丽塔",
+      "price": 85,
+      "outfit_en": "vivid emerald green lolita dress with green lace ribbons and petticoat, entire dress bright green",
+      "thumb_prompt": "fashion catalog thumbnail, green lolita dress on mannequin, mint green background, no face"
+    },
+    {
+      "id": "jk_sailor",
+      "name": "JK水手服",
+      "price": 55,
+      "outfit_en": "japanese navy blue sailor school uniform with pleated skirt and white collar",
+      "thumb_prompt": "fashion catalog thumbnail, navy sailor school uniform on mannequin, light blue background, no face"
+    },
+    {
+      "id": "jk_blazer",
+      "name": "JK西装制服",
+      "price": 60,
+      "outfit_en": "japanese school blazer uniform with plaid skirt and ribbon tie",
+      "thumb_prompt": "fashion catalog thumbnail, school blazer uniform on mannequin, beige background, no face"
+    },
+    {
+      "id": "hanfu_pink",
+      "name": "粉色汉服",
+      "price": 75,
+      "outfit_en": "traditional chinese hanfu dress in soft pink with flowing sleeves and embroidery",
+      "thumb_prompt": "fashion catalog thumbnail, pink hanfu on mannequin, peach background, no face"
+    },
+    {
+      "id": "hanfu_blue",
+      "name": "蓝色汉服",
+      "price": 75,
+      "outfit_en": "traditional chinese hanfu dress in sky blue with flowing sleeves and gold embroidery",
+      "thumb_prompt": "fashion catalog thumbnail, blue hanfu on mannequin, pale blue background, no face"
+    },
+    {
+      "id": "qipao_red",
+      "name": "红色旗袍",
+      "price": 70,
+      "outfit_en": "elegant red chinese qipao cheongsam dress with gold trim",
+      "thumb_prompt": "fashion catalog thumbnail, red qipao dress on mannequin, warm beige background, no face"
+    },
+    {
+      "id": "qipao_black",
+      "name": "黑色旗袍",
+      "price": 70,
+      "outfit_en": "elegant black chinese qipao cheongsam dress with subtle floral pattern",
+      "thumb_prompt": "fashion catalog thumbnail, black qipao dress on mannequin, gray background, no face"
+    },
+    {
+      "id": "maid_classic",
+      "name": "经典女仆装",
+      "price": 65,
+      "outfit_en": "classic maid dress with white apron black dress and maid headband",
+      "thumb_prompt": "fashion catalog thumbnail, classic maid dress on mannequin, soft lavender background, no face"
+    },
+    {
+      "id": "maid_pink",
+      "name": "粉色女仆装",
+      "price": 68,
+      "outfit_en": "pink maid dress with white apron and frilled headband",
+      "thumb_prompt": "fashion catalog thumbnail, pink maid dress on mannequin, pink background, no face"
+    },
+    {
+      "id": "gothic_dress",
+      "name": "哥特萝莉裙",
+      "price": 78,
+      "outfit_en": "gothic lolita dress in black and purple with cross lace details and layered skirt",
+      "thumb_prompt": "fashion catalog thumbnail, gothic lolita dress on mannequin, dark purple background, no face"
+    },
+    {
+      "id": "sundress_yellow",
+      "name": "黄色吊带裙",
+      "price": 45,
+      "outfit_en": "light yellow summer sundress with thin straps and floral print",
+      "thumb_prompt": "fashion catalog thumbnail, yellow sundress on mannequin, sunny yellow background, no face"
+    },
+    {
+      "id": "hoodie_casual",
+      "name": "宽松卫衣",
+      "price": 40,
+      "outfit_en": "oversized pastel hoodie with cozy joggers, casual streetwear",
+      "thumb_prompt": "fashion catalog thumbnail, pastel hoodie outfit on mannequin, soft gray background, no face"
+    },
+    {
+      "id": "sweater_knit",
+      "name": "针织毛衣裙",
+      "price": 50,
+      "outfit_en": "cream knit sweater dress with ribbed texture, cozy autumn style",
+      "thumb_prompt": "fashion catalog thumbnail, cream knit sweater dress on mannequin, warm beige background, no face"
+    },
+    {
+      "id": "kimono_floral",
+      "name": "碎花和服",
+      "price": 82,
+      "outfit_en": "japanese floral kimono with wide obi sash in cherry blossom pattern",
+      "thumb_prompt": "fashion catalog thumbnail, floral kimono on mannequin, pale pink background, no face"
+    },
+    {
+      "id": "winter_coat",
+      "name": "毛绒冬大衣",
+      "price": 72,
+      "outfit_en": "fluffy white winter coat with faux fur collar over a cozy dress",
+      "thumb_prompt": "fashion catalog thumbnail, white winter coat on mannequin, icy blue background, no face"
+    },
+    {
+      "id": "sportswear",
+      "name": "运动套装",
+      "price": 42,
+      "outfit_en": "cute pastel sportswear set with zip jacket and shorts",
+      "thumb_prompt": "fashion catalog thumbnail, pastel sportswear on mannequin, mint background, no face"
+    },
+    {
+      "id": "pajamas",
+      "name": "星星睡衣",
+      "price": 38,
+      "outfit_en": "cute star pattern pajama set with fluffy slippers",
+      "thumb_prompt": "fashion catalog thumbnail, star pajama set on mannequin, navy blue background, no face"
+    },
+    {
+      "id": "swimsuit",
+      "name": "夏日泳装",
+      "price": 55,
+      "outfit_en": "cute one-piece swimsuit in coral pink with ribbon details",
+      "thumb_prompt": "fashion catalog thumbnail, coral swimsuit on mannequin, pool blue background, no face"
+    },
+    {
+      "id": "princess_gown",
+      "name": "公主礼服",
+      "price": 95,
+      "outfit_en": "princess ball gown in lavender with layered tulle skirt and crystal tiara",
+      "thumb_prompt": "fashion catalog thumbnail, lavender princess gown on mannequin, soft purple background, no face"
+    },
+    {
+      "id": "witch_dress",
+      "name": "魔女斗篷裙",
+      "price": 88,
+      "outfit_en": "witch style dress with pointed hat mini cape and star motifs in deep purple",
+      "thumb_prompt": "fashion catalog thumbnail, witch dress with hat on mannequin, midnight blue background, no face"
+    },
+    {
+      "id": "idol_stage",
+      "name": "偶像演出服",
+      "price": 92,
+      "outfit_en": "sparkling idol stage outfit with frilled skirt microphone headset and ribbons",
+      "thumb_prompt": "fashion catalog thumbnail, idol stage costume on mannequin, stage light background, no face"
+    },
+    {
+      "id": "cyber_jacket",
+      "name": "机能风夹克",
+      "price": 68,
+      "outfit_en": "cyberpunk techwear jacket with neon accents shorts and leg straps",
+      "thumb_prompt": "fashion catalog thumbnail, cyber techwear jacket outfit on mannequin, dark teal background, no face"
+    },
+    {
+      "id": "denim_jacket",
+      "name": "牛仔外套裙",
+      "price": 48,
+      "outfit_en": "light denim jacket over white t-shirt with denim skirt, casual spring outfit",
+      "thumb_prompt": "fashion catalog thumbnail, denim jacket outfit on mannequin, sky blue background, no face"
+    },
+    {
+      "id": "christmas_dress",
+      "name": "圣诞红裙",
+      "price": 76,
+      "outfit_en": "festive red christmas dress with white fur trim and holly brooch",
+      "thumb_prompt": "fashion catalog thumbnail, red christmas dress on mannequin, snowy white background, no face"
+    }
+  ]
+}

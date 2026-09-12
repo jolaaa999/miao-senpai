@@ -1,0 +1,19 @@
+[
+  {
+    "id": "9757fa25fecd5a98",
+    "segment_type": "mface",
+    "segment_data": {
+      "summary": "[动画表情]",
+      "emoji_id": "42"
+    },
+    "context_text": "摸鱼 继续摸鱼",
+    "keywords": [
+      "摸鱼",
+      "继续摸鱼"
+    ],
+    "use_count": 0,
+    "collected_at": "2026-09-09T03:10:05+00:00",
+    "source_user": "小明",
+    "local_path": ""
+  }
+]

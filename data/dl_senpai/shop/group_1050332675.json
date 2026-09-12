@@ -1,0 +1,20 @@
+{
+  "slots": [
+    "princess_gown",
+    "green_lolita",
+    "hoodie_casual"
+  ],
+  "current_outfit_id": "black_lolita",
+  "slots_refresh_day": "2026-08-24",
+  "user_warehouses": {
+    "2843422418": [
+      {
+        "item_id": "black_lolita",
+        "buyer_id": "2843422418",
+        "buyer_name": "失语.",
+        "purchased_at": "2026-08-24T17:45:55.404998+08:00"
+      }
+    ]
+  },
+  "updated_at": "2026-08-24T17:45:55.415459+08:00"
+}

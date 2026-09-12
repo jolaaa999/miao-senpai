@@ -1,47 +1,44 @@
+# Python / build
 __pycache__/
 *.py[cod]
 *.egg-info/
 .eggs/
 dist/
 build/
-.venv/
-.venv-*/
-venv/
-MirrorFlow/
-.env
-.env.dev
-.env.local
-.env.*.local
 .pytest_cache/
 .pytest_tmp/
 tests/_tmp_*/
 .mypy_cache/
 .ruff_cache/
-data/
-*.log
+
+# IDE
 .idea/
 .vscode/
 .cursor/
 .claude/
 
-# deps / heavy local stacks (not part of source upload)
-node_modules/
+# ===== 依赖（不上传）=====
+.venv/
+.venv-*/
+venv/
+**/node_modules/
 admin/frontend/node_modules/
 admin/backend/bin/
 admin/backend/*.exe
 onebot-qzone/node_modules/
+onebot-qzone/dist/
+# 第三方语音训练栈 ~18GB
 GPT-SoVITS-v2pro-20250604/
+# MirrorFlow 自己的虚拟环境 ~5GB
+MirrorFlow/.venv/
+# 本机大模型目录
 E:/LLM/
-*.safetensors
-*.bin
-*.pt
-*.pth
-*.onnx
-*.wav
-*.mp3
-*.gguf
 
-# local secrets / caches
+# ===== 密钥 / 登录态 =====
+.env
+.env.dev
+.env.local
+.env.*.local
 **/cookies.json
 **/qrcode.png
 onebot-qzone/test_cache/
@@ -49,8 +46,25 @@ onebot-qzone/test_cache/
 *.key
 credentials.json
 
-# nested deps / caches
-**/node_modules/
-onebot-qzone/node_modules/
-onebot-qzone/test_cache/
-onebot-qzone/dist/
+# ===== 模型权重 / 音频缓存（体积大，可本地再下）=====
+*.safetensors
+*.gguf
+*.pt
+*.pth
+*.onnx
+*.bin
+*.ckpt
+*.wav
+*.mp3
+*.flac
+
+# ===== 运行日志 =====
+*.log
+data/logs/
+
+# build artifacts / temp test dumps
+*.exe
+data/_pytest_*/
+data/test_tmp/
+data/dl_senpai/admin/senpai-console.exe
+data/dl_senpai/admin/console.db

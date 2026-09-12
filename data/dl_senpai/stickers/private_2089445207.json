@@ -1,0 +1,36 @@
+[
+  {
+    "id": "f2e45fdc899a4e0d",
+    "segment_type": "image",
+    "segment_data": {
+      "summary": "[动画表情]",
+      "file": "0F5EF0E0C7E758DAD32DB9361B010022.jpg",
+      "sub_type": 1,
+      "url": "https://multimedia.nt.qq.com.cn/download?appid=1406&fileid=EhT2MT-2TyvDMLKVx2jm7weKGw5J5hii_AUg_goosLKrwNO7lgMyBHByb2RQgLsvWhDJrT5Z2IgW_wm-iaJMjYZ-egKi_IIBAmd6&rkey=CAESMFDIRxEkfsfzw3BxMfsGvRkReMrAwPhzhWjuKcRSDYC4NnSnot1ffi2D58tjV4-bIw",
+      "file_size": "97826"
+    },
+    "context_text": "",
+    "keywords": [],
+    "use_count": 2,
+    "collected_at": "2026-08-25T11:15:36+00:00",
+    "source_user": "临时会话",
+    "local_path": "E:\\PROJECT\\QQBot\\data\\dl_senpai\\stickers\\files\\f2e45fdc899a4e0d.png"
+  },
+  {
+    "id": "69013e0dcdfb390e",
+    "segment_type": "image",
+    "segment_data": {
+      "summary": "[动画表情]",
+      "file": "610D96AD6C82BDA3E34FB937580E19C3.jpg",
+      "sub_type": 1,
+      "url": "https://multimedia.nt.qq.com.cn/download?appid=1406&fileid=EhR479fiHpZYflMy7LyyNOHtU48joxjuuwsg_goo3dGf_9O7lgMyBHByb2RQgLsvWhByJzUNl76rRtywVnPFf-u0egKBhYIBAmd6&rkey=CAESMFDIRxEkfsfzw3BxMfsGvRkReMrAwPhzhWjuKcRSDYC4NnSnot1ffi2D58tjV4-bIw",
+      "file_size": "187886"
+    },
+    "context_text": "",
+    "keywords": [],
+    "use_count": 0,
+    "collected_at": "2026-08-25T11:17:36+00:00",
+    "source_user": "临时会话",
+    "local_path": "E:\\PROJECT\\QQBot\\data\\dl_senpai\\stickers\\files\\69013e0dcdfb390e.jpg"
+  }
+]

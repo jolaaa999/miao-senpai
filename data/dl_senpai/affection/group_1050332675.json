@@ -1,0 +1,29 @@
+{
+  "users": {
+    "2843422418": {
+      "user_id": "2843422418",
+      "display_name": "失语.",
+      "value": 28,
+      "tier_title": "面熟客"
+    },
+    "3430448028": {
+      "user_id": "3430448028",
+      "display_name": "Aeons",
+      "value": 4,
+      "tier_title": "过路人"
+    },
+    "2660998832": {
+      "user_id": "2660998832",
+      "display_name": "又是肖茂！",
+      "value": 2,
+      "tier_title": "围观群众"
+    },
+    "3418039038": {
+      "user_id": "3418039038",
+      "display_name": "策划部 软工2502 郭金铭",
+      "value": 2,
+      "tier_title": "过路人"
+    }
+  },
+  "updated_at": "2026-09-09T11:48:19.038624+08:00"
+}

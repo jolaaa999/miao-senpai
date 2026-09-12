@@ -1,0 +1,26 @@
+[
+  {
+    "id": "5d0dbc1787f74035",
+    "prompt": "高清写实风格的《怪物猎人：世界：冰原》冰呪龙在雪地中张口释放寒冰吐息，冰霜喷涌、周围凝结出冰晶，翅膀展开、长尾扬起，动态战斗姿态，细节清晰，冷蓝色环境光，电影级构图，4K，16:9，无文字，无水印",
+    "scene": "general",
+    "user_request": "生成一张怪物猎人世界冰呪龙，正在吐息的高清图片",
+    "source_user": "姜",
+    "source_user_id": "2843422418",
+    "local_path": "E:\\PROJECT\\QQBot\\data\\dl_senpai\\draw\\files\\5d0dbc1787f74035.png",
+    "model": "gpt-image-2",
+    "size": "1024x1024",
+    "created_at": "2026-08-24T00:07:21+00:00"
+  },
+  {
+    "id": "f03e892fe0594d4c",
+    "prompt": "Monster Hunter: World Iceborne Velkhana, accurate in-game design, slender elegant elder dragon with a long narrow head, crown-like ice crystals on the head and neck, pale blue and silver scales, long slender wings, ice crystals along the tail, standing in an icy Hoarfrost Reach battlefield, facing three-quarters toward the viewer while exhaling a powerful concentrated frost breath from its mouth, visible frozen mist and ice particles, dynamic combat pose, cinematic high-detail game concept art, faithful proportions, no generic western dragon features, no extra limbs, no text, no logo",
+    "scene": "general",
+    "user_request": "生成的不准确，重新生成",
+    "source_user": "姜",
+    "source_user_id": "2843422418",
+    "local_path": "E:\\PROJECT\\QQBot\\data\\dl_senpai\\draw\\files\\f03e892fe0594d4c.png",
+    "model": "gpt-image-2",
+    "size": "1024x1024",
+    "created_at": "2026-08-24T00:13:09+00:00"
+  }
+]

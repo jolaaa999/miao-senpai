@@ -1,0 +1,160 @@
+## 准备环境
+
+1. 创建配置文件
+从模板复制一份配置文件，等会要用上
+```bash
+cp setting_template.jsonc setting.jsonc
+```
+
+2. 安装依赖
+```bash
+pip install -r requirements.txt
+```
+
+## 将数据转化为csv
+```bash
+python cli.py data extract --source-type qq
+# 或自定义parser字段
+python cli.py data extract --qq-c2c-db-path ./data/chat/qq/original/qq.db --qq-number-ai 1234567890
+# 仅群聊(group_msg_table)导出
+python cli.py data extract --qq-group-db-path ./data/chat/qq/original/group_msg_table.sql --qq-number-ai 1234567890
+```
+* 若转化的是QQ数据，则`--qq-number-ai`或者`setting.jsonc`的`qq_number_ai`字段至少要填写一个。TG以此类推
+
+| 参数 | 说明 | 默认值/备注 |
+|------|------|-------------|
+| `-h, --help` | 显示帮助信息并退出 | - |
+| `--source-type {qq,tg,telegram}` | 指定数据源类型 | 不指定则自动检测 |
+| `--data-dir DATA_DIR` | 数据目录路径 | `./data/chat/<source>/original/`（兼容 `./dataset/original/`） |
+| `--output OUTPUT` | 输出目录路径 | `./runs/chat/<run_id>/csv/` |
+| `--run-id RUN_ID` | 指定本次运行ID | 默认自动生成 `YYYYMMDD_HHMMSS[_tag]` |
+| `--run-tag RUN_TAG` | 自动run_id的后缀标签 | 如 `chat_qq` |
+| `--qq-c2c-db-path QQ_C2C_DB_PATH` | QQ私聊(c2c_msg_table)数据库/SQL文件路径 | - |
+| `--qq-group-db-path QQ_GROUP_DB_PATH` | QQ群聊(group_msg_table)数据库/SQL文件路径 | - |
+| `--qq-db-path QQ_DB_PATH` | QQ数据库文件路径（兼容旧参数，等同于--qq-c2c-db-path） | - |
+| `--qq-number-ai QQ_NUMBER_AI` | AI 的 QQ 号码（用于区分发送者） | - |
+| `--telegram-chat-id TELEGRAM_CHAT_ID` | AI 的 Telegram 聊天名称（用于区分发送者） | - |
+| `--tg-data-dir TG_DATA_DIR` | Telegram 数据目录 | 如不指定则使用 `--data-dir` |
+
+
+## 清洗数据(普通版本,llm清洗版本在下一章节)
+> 此方法比llm清洗快得多,30w条消息几秒就好了
+> 但是对应的质量也更低
+> 这个部分建议在windows上优化完再上传至GPU服务器  
+
+* 在 `setting.jsonc` 文件中修改数据库路径及相关参数(请注意其中的必填段)
+* `data_agrs`中的一些字段以及下面的`system prompt`
+* 运行清洗脚本：
+
+```bash
+python cli.py data clean raw
+```
+---
+## 清洗数据(llm清洗)
+> Develop版本正在改进此功能  
+
+> 需要配置一个OpenAI兼容的API  
+> 比如:LM Studio 或者 vLLM(速度更快,但搭建更麻烦,需要Linux环境)  
+
+> 这个部分同样建议在windows上优化完再上传至GPU服务器  
+> 不确定在Linux上有没有兼容性问题
+
+* 前往`setting.jsonc`文件中修改`clean_set_args`组的`openai_api`字段  
+* 设置`api_base` `api_key` `model_name`等字段  
+* 可设置`thinking`字段来开关模型的think功能
+
+### run!
+```bash
+#使用此命令来预估llm使用的token数量
+python cli.py data clean estimate llm
+
+# 打分策略
+python cli.py data clean llm --parser scoring
+
+# 结构化默认策略（带CSV预处理+LLM打分）
+python cli.py data clean llm --parser default
+
+# 设置分数阈值(请使用此命令)
+python cli.py data clean llm --parser scoring --accept-score 4
+# --accept-score 为{1-5}的数字
+
+# 使用句段策略(没写完)
+python cli.py data clean llm --parser segment
+
+# 其他参数
+--input - 输入CSV目录路径（默认: runs/chat/<latest>/csv，兼容 dataset/csv）
+--output - 输出文件路径（默认: runs/chat/<run_id>/sft/train.jsonl）
+--run-id - 指定 runs/chat/<run_id> 作为输入/输出上下文（不指定则自动选择最新run）
+--batch-size - 批处理大小（默认从配置读取）
+--workers - 工作进程数（默认从配置读取）
+--parser - default 会自动执行结构化 CSV→QA→打分（setting.jsonc 的 clean_set_args.llm_parser 也可设置）
+
+# 从已经打分好的scored文件中重新输出数据集(sft.jsonl)
+python cli.py data clean rellm --accept-score 4
+# --accept-score 为{1-5}的数字
+
+```
+> 可以调大`betch_size`来减少api调用次数以缓解速率限制  
+> 不过每次消耗的token会多点  
+
+> 如果遇到了400报错大概率是因为message太大了被模型框架拒绝了
+
+# 以下为不使用云端llm服务清洗使用
+
+## LM Studio搭建教程
+1. 前往[LM Studio](https://lmstudio.ai/)下载LM Studio
+2. 安装LM Studio
+3. 打开LM Studio,点击左侧`搜索`->`Model Search`
+4. 搜索 `qwen2.5-7b-instruct`->`Complete Download`  
+5. 选择合适你的量化版本**建议至少Q4,最好Q6-Q8,随你的设备情况而定,不知道的可以问AI**
+
+    记住你的**模型名称**,填写到`setting.jsonc`文件的`model_name`中
+
+    如果不知道你的模型名称可以运行test_openai.py,会输出所有的模型名称
+6. 安装好后,在左侧`开发者/Developer`点击`Status:Stopped`右边的按钮
+
+    如果下面log显示端口被占用请点击`seetings`换个`server port`
+
+    记住这个`server port`,将你的配置填写至`setting.jsonc`文件中
+
+
+---
+
+## vLLM搭建
+> vLLM需要linux环境!  
+> 如果你的显卡还算可以(>6800xt,>3080)  
+> 可以选择使用lmstudio,多等一会就好了,还可以玩玩模型
+> 缺点是lmstudio不能运行hf模型,且并发很烂
+
+> vLLM比Lm studio吃显存的多! Lm studio可以运行8b_q6到vLLM上只能运行4b_Q6
+
+> 不过并发效率的提升是真的
+
+> 但是!上下文较短  
+> 不过现在应该遇不到那么长的上下文了
+
+> 3080实测4b_q6处理,最终jsonl的速率大约是**300kb/minute**
+* 跟着走就能搭建  
+```bash
+sudo apt update
+sudo apt install python3.10-venv git -y
+
+python3 -m venv vllm_env
+source vllm_env/bin/activate
+
+pip install -U pip
+pip install torch --index-url https://download.pytorch.org/whl/cu121  # 如果你用CUDA
+pip install vllm
+```
+
+### 和lm studio不同的注意点
+*   1.`setting.jsonc`中的`model_name`需要设置路径而不只是文件夹名
+> 是`/home/vllm/qwen3-4b-int8`而非`qwen3-4b-int8`  
+*  2.需要运行的**api_server**是`vllm.entrypoints.openai.api_server`而不是`vllm.entrypoints.api_server`,因为第二个不兼容OpenAI API
+  
+### 运行命令范例
+``` bash v
+python3 -m vllm.entrypoints.openai.api_server --model /home/vllm/qwen3-4b-int8 --gpu-memory-utilization 0.7 --max-model-len 10240 --max-num-seqs 4 --max-num-batched-tokens 2048 --dtype auto
+```
+> 如果遇到了400报错大概率是因为message太大了被模型框架拒绝了
+

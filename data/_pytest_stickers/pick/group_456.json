@@ -1,0 +1,32 @@
+[
+  {
+    "id": "happy",
+    "segment_type": "face",
+    "segment_data": {
+      "id": "1"
+    },
+    "context_text": "今天好开心",
+    "keywords": [
+      "开心"
+    ],
+    "use_count": 1,
+    "collected_at": "",
+    "source_user": "",
+    "local_path": ""
+  },
+  {
+    "id": "sad",
+    "segment_type": "face",
+    "segment_data": {
+      "id": "2"
+    },
+    "context_text": "好难啊",
+    "keywords": [
+      "难"
+    ],
+    "use_count": 0,
+    "collected_at": "",
+    "source_user": "",
+    "local_path": ""
+  }
+]

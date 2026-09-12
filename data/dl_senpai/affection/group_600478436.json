@@ -1,0 +1,35 @@
+{
+  "users": {
+    "2843422418": {
+      "user_id": "2843422418",
+      "display_name": "姜",
+      "value": 54,
+      "tier_title": "常来坐"
+    },
+    "3478943327": {
+      "user_id": "3478943327",
+      "display_name": "moring",
+      "value": 330,
+      "tier_title": "小骄傲"
+    },
+    "2116013769": {
+      "user_id": "2116013769",
+      "display_name": "ch",
+      "value": 2,
+      "tier_title": "围观群众"
+    },
+    "227344715": {
+      "user_id": "227344715",
+      "display_name": "淳",
+      "value": 22,
+      "tier_title": "常露面"
+    },
+    "3342774351": {
+      "user_id": "3342774351",
+      "display_name": "彬",
+      "value": 22,
+      "tier_title": "混脸熟"
+    }
+  },
+  "updated_at": "2026-09-11T10:57:34.115159+08:00"
+}

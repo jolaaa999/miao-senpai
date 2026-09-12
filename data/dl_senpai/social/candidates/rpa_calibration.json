@@ -1,0 +1,20 @@
+{
+  "add_friend_btn": [
+    1273,
+    871
+  ],
+  "send_btn": [
+    -1634,
+    1017
+  ],
+  "verify_field": [
+    1301,
+    923
+  ],
+  "close_btn": [
+    -1601,
+    1031
+  ],
+  "notes": "coords+templates; success needs add gone or pending tpl",
+  "saved_at": "2026-09-11T11:00:01+08:00"
+}

@@ -1,0 +1,38 @@
+[
+  {
+    "id": "9a4d9e6f47594513",
+    "prompt": "一只胖乎乎的橘猫趴在黑色机械键盘上，前爪压着几颗按键，屏幕发出柔和蓝光，温暖室内光线，写实可爱风格，细节清晰",
+    "scene": "general",
+    "user_request": "生成一张橘猫趴在键盘上的图片",
+    "source_user": "失语.",
+    "source_user_id": "2843422418",
+    "local_path": "E:\\PROJECT\\QQBot\\data\\dl_senpai\\draw\\files\\9a4d9e6f47594513.png",
+    "model": "gpt-image-2",
+    "size": "1024x1024",
+    "created_at": "2026-09-06T09:09:13+00:00"
+  },
+  {
+    "id": "51cafd35048444b9",
+    "prompt": "Create a set of 6 square non-photorealistic cartoon group avatars for a cybersecurity class: 1) a cute blue shield mascot protecting a glowing network, 2) a cheerful padlock wearing cyberpunk sunglasses, 3) a stylized terminal window with a small digital shield and green code, 4) a playful cyber fox holding a security key, 5) a colorful circuit-board planet surrounded by tiny security icons, 6) a team of diverse cartoon students debugging a giant firewall. Clean vector illustration, bright cyan, electric blue, lime green and warm yellow palette, bold silhouettes, high contrast, minimal text, centered composition, readable as a small profile image, no realistic style, no brand logos, no weapons, no scary hacker imagery",
+    "scene": "general",
+    "user_request": "我现在正在带网络安全一个班的学生，请你根据这方面的专业，增加部分趣味性，不使用真实风格，给我数张可以用来当做群头像的图片",
+    "source_user": "失语.",
+    "source_user_id": "2843422418",
+    "local_path": "E:\\PROJECT\\QQBot\\data\\dl_senpai\\draw\\files\\51cafd35048444b9.png",
+    "model": "gpt-image-2",
+    "size": "1024x1024",
+    "created_at": "2026-09-06T09:18:47+00:00"
+  },
+  {
+    "id": "cd46a04d8064457d",
+    "prompt": "face reference only: Arknights Angelina inspired, long soft pink hair, fox ears, fluffy fox tail, warm brown eyes, youthful gentle anime face, anime-style selfie portrait, pink long hair, fox ears, brown eyes, energetic gentle girl, simple casual white T-shirt, natural indoor lighting, soft smile, clean colorful background, square composition, no game costume, no red jacket, no backpack, upper body portrait, simple plain casual clothes, not game default costume, soft background",
+    "scene": "appearance",
+    "user_request": "我要看学姐爆照",
+    "source_user": "失语.",
+    "source_user_id": "2843422418",
+    "local_path": "E:\\PROJECT\\QQBot\\data\\dl_senpai\\draw\\files\\cd46a04d8064457d.png",
+    "model": "gpt-image-2",
+    "size": "1024x1024",
+    "created_at": "2026-09-06T09:19:35+00:00"
+  }
+]

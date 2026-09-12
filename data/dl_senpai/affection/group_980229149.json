@@ -1,0 +1,47 @@
+{
+  "users": {
+    "2843422418": {
+      "user_id": "2843422418",
+      "display_name": "香香胡桃",
+      "value": 548,
+      "tier_title": "小甜心"
+    },
+    "3564899779": {
+      "user_id": "3564899779",
+      "display_name": "既见雷枪为何不跪",
+      "value": 65,
+      "tier_title": "群常客"
+    },
+    "2714873857": {
+      "user_id": "2714873857",
+      "display_name": "永劫小帽鸟",
+      "value": 26,
+      "tier_title": "老住户"
+    },
+    "2089445207": {
+      "user_id": "2089445207",
+      "display_name": "废物癞蛤蟆——不肖子孙",
+      "value": 60,
+      "tier_title": "群常客"
+    },
+    "1074839353": {
+      "user_id": "1074839353",
+      "display_name": "胡桃小凳",
+      "value": 15,
+      "tier_title": "老住户"
+    },
+    "3342774351": {
+      "user_id": "3342774351",
+      "display_name": "无觉",
+      "value": 8,
+      "tier_title": "围观群众"
+    },
+    "2101372423": {
+      "user_id": "2101372423",
+      "display_name": "？。？",
+      "value": 4,
+      "tier_title": "过路人"
+    }
+  },
+  "updated_at": "2026-09-11T23:20:05.732757+08:00"
+}

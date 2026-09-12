@@ -1,0 +1,43 @@
+{
+  "users": {
+    "2843422418": {
+      "user_id": "2843422418",
+      "display_name": "姜",
+      "points": 137,
+      "streak": 1,
+      "max_streak": 1,
+      "last_checkin": "2026-09-04",
+      "total_checkins": 3,
+      "title": "",
+      "pending_task": {
+        "id": "praise_senpai_2026-09-04",
+        "text": "夸学姐一句（可以很敷衍，但要夸）",
+        "reward": 4,
+        "assigned_date": "2026-09-04"
+      }
+    },
+    "3342774351": {
+      "user_id": "3342774351",
+      "display_name": "彬",
+      "points": 49,
+      "streak": 1,
+      "max_streak": 1,
+      "last_checkin": "2026-08-29",
+      "total_checkins": 3,
+      "title": "",
+      "pending_task": null
+    },
+    "3478943327": {
+      "user_id": "3478943327",
+      "display_name": "moring",
+      "points": 305,
+      "streak": 1,
+      "max_streak": 10,
+      "last_checkin": "2026-09-11",
+      "total_checkins": 16,
+      "title": "打卡达人",
+      "pending_task": null
+    }
+  },
+  "updated_at": "2026-09-11T10:51:26.449328+08:00"
+}

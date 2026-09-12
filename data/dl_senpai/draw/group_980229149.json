@@ -1,0 +1,26 @@
+[
+  {
+    "id": "b8c756e98e4a4ce2",
+    "prompt": "Anime full body fashion illustration. CLOTHING ONLY: elegant white lolita dress with lace ribbons and petticoat, pure white fabric. The girl wears elegant white lolita dress with lace ribbons and petticoat, pure white fabric. The outfit must exactly be elegant white lolita dress with lace ribbons and petticoat, pure white fabric. dominant color is white, no red jacket lolita dress with frills lace petticoat and bow details, not a jacket. face reference only: Arknights Angelina inspired, long soft pink hair, fox ears, fluffy fox tail, warm brown eyes, youthful gentle anime face. Character reference is face hair ears and tail only, not clothing. NOT Arknights default costume, NOT red messenger jacket, NOT game outfit, no bag. outfit clearly visible, soft lighting, clean background",
+    "scene": "appearance",
+    "user_request": "来一张你现在的自拍",
+    "source_user": "香香胡桃",
+    "source_user_id": "2843422418",
+    "local_path": "E:\\PROJECT\\QQBot\\data\\dl_senpai\\draw\\files\\b8c756e98e4a4ce2.png",
+    "model": "gpt-image-2",
+    "size": "1024x1024",
+    "created_at": "2026-08-23T16:38:42+00:00"
+  },
+  {
+    "id": "284e285e07cd4e9c",
+    "prompt": "pink-haired fox-eared girl with brown eyes, wearing a vivid green lolita dress",
+    "scene": "general",
+    "user_request": "换成绿色洛丽塔",
+    "source_user": "既见雷枪为何不跪",
+    "source_user_id": "3564899779",
+    "local_path": "E:\\PROJECT\\QQBot\\data\\dl_senpai\\draw\\files\\284e285e07cd4e9c.png",
+    "model": "gpt-image-2",
+    "size": "1024x1024",
+    "created_at": "2026-08-23T16:39:19+00:00"
+  }
+]

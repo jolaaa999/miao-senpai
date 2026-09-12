@@ -1,0 +1,80 @@
+{
+  "users": {
+    "1074839353": {
+      "user_id": "1074839353",
+      "display_name": "胡桃小凳",
+      "points": 25,
+      "streak": 1,
+      "max_streak": 1,
+      "last_checkin": "2026-08-28",
+      "total_checkins": 2,
+      "title": "",
+      "pending_task": {
+        "id": "read_docs_2026-08-28",
+        "text": "今天认真读一段文档/题解，回来跟学姐说你读了啥",
+        "reward": 7,
+        "assigned_date": "2026-08-28"
+      }
+    },
+    "2843422418": {
+      "user_id": "2843422418",
+      "display_name": "香香胡桃",
+      "points": 272,
+      "streak": 1,
+      "max_streak": 7,
+      "last_checkin": "2026-08-31",
+      "total_checkins": 8,
+      "title": "一周卷王候补",
+      "pending_task": {
+        "id": "call_senpai_2026-08-31",
+        "text": "正经 @学姐 喊一声「学姐好」，别害羞",
+        "reward": 4,
+        "assigned_date": "2026-08-31"
+      }
+    },
+    "3342774351": {
+      "user_id": "3342774351",
+      "display_name": "无觉",
+      "points": 30,
+      "streak": 1,
+      "max_streak": 1,
+      "last_checkin": "2026-08-26",
+      "total_checkins": 2,
+      "title": "",
+      "pending_task": null
+    },
+    "3564899779": {
+      "user_id": "3564899779",
+      "display_name": "既见雷枪为何不跪",
+      "points": 124,
+      "streak": 7,
+      "max_streak": 7,
+      "last_checkin": "2026-08-26",
+      "total_checkins": 7,
+      "title": "一周卷王候补",
+      "pending_task": {
+        "id": "send_sticker_2026-08-26",
+        "text": "给学姐发一个表情包（或回复学姐消息再发表情）",
+        "reward": 5,
+        "assigned_date": "2026-08-26"
+      }
+    },
+    "2089445207": {
+      "user_id": "2089445207",
+      "display_name": "废物癞蛤蟆——不肖子孙",
+      "points": 22,
+      "streak": 1,
+      "max_streak": 1,
+      "last_checkin": "2026-09-06",
+      "total_checkins": 2,
+      "title": "",
+      "pending_task": {
+        "id": "water_reminder_2026-09-06",
+        "text": "现在立刻去喝一口水，回来跟学姐汇报「喝了」",
+        "reward": 3,
+        "assigned_date": "2026-09-06"
+      }
+    }
+  },
+  "updated_at": "2026-09-06T17:50:05.802879+08:00"
+}

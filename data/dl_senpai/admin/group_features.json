@@ -1,0 +1,66 @@
+{
+  "version": 1,
+  "groups": {
+    "1050332675": {
+      "name": "2026武汉科技大学百度飞桨招新群",
+      "updated_at": "2026-09-09T14:41:37+08:00",
+      "features": {
+        "affection": true,
+        "voice": true
+      }
+    },
+    "1056066897": {
+      "name": "",
+      "updated_at": "2026-09-09T14:41:38+08:00",
+      "features": {
+        "affection": true,
+        "voice": true
+      }
+    },
+    "1072442840": {
+      "name": "虫棍大王是无敌的",
+      "updated_at": "2026-09-09T14:41:38+08:00",
+      "features": {
+        "affection": true,
+        "checkin": true,
+        "voice": true
+      }
+    },
+    "600478436": {
+      "name": "墨谷",
+      "updated_at": "2026-09-09T14:42:58+08:00",
+      "features": {
+        "affection": true,
+        "voice": true
+      }
+    },
+    "723298609": {
+      "name": "PRTS",
+      "updated_at": "2026-09-09T14:41:36+08:00",
+      "features": {
+        "affection": true,
+        "checkin": true,
+        "voice": true
+      }
+    },
+    "958691688": {
+      "name": "是兄弟就来砍我",
+      "updated_at": "2026-09-09T14:41:36+08:00",
+      "features": {
+        "affection": true,
+        "checkin": true,
+        "voice": true
+      }
+    },
+    "980229149": {
+      "name": "劫",
+      "updated_at": "2026-09-09T14:41:37+08:00",
+      "features": {
+        "affection": true,
+        "search": true,
+        "voice": true,
+        "welcome": true
+      }
+    }
+  }
+}

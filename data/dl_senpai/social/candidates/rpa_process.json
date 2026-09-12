@@ -1,0 +1,19 @@
+{
+  "pid": 9676,
+  "cmd": [
+    "D:\\anaconda3\\python.exe",
+    "E:\\PROJECT\\QQBot\\scripts\\qq_friend_add_rpa.py",
+    "--mode",
+    "deeplink",
+    "--verify-msg",
+    "我是群里的学姐~",
+    "--delay-min",
+    "8.0",
+    "--delay-max",
+    "18.0",
+    "--max",
+    "20"
+  ],
+  "log": "E:\\PROJECT\\QQBot\\data\\dl_senpai\\social\\candidates\\rpa_run.log",
+  "started_at": "2026-09-11T11:23:43+08:00"
+}

@@ -1,0 +1,15 @@
+[
+  {
+    "id": "a",
+    "segment_type": "face",
+    "segment_data": {
+      "id": "1"
+    },
+    "context_text": "hi",
+    "keywords": [],
+    "use_count": 0,
+    "collected_at": "",
+    "source_user": "",
+    "local_path": ""
+  }
+]
