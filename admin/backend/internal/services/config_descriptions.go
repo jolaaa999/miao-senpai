@@ -1,0 +1,209 @@
+package services
+
+// configDescriptions 各环境变量的中文说明（与 config.py / .env.example 对齐）
+var configDescriptions = map[string]string{
+	// LLM 通道
+	"LLM_PROVIDER":     "LLM 通道选择：relay=OpenAI 兼容中转站，ollama=本地 Ollama",
+	"OPENAI_API_KEY":     "OpenAI 兼容中转站的 API Key",
+	"OPENAI_BASE_URL":    "OpenAI 兼容 API 根地址（如 https://xxx/v1）",
+	"OPENAI_MODEL":       "对话使用的模型名称",
+	"OLLAMA_API_KEY":     "Ollama API Key（可留空，默认 ollama）",
+	"OLLAMA_BASE_URL":    "Ollama OpenAI 兼容接口地址",
+	"OLLAMA_MODEL":       "Ollama 本地模型名（如 qwen2.5:7b）",
+
+	// 触发与回复
+	"DL_SENPAI_INTERRUPT_PROB":          "未 @ 时学姐随机插嘴的概率（0~1）",
+	"DL_SENPAI_INTERRUPT_COOLDOWN":      "插嘴后的冷却秒数，避免刷屏",
+	"DL_SENPAI_STICKER_FOLLOWUP_SEC":    "@ 学姐后多少秒内单独发表情也算找她",
+	"DL_SENPAI_MIN_MSG_LEN":             "插嘴所需的最小消息字数",
+	"DL_SENPAI_MAX_HISTORY":             "每个 session 保留的消息条数（user+assistant 各算一条）；0=无上限",
+	"DL_SENPAI_TEMPERATURE":             "LLM 采样温度，越高越发散",
+	"DL_SENPAI_MAX_TOKENS":              "正常回复的最大生成 token 数",
+	"DL_SENPAI_INTERRUPT_MAX_TOKENS":    "插嘴回复的最大生成 token 数（更短）",
+	"DL_SENPAI_REPLY_MAX_CHARS":         "单条回复软上限字数，超出会分段或合并转发",
+	"DL_SENPAI_REPLY_CHUNK_CHARS":       "超长回复合并转发时每段约多少字",
+	"DL_SENPAI_REPLY_HARD_MAX_CHARS":    "单条回复绝对硬上限，防止极端超长",
+	"DL_SENPAI_ALLOWED_GROUPS":          "允许响应的群号白名单，逗号分隔；留空=全部群",
+	"DL_SENPAI_ENABLE_PRIVATE":          "是否响应私聊消息",
+	"DL_SENPAI_WELCOME_ENABLE":          "新人进群时是否自动欢迎",
+	"DL_SENPAI_VERIFY_ENABLE":           "是否启用新人认证（限时 @学姐 发「认证」，超时踢出；需学姐是群管）",
+	"DL_SENPAI_VERIFY_TIMEOUT_SEC":      "认证时限（秒），默认 600=10 分钟",
+	"DL_SENPAI_VERIFY_GROUPS":           "启用认证的群号，逗号分隔；留空=所有允许响应的群",
+	"DL_SENPAI_VERIFY_DIR":              "待认证名单 JSON 目录",
+	"DL_SENPAI_KEYWORD_BOOST":           "消息含深度学习等关键词时，插嘴概率额外加成",
+	"DL_SENPAI_MEMORY_DIR":              "聊天记忆 JSON 文件目录",
+
+	// 表情包
+	"DL_SENPAI_STICKER_ENABLE":              "是否启用表情包回复能力",
+	"DL_SENPAI_STICKER_COLLECT":             "是否被动收集群友发的表情到本地库",
+	"DL_SENPAI_STICKER_DIR":                 "表情包索引与文件存储目录",
+	"DL_SENPAI_STICKER_MAX_PER_SESSION":     "每个 session 最多收藏多少张表情",
+	"DL_SENPAI_STICKER_REPLY_PROB":          "正常 @ 回复时附带表情的概率",
+	"DL_SENPAI_STICKER_REPLY_PROB_INTERRUPT": "插嘴回复时附带表情的概率（通常更低）",
+
+	// 识图
+	"DL_SENPAI_VISION_ENABLE":         "是否解析群友图片并传给多模态模型",
+	"DL_SENPAI_VISION_MAX_IMAGES":     "单条消息最多识图张数",
+	"DL_SENPAI_IMAGE_INTERRUPT_BOOST": "带图消息插嘴概率额外加成",
+
+	// 语音
+	"DL_SENPAI_VOICE_ENABLE":              "是否启用 QQ 语音条回复",
+	"DL_SENPAI_VOICE_PROVIDER":            "TTS 引擎：gptsovits 或 edge",
+	"DL_SENPAI_VOICE_PROFILE":             "Edge TTS 音色预设（如 angelina）",
+	"DL_SENPAI_VOICE_REPLY_PROB":          "回复时发语音的概率",
+	"DL_SENPAI_VOICE_MAX_CHARS":           "语音念出的最大字数",
+	"DL_SENPAI_VOICE_NAME":                "Edge TTS 具体音色名",
+	"DL_SENPAI_VOICE_RATE":                "Edge TTS 语速调节",
+	"DL_SENPAI_VOICE_PITCH":               "Edge TTS 音调调节",
+	"DL_SENPAI_VOICE_DIR":                 "语音缓存文件目录",
+	"DL_SENPAI_VOICE_ALLOW_ON_INTERRUPT":  "插嘴时是否允许发语音",
+	"DL_SENPAI_GPTSOVITS_URL":             "GPT-SoVITS API 地址",
+	"DL_SENPAI_GPTSOVITS_REF_AUDIO":       "GPT-SoVITS 参考音频路径",
+	"DL_SENPAI_GPTSOVITS_PROMPT_TEXT":     "参考音频对应的提示文本（须与音频内容一致）",
+	"DL_SENPAI_GPTSOVITS_PROMPT_LANG":     "参考音频语言",
+	"DL_SENPAI_GPTSOVITS_TEXT_LANG":       "合成文本语言",
+	"DL_SENPAI_GPTSOVITS_TEXT_SPLIT_METHOD": "GPT-SoVITS 文本切分方式",
+	"DL_SENPAI_GPTSOVITS_SPEED_FACTOR":    "GPT-SoVITS 语速倍率",
+	"DL_SENPAI_GPTSOVITS_TIMEOUT":         "GPT-SoVITS 请求超时（秒）",
+	"DL_SENPAI_GPTSOVITS_FALLBACK_EDGE":   "GPT-SoVITS 失败时是否回退 Edge TTS",
+	"DL_SENPAI_GPTSOVITS_AUTOSTART":       "bot 启动时是否自动拉起 GPT-SoVITS",
+	"DL_SENPAI_GPTSOVITS_HOME":            "GPT-SoVITS 安装目录",
+	"DL_SENPAI_GPTSOVITS_CONFIG":          "GPT-SoVITS 推理配置文件路径",
+	"DL_SENPAI_GPTSOVITS_STARTUP_TIMEOUT": "等待 GPT-SoVITS 就绪的最长秒数",
+
+	// 群名片
+	"DL_SENPAI_CARD_ENABLE":              "是否允许学姐改群名片（需机器人是群管）",
+	"DL_SENPAI_CARD_MAX_LEN":             "群名片最大字数",
+	"DL_SENPAI_CARD_PLAYFUL_COOLDOWN":     "主动 playful 改名的冷却秒数",
+	"DL_SENPAI_CARD_ALLOW_ON_INTERRUPT":  "插嘴场景是否允许改名片",
+
+	// 禁言
+	"DL_SENPAI_MUTE_ENABLE":              "是否允许学姐短时禁言（需群管权限）",
+	"DL_SENPAI_MUTE_MIN_SEC":             "最短禁言秒数",
+	"DL_SENPAI_MUTE_MAX_SEC":             "最长禁言秒数",
+	"DL_SENPAI_MUTE_COOLDOWN":            "禁言能力冷却秒数",
+	"DL_SENPAI_MUTE_ALLOW_ON_INTERRUPT":  "插嘴场景是否允许禁言",
+
+	// 热榜
+	"DL_SENPAI_TRENDS_ENABLE":            "是否拉取热榜并注入提示词",
+	"DL_SENPAI_TRENDS_BASE_URL":          "热榜 API 主地址",
+	"DL_SENPAI_TRENDS_FALLBACK_BASES":    "热榜 API 备用地址，逗号分隔",
+	"DL_SENPAI_TRENDS_SOURCES":           "热榜来源（weibo,douyin 等）",
+	"DL_SENPAI_TRENDS_TTL_SEC":           "热榜缓存有效期（秒）",
+	"DL_SENPAI_TRENDS_PER_SOURCE":        "每个来源取多少条",
+	"DL_SENPAI_TRENDS_MAX_ITEMS":         "注入提示词的热榜总条数上限",
+	"DL_SENPAI_TRENDS_PROMPT_MAX_CHARS":  "热榜注入提示词的最大字符数",
+	"DL_SENPAI_TRENDS_CACHE_DIR":         "热榜缓存目录",
+
+	// 联网检索
+	"DL_SENPAI_SEARCH_ENABLE":            "是否启用联网检索能力",
+	"DL_SENPAI_SEARCH_AUTO":              "时效/事实类问题是否自动联网（无需 <<<SEARCH>>>）",
+	"DL_SENPAI_SEARCH_PROVIDER":          "检索引擎：auto / bing / duckduckgo / searxng / tavily",
+	"DL_SENPAI_SEARCH_MAX_RESULTS":       "每次检索最多返回几条",
+	"DL_SENPAI_SEARCH_MAX_ROUNDS":        "单轮对话最多检索几轮",
+	"DL_SENPAI_SEARCH_MAX_AUTO_QUERIES":  "自动联网最多发起几次查询",
+	"DL_SENPAI_SEARCH_TIMEOUT":           "检索请求超时（秒）",
+	"DL_SENPAI_SEARCH_REGION":            "检索地区（如 zh-cn）",
+	"DL_SENPAI_SEARCH_PROMPT_MAX_CHARS":  "检索结果注入提示词的最大字符数",
+	"DL_SENPAI_SEARCH_ALLOW_ON_INTERRUPT": "插嘴时是否允许联网",
+	"DL_SENPAI_SEARCH_SEARXNG_URL":       "自建 SearXNG 根地址（可选）",
+	"DL_SENPAI_SEARCH_TAVILY_API_KEY":    "Tavily API Key（可选，更稳定）",
+
+	// 生图
+	"DL_SENPAI_DRAW_ENABLE":              "是否启用文生图能力",
+	"DL_SENPAI_DRAW_MODEL":               "生图模型名（如 gpt-image-1）",
+	"DL_SENPAI_DRAW_API_KEY":             "生图专用 API Key（留空则复用 OPENAI_API_KEY）",
+	"DL_SENPAI_DRAW_BASE_URL":            "生图 API 地址（留空则复用 OPENAI_BASE_URL）",
+	"DL_SENPAI_DRAW_SIZE":                "输出图片尺寸",
+	"DL_SENPAI_DRAW_QUALITY":             "图片质量（部分模型支持 standard/hd）",
+	"DL_SENPAI_DRAW_TIMEOUT":             "生图请求超时（秒）",
+	"DL_SENPAI_DRAW_COOLDOWN":            "生图冷却秒数（0=无限制）",
+	"DL_SENPAI_DRAW_MAX_PROMPT_CHARS":      "生图 prompt 最大字符数",
+	"DL_SENPAI_DRAW_MAX_ARCHIVE":           "每个 session 最多归档多少张生图",
+	"DL_SENPAI_DRAW_DIR":                 "生图缓存目录",
+	"DL_SENPAI_DRAW_ALLOW_ON_INTERRUPT":  "插嘴时是否允许生图",
+
+	// 浏览器逛网站
+	"DL_SENPAI_BROWSER_ENABLE":              "是否启用浏览器逛网站（淘宝/Pixiv/截图）",
+	"DL_SENPAI_BROWSER_DIR":                 "浏览器截图缓存目录",
+	"DL_SENPAI_BROWSER_TIMEOUT":             "浏览器任务超时（秒）",
+	"DL_SENPAI_BROWSER_COOLDOWN":            "浏览器任务冷却秒数",
+	"DL_SENPAI_BROWSER_MAX_IMAGES":          "单次最多发送几张图",
+	"DL_SENPAI_BROWSER_HEADLESS":            "是否无头模式运行 Chromium",
+	"DL_SENPAI_BROWSER_VIEWPORT_WIDTH":      "浏览器视口宽度",
+	"DL_SENPAI_BROWSER_VIEWPORT_HEIGHT":     "浏览器视口高度",
+	"DL_SENPAI_BROWSER_ALLOWED_DOMAINS":     "截图 URL 域名白名单（空=任意公网 https，*=全部）",
+	"DL_SENPAI_BROWSER_ALLOW_ON_INTERRUPT": "插嘴时是否允许逛网站",
+
+	// 社交
+	"DL_SENPAI_AUTO_ACCEPT_FRIEND":       "是否自动同意好友申请",
+	"DL_SENPAI_AUTO_ACCEPT_GROUP":        "是否自动同意入群/拉群邀请",
+	"DL_SENPAI_AUTO_ACCEPT_FRIEND_REMARK": "同意好友后设置的备注（可留空）",
+	"DL_SENPAI_FRIEND_ADD_ENABLE":        "是否主动遍历群成员发好友申请（默认关，防风控）",
+	"DL_SENPAI_FRIEND_ADD_MODE":          "加好友通道：auto=Cookie优先 / web=仅Cookie / onebot=仅协议扩展",
+	"DL_SENPAI_FRIEND_ADD_DAILY_LIMIT":   "每日最多发出的好友申请数",
+	"DL_SENPAI_FRIEND_ADD_VERIFY_MSG":    "好友申请验证消息",
+	"DL_SENPAI_FRIEND_ADD_EXCLUDE":       "永不发好友申请的 QQ 号，逗号分隔",
+	"DL_SENPAI_LIKE_ENABLE":              "是否每日给好友主页点赞（默认关）",
+	"DL_SENPAI_LIKE_DAILY_HOUR":          "北京时间几点后开始点赞（0–23）",
+	"DL_SENPAI_LIKE_TIMES":               "每个好友点赞次数（1–10）",
+	"DL_SENPAI_QZONE_ENABLE":             "是否启用 QQ 空间动态赞评（需 onebot-qzone 桥）",
+	"DL_SENPAI_QZONE_AUTOSTART":          "bot.py 启动时是否自动拉起 onebot-qzone 子进程",
+	"DL_SENPAI_QZONE_DIR":                "onebot-qzone 目录（相对项目根或绝对路径）",
+	"DL_SENPAI_QZONE_STARTUP_TIMEOUT":    "等待空间桥就绪的最长秒数",
+	"DL_SENPAI_QZONE_BRIDGE_URL":         "onebot-qzone HTTP 地址，如 http://127.0.0.1:5700",
+	"DL_SENPAI_QZONE_ACCESS_TOKEN":       "onebot-qzone 鉴权 Token（可空）",
+	"DL_SENPAI_QZONE_TIMEOUT":            "空间桥请求超时（秒）",
+	"DL_SENPAI_QZONE_SYNC_COOKIE":        "是否用 NapCat Cookie 同步到空间桥",
+	"DL_SENPAI_QZONE_DAILY_HOUR":         "北京时间几点后开始刷空间",
+	"DL_SENPAI_QZONE_LIKE_ENABLE":        "是否给好友动态点赞",
+	"DL_SENPAI_QZONE_COMMENT_ENABLE":     "是否给好友动态评论",
+	"DL_SENPAI_QZONE_LIKE_DAILY_LIMIT":   "每日最多赞多少条动态",
+	"DL_SENPAI_QZONE_COMMENT_DAILY_LIMIT": "每日最多评论多少条动态",
+	"DL_SENPAI_QZONE_COMMENT_PROB":       "每条动态评论概率（0~1）",
+	"DL_SENPAI_QZONE_COMMENT_TEMPLATES":  "评论话术，逗号分隔",
+	"DL_SENPAI_QZONE_FEED_NUM":           "每次拉取好友动态条数",
+
+	// 签到
+	"DL_SENPAI_CHECKIN_ENABLE":           "是否启用签到功能",
+	"DL_SENPAI_CHECKIN_GROUPS":           "启用签到的群号白名单，逗号分隔",
+	"DL_SENPAI_CHECKIN_DIR":              "签到数据 JSON 目录",
+	"DL_SENPAI_CHECKIN_STICKER_PROB":     "签到回复附带表情的概率",
+	"DL_SENPAI_CHECKIN_SYNC_SPECIAL_TITLE": "连签里程碑称号是否同步到群名片",
+	"DL_SENPAI_CHECKIN_SYNC_TITLE_CARD":  "同上（旧环境变量名，兼容）",
+
+	// 好感度
+	"DL_SENPAI_AFFECTION_ENABLE":          "是否启用好感度系统（与签到群共用白名单）",
+	"DL_SENPAI_AFFECTION_DIR":             "好感度数据 JSON 目录",
+	"DL_SENPAI_AFFECTION_GAIN_CHECKIN":    "每次签到增加的好感点数",
+	"DL_SENPAI_AFFECTION_GAIN_TASK":       "完成签到任务增加的好感点数",
+	"DL_SENPAI_AFFECTION_GAIN_CHAT":       "每次 @学姐 聊天并回复增加的好感点数（无每日上限）",
+	"DL_SENPAI_AFFECTION_GAIN_SHOP_BUY":   "商店购买衣服增加的好感点数",
+	"DL_SENPAI_AFFECTION_GAIN_SHOP_WEAR":  "仓库换上衣服增加的好感点数",
+	"DL_SENPAI_AFFECTION_SYNC_SPECIAL_TITLE": "好感升档时是否同步群专属头衔（需机器人是群管）",
+	"DL_SENPAI_GROUP_TITLE_FALLBACK_CARD":      "专属头衔挂不上时是否回退改群名片（默认关闭）",
+
+	// 积分服装店
+	"DL_SENPAI_SHOP_ENABLE":                "是否启用积分服装店（需在签到群内）",
+	"DL_SENPAI_SHOP_DIR":                   "商店状态与图片缓存目录",
+	"DL_SENPAI_SHOP_CATALOG":             "服装商品目录 catalog.json 路径",
+	"DL_SENPAI_SHOP_AUTO_IMPORT":           "货架缺货时是否自动从网络补货",
+	"DL_SENPAI_SHOP_AUTO_IMPORT_QUERIES":   "自动补货搜索关键词，逗号分隔",
+	"DL_SENPAI_SHOP_AUTO_IMPORT_PER_RUN":   "每次自动补货最多导入几件",
+	"DL_SENPAI_SHOP_AUTO_IMPORT_COOLDOWN":  "自动补货冷却秒数",
+	"DL_SENPAI_SHOP_DAILY_REFRESH_HOUR":    "每日刷新商店格子的小时（Asia/Shanghai，默认凌晨 4 点）",
+	"DL_SENPAI_SHOP_AFFECTION_DISCOUNT_ENABLE":       "是否按好感档位提供商店特惠（每人每天货架价稳定）",
+	"DL_SENPAI_SHOP_AFFECTION_DISCOUNT_BASE_CHANCE":  "路人档好感特惠触发基础概率（0~1）",
+	"DL_SENPAI_SHOP_AFFECTION_DISCOUNT_CHANCE_PER_TIER": "每升一档额外增加的好感触发概率",
+	"DL_SENPAI_SHOP_AFFECTION_DISCOUNT_MAX_CHANCE":   "好感特惠触发概率上限",
+	"DL_SENPAI_SHOP_AFFECTION_DISCOUNT_BASE_RATE":    "路人档触发时的基础折扣比例（0~1）",
+	"DL_SENPAI_SHOP_AFFECTION_DISCOUNT_RATE_PER_TIER": "每升一档额外增加的折扣比例",
+	"DL_SENPAI_SHOP_AFFECTION_DISCOUNT_MAX_RATE":     "单次好感特惠折扣比例上限",
+}
+
+func describeConfigKey(key string) string {
+	if desc, ok := configDescriptions[key]; ok {
+		return desc
+	}
+	return "暂无说明"
+}

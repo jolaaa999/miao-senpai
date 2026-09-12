@@ -1,0 +1,134 @@
+:root {
+  /* 安洁莉娜 · 夏日橙 */
+  --senpai-bg: #fef8f2;
+  --senpai-surface: rgba(255, 255, 255, 0.82);
+  --senpai-surface-hover: rgba(255, 237, 213, 0.72);
+  --senpai-border: rgba(249, 115, 22, 0.16);
+  --senpai-accent: #f97316;
+  --senpai-accent-light: #fb923c;
+  --senpai-accent-deep: #ea580c;
+  --senpai-accent-soft: rgba(249, 115, 22, 0.1);
+  --senpai-accent-glow: rgba(251, 146, 60, 0.32);
+  --senpai-sky: #38bdf8;
+  --senpai-sky-soft: rgba(56, 189, 248, 0.14);
+  --senpai-peach: #fed7aa;
+  --senpai-text: #3d2e1f;
+  --senpai-muted: #8b7355;
+  --senpai-success: #10b981;
+  --senpai-warning: #f59e0b;
+  --font-display: 'DM Sans', 'Noto Sans SC', system-ui, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  margin: 0;
+  min-height: 100vh;
+  background: var(--senpai-bg);
+  color: var(--senpai-text);
+  font-family: var(--font-display);
+}
+
+body {
+  background-image:
+    radial-gradient(ellipse 75% 55% at 8% -8%, rgba(251, 146, 60, 0.28), transparent),
+    radial-gradient(ellipse 55% 45% at 92% 5%, rgba(56, 189, 248, 0.22), transparent),
+    radial-gradient(ellipse 65% 50% at 50% 105%, rgba(254, 215, 170, 0.45), transparent);
+  background-attachment: fixed;
+}
+
+.glass-card {
+  background: var(--senpai-surface);
+  -webkit-backdrop-filter: blur(20px);
+  backdrop-filter: blur(20px);
+  border: 1px solid var(--senpai-border);
+  border-radius: 16px;
+  box-shadow:
+    0 4px 24px rgba(249, 115, 22, 0.07),
+    0 1px 3px rgba(61, 46, 31, 0.04);
+}
+
+.page-title {
+  font-size: 1.5rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  margin: 0 0 0.25rem;
+  color: var(--senpai-accent-deep);
+}
+
+.page-subtitle {
+  color: var(--senpai-muted);
+  font-size: 0.9rem;
+  margin: 0 0 1.5rem;
+}
+
+/* Element Plus light-summer overrides */
+.el-menu {
+  --el-menu-bg-color: transparent;
+  --el-menu-text-color: var(--senpai-muted);
+  --el-menu-hover-bg-color: var(--senpai-accent-soft);
+  --el-menu-active-color: var(--senpai-accent-deep);
+  border: none !important;
+}
+
+.el-table {
+  --el-table-bg-color: transparent;
+  --el-table-tr-bg-color: transparent;
+  --el-table-header-bg-color: rgba(249, 115, 22, 0.06);
+  --el-table-row-hover-bg-color: var(--senpai-accent-soft);
+  --el-table-border-color: var(--senpai-border);
+  --el-table-text-color: var(--senpai-text);
+  --el-table-header-text-color: var(--senpai-muted);
+  --el-fill-color-lighter: rgba(249, 115, 22, 0.04);
+}
+
+.el-table--striped .el-table__body tr.el-table__row--striped td.el-table__cell {
+  background: rgba(249, 115, 22, 0.04) !important;
+}
+
+.el-table--striped .el-table__body tr.el-table__row--striped:hover > td.el-table__cell {
+  background: var(--senpai-accent-soft) !important;
+}
+
+.el-input__wrapper,
+.el-textarea__inner {
+  background: rgba(255, 255, 255, 0.92) !important;
+  box-shadow: 0 0 0 1px var(--senpai-border) inset !important;
+}
+
+.el-button--primary {
+  --el-button-bg-color: var(--senpai-accent);
+  --el-button-border-color: var(--senpai-accent);
+  --el-button-hover-bg-color: var(--senpai-accent-light);
+  --el-button-hover-border-color: var(--senpai-accent-light);
+}
+
+.el-tag {
+  border: none;
+}
+
+.el-dialog {
+  --el-dialog-bg-color: #fffaf5;
+  border: 1px solid var(--senpai-border);
+  border-radius: 16px;
+}
+
+.el-select__wrapper {
+  background: rgba(255, 255, 255, 0.92) !important;
+  box-shadow: 0 0 0 1px var(--senpai-border) inset !important;
+}
+
+.el-pagination {
+  --el-pagination-bg-color: transparent;
+  --el-pagination-button-bg-color: rgba(255, 255, 255, 0.8);
+  --el-pagination-hover-color: var(--senpai-accent);
+}
+
+.el-switch.is-checked .el-switch__core {
+  background-color: var(--senpai-accent);
+  border-color: var(--senpai-accent);
+}
