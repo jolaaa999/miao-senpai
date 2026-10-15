@@ -68,3 +68,29 @@ data/_pytest_*/
 data/test_tmp/
 data/dl_senpai/admin/senpai-console.exe
 data/dl_senpai/admin/console.db
+
+# ===== 2026-10-15 上传前加固 =====
+# 上面第 35 行写成 E:/LLM/ 其实不生效（gitignore 里带盘符的路径不会匹配仓库根目录），
+# 于是本地 27.7GB 的 LLM/ 一直挂在未跟踪列表里 —— 换成根锚定的写法。
+/LLM/
+
+# .env 的备份文件里有真实 key（OPENAI_API_KEY / ONEBOT_ACCESS_TOKEN ...），
+# 原来只忽略了 .env / .env.dev，带时间戳的 .bak 全漏了。
+.env.bak*
+.env.dev.bak*
+.env.*.bak*
+
+# 临时与误建目录（含一次命令把引号写进文件名生成的 "knowledge_base / "data）
+/.tmp_pdf/
+/.tmp_*.py
+/.dsh_process.js
+/.acl-recovery/
+/\"*/
+/knowledge_base/_*/
+scripts/_phase65_work/
+
+# 上传前的体检脚本本体（用完即弃，不入库）
+/_scanrepo*.py
+/_repo_scan*.txt
+/_untracked.txt
+/_modified.txt

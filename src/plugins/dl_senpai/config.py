@@ -4,8 +4,19 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from typing import ClassVar
+
 from pydantic import AliasChoices, Field
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
+
+from .config_runtime.providers import (
+    ConfigProvider,
+    ProductionConfigProvider,
+    TestConfigProvider,
+    TEST_MODE_ENV,
+    default_provider,
+    is_test_mode,
+)
 
 # Edge TTS 预设：安洁莉娜 = 元气信使少女（活泼略快、音调稍高）
 _VOICE_PROFILES: dict[str, dict[str, str]] = {
@@ -26,7 +37,25 @@ class ResolvedVoiceSettings:
 
 
 class PluginConfig(BaseSettings):
-    """学姐插件配置（环境变量前缀 DL_SENPAI_ / OPENAI_ / OLLAMA_ / LLM_）。"""
+    """学姐插件配置（环境变量前缀 DL_SENPAI_ / OPENAI_ / OLLAMA_ / LLM_）。
+
+    配置来源优先级（**高 → 低**）::
+
+        1. 显式 kwargs    PluginConfig(OPENAI_API_KEY="sk-test")
+        2. Provider 覆盖  TestConfigProvider(overrides={...})
+        3. 进程环境变量   os.environ（可被 Provider 关闭）
+        4. .env / .env.dev 文件（可被 Provider 清空）
+
+    这个顺序是**修复测试污染的关键**：重构前 `.env` 的优先级高于显式
+    kwargs，导致 `PluginConfig(OPENAI_API_KEY="sk-test")` 拿到的是真实的
+    中转 Key、真实 base_url、真实 speak style 里的本地模型端点，
+    单测因此真的发出了网络请求（并产生真实费用）。
+
+    现在由 `_active_provider` 决定读哪些来源：
+    - 生产：与重构前完全一致（.env + .env.dev + 环境变量）；
+    - 测试（`DL_SENPAI_TEST_MODE=1` 或显式 `use_config_provider()`）：
+      不读任何文件、不读任何环境变量。
+    """
 
     model_config = SettingsConfigDict(
         env_file=(".env", ".env.dev"),
@@ -35,6 +64,54 @@ class PluginConfig(BaseSettings):
         case_sensitive=False,
         populate_by_name=True,
     )
+
+    # 当前生效的配置来源。
+    #
+    # 注意：**不能**声明成类属性 `_active_provider: ConfigProvider | None = None`，
+    # 因为 pydantic 会把带类型注解的类属性收编为 `ModelPrivateAttr`，
+    # 于是 `cls._active_provider` 拿到的是描述符而非 provider 本身
+    # （表现为 `'ModelPrivateAttr' object has no attribute 'read_os_environ'`）。
+    # 这里改用 `ClassVar` 显式排除出模型字段，pydantic 就不会处理它。
+    _active_provider: ClassVar[ConfigProvider | None] = None
+
+    @classmethod
+    def use_config_provider(cls, provider: ConfigProvider | None) -> None:
+        """切换配置来源。传 None 恢复「按环境自动选择」。"""
+        cls._active_provider = provider
+
+    @classmethod
+    def current_provider(cls) -> ConfigProvider:
+        """取当前来源；未显式设置时按环境自动选择。"""
+        provider = cls.__dict__.get("_active_provider")
+        if provider is not None:
+            return provider
+        return default_provider()
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,
+        dotenv_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
+    ) -> tuple[PydanticBaseSettingsSource, ...]:
+        """按 Provider 重新排列配置来源。
+
+        返回顺序 = 优先级从高到低。pydantic-settings 会依次取值，先命中的生效。
+
+        生产模式下返回 `(init, env, dotenv)`——与重构前的默认顺序一致，
+        保证现有部署行为零变化。
+
+        测试模式下只返回 `(init,)`，彻底切断 .env 与环境变量这两条泄漏路径。
+        """
+        provider = cls.current_provider()
+        sources: list[PydanticBaseSettingsSource] = [init_settings]
+        if provider.read_os_environ:
+            sources.append(env_settings)
+        if provider.dotenv_files():
+            sources.append(dotenv_settings)
+        return tuple(sources)
 
     # relay = 中转站（OPENAI_*）；ollama = 本地 Ollama（仅 LLM_PROVIDER=ollama 时用，不再自动回退）
     llm_provider: str = Field(default="relay", alias="LLM_PROVIDER")
@@ -50,11 +127,22 @@ class PluginConfig(BaseSettings):
     )
     ollama_model: str = Field(default="qwen2.5:7b", alias="OLLAMA_MODEL")
 
+    # 插嘴总开关。关掉后群里不再主动搭话，只有 @ / 私聊 / 召唤词才回复。
+    # 为什么不直接把 interrupt_prob 改成 0：decide_trigger 还会在概率上叠加
+    # keyword_boost（命中关键词 +0.05）和 image_interrupt_boost（带图 +0.06），
+    # 概率永远压不到 0，照样会插嘴。做成独立开关，重开时其余参数原样生效。
+    interrupt_enable: bool = Field(default=True, alias="DL_SENPAI_INTERRUPT_ENABLE")
     interrupt_prob: float = Field(default=0.10, alias="DL_SENPAI_INTERRUPT_PROB")
     interrupt_cooldown: int = Field(default=90, alias="DL_SENPAI_INTERRUPT_COOLDOWN")
     # 刚 @ 学姐后，多少秒内再发表情包也算找她（QQ 不便同条 @+表情）
     sticker_followup_sec: int = Field(default=60, alias="DL_SENPAI_STICKER_FOLLOWUP_SEC")
     min_msg_len: int = Field(default=8, alias="DL_SENPAI_MIN_MSG_LEN")
+    # 召唤词：群聊/私聊/临时会话里只要**包含**这些词（逗号分隔），无需 @ 也强制回复。
+    # 放在 min_msg_len 旁边而不是别处，因为它属于触发判定：命中召唤词会绕过长度
+    # 过滤 ——「喵喵」只有 2 字，短于 min_msg_len，否则会被当噪音丢掉。
+    summon_keywords: str = Field(
+        default="喵喵,喵学姐", alias="DL_SENPAI_SUMMON_KEYWORDS"
+    )
     max_history: int = Field(default=0, alias="DL_SENPAI_MAX_HISTORY")
     temperature: float = Field(default=1.05, alias="DL_SENPAI_TEMPERATURE")
     max_tokens: int = Field(default=1600, alias="DL_SENPAI_MAX_TOKENS")
@@ -80,6 +168,94 @@ class PluginConfig(BaseSettings):
     keyword_boost: float = Field(default=0.05, alias="DL_SENPAI_KEYWORD_BOOST")
     memory_dir: str = Field(default="data/dl_senpai/memory", alias="DL_SENPAI_MEMORY_DIR")
 
+    # 长期记忆·概览层（双层记忆的上层，见 agent/memory/cards.py）。
+    # 与 memory_recall 的分工：这里是结构化事实卡片，常驻上下文给全局视角；
+    # memory_recall 是按需从原始对话里取回的细节。
+    memory_cards_enable: bool = Field(
+        default=True, alias="DL_SENPAI_MEMORY_CARDS_ENABLE"
+    )
+    memory_cards_dir: str = Field(
+        default="data/dl_senpai/memory_cards", alias="DL_SENPAI_MEMORY_CARDS_DIR"
+    )
+    memory_cards_max: int = Field(default=12, alias="DL_SENPAI_MEMORY_CARDS_MAX")
+    memory_cards_max_chars: int = Field(
+        default=700, alias="DL_SENPAI_MEMORY_CARDS_MAX_CHARS"
+    )
+    # 后台提取：每 N 轮跑一次 LLM 抽事实卡。取模触发，不是每次都抽——
+    # 每次提取都是一次额外调用，批量做才摊得平成本（Memobase 的做法）。
+    memory_extract_enable: bool = Field(
+        default=True, alias="DL_SENPAI_MEMORY_EXTRACT_ENABLE"
+    )
+    memory_extract_every: int = Field(
+        default=6, alias="DL_SENPAI_MEMORY_EXTRACT_EVERY"
+    )
+
+    # ---- 高风险工具：文件 / 命令 / 代码（agent/tools/file_tools.py、exec_tools.py）----
+    #
+    # 这一组工具的能力远超「聊天机器人」——它们能读写磁盘、执行任意命令。
+    # 因此**只有管理员 QQ 能用**（agent_admin_qq），群友既看不到也调不到。
+    # 判定发生在 permissions.HIGH_RISK_TOOLS 那一层，不是靠这里的开关。
+    #
+    # agent_admin_qq 为空时 → 高风险工具对**所有人**都不可见。
+    # 这个默认是有意为之：管理员没配置就当作没开通，而不是当作人人可用。
+    agent_admin_qq: str = Field(default="", alias="DL_SENPAI_AGENT_ADMIN_QQ")
+    # 工具总开关。关掉它，7 个高风险工具一起消失，不用逐个改。
+    agent_tools_enable: bool = Field(
+        default=True, alias="DL_SENPAI_AGENT_TOOLS_ENABLE"
+    )
+    agent_file_enable: bool = Field(
+        default=True, alias="DL_SENPAI_AGENT_FILE_ENABLE"
+    )
+    agent_shell_enable: bool = Field(
+        default=True, alias="DL_SENPAI_AGENT_SHELL_ENABLE"
+    )
+    agent_code_enable: bool = Field(
+        default=True, alias="DL_SENPAI_AGENT_CODE_ENABLE"
+    )
+    # 沙箱根目录。所有文件路径都必须落在它之内，命令也以它为工作目录。
+    agent_sandbox_dir: str = Field(
+        default="data/dl_senpai/workspace", alias="DL_SENPAI_AGENT_SANDBOX_DIR"
+    )
+    agent_shell_timeout: int = Field(
+        default=30, alias="DL_SENPAI_AGENT_SHELL_TIMEOUT"
+    )
+    agent_code_timeout: int = Field(
+        default=30, alias="DL_SENPAI_AGENT_CODE_TIMEOUT"
+    )
+    # 长输出裁剪的目标长度（保留头尾，见 sandbox.truncate_output）。
+    agent_output_max_chars: int = Field(
+        default=6000, alias="DL_SENPAI_AGENT_OUTPUT_MAX_CHARS"
+    )
+    agent_file_read_max_bytes: int = Field(
+        default=200000, alias="DL_SENPAI_AGENT_FILE_READ_MAX_BYTES"
+    )
+    agent_glob_max: int = Field(default=60, alias="DL_SENPAI_AGENT_GLOB_MAX")
+
+    # ---- Agent 循环预算（护栏阈值）----
+    # 为什么做成配置项：通用 agent 的循环预算通常在几十步，而群聊场景
+    # 90 秒内必须出声，所以默认压到 4 步；但管理员私聊做多文件整理这类
+    # 长任务时需要能单独拉高上限，而不是改代码重启。
+    agent_max_steps: int = Field(default=4, alias="DL_SENPAI_AGENT_MAX_STEPS")
+    agent_max_tool_calls: int = Field(
+        default=8, alias="DL_SENPAI_AGENT_MAX_TOOL_CALLS"
+    )
+    # 同一「工具+参数」重复几次就停：防模型陷入复读循环。
+    agent_same_tool_repeat_limit: int = Field(
+        default=2, alias="DL_SENPAI_AGENT_SAME_TOOL_REPEAT_LIMIT"
+    )
+    # 整轮墙钟超时（秒）。0 = 不限制。
+    agent_timeout: float = Field(default=90.0, alias="DL_SENPAI_AGENT_TIMEOUT")
+    # token 预算。0 = 不限制（默认，避免误杀正常长回复）。
+    agent_token_budget: int = Field(
+        default=0, alias="DL_SENPAI_AGENT_TOKEN_BUDGET"
+    )
+    # 原生 function calling。默认 false = 继续走 <<<MARKER>>> 文本协议。
+    # 打开后 runtime 会把工具 schema 作为 tools 参数发给模型，并解析
+    # tool_calls；请求体里不再注入 marker 说明。回退只需改回 false。
+    agent_native_tools: bool = Field(
+        default=False, alias="DL_SENPAI_AGENT_NATIVE_TOOLS"
+    )
+
     # 拟人化：口语 few-shot / 碎句发送 / 内心状态 / 群风格 / 记忆召回
     fewshot_enable: bool = Field(default=True, alias="DL_SENPAI_FEWSHOT_ENABLE")
     humanize_send: bool = Field(default=True, alias="DL_SENPAI_HUMANIZE_SEND")
@@ -88,6 +264,8 @@ class PluginConfig(BaseSettings):
     bubble_max: int = Field(default=3, alias="DL_SENPAI_BUBBLE_MAX")
     bubble_min_chars: int = Field(default=40, alias="DL_SENPAI_BUBBLE_MIN_CHARS")
     bubble_prefer_chars: int = Field(default=120, alias="DL_SENPAI_BUBBLE_PREFER_CHARS")
+    # 几个气泡的合计字数超过它就不再逐条发，改用合并转发卡片，避免连发刷屏
+    bubble_total_max_chars: int = Field(default=700, alias="DL_SENPAI_BUBBLE_TOTAL_MAX_CHARS")
 
     inner_state_enable: bool = Field(default=True, alias="DL_SENPAI_INNER_STATE_ENABLE")
     inner_state_dir: str = Field(
@@ -110,6 +288,31 @@ class PluginConfig(BaseSettings):
     memory_recent_turns: int = Field(default=24, alias="DL_SENPAI_MEMORY_RECENT_TURNS")
     memory_recall_top: int = Field(default=4, alias="DL_SENPAI_MEMORY_RECALL_TOP")
 
+    # -- 最近聊天缓冲（记录全部消息，含她没参与的）--
+    # 与 ChatMemory 的区别：后者只记她回过的轮次，群里别人互聊的内容
+    # 从不入库；她回「你怎么看」时需要的正是那段背景。
+    recent_chat_enable: bool = Field(
+        default=True, alias="DL_SENPAI_RECENT_CHAT_ENABLE"
+    )
+    recent_chat_dir: str = Field(
+        default="data/dl_senpai/recent_chat", alias="DL_SENPAI_RECENT_CHAT_DIR"
+    )
+    # 保留时长（小时）。默认一整天：过一会就忘的窗口在群里不够用。
+    recent_chat_ttl_hours: float = Field(
+        default=24.0, alias="DL_SENPAI_RECENT_CHAT_TTL_HOURS"
+    )
+    # 注入 prompt 的条数。一天上千条不可能全塞，所以分两段取：
+    # 最近 recent_n 条 + 当天更早的按关键词召回 recall_n 条。
+    recent_chat_recent_n: int = Field(
+        default=20, alias="DL_SENPAI_RECENT_CHAT_RECENT_N"
+    )
+    recent_chat_recall_n: int = Field(
+        default=10, alias="DL_SENPAI_RECENT_CHAT_RECALL_N"
+    )
+    recent_chat_max_chars: int = Field(
+        default=2000, alias="DL_SENPAI_RECENT_CHAT_MAX_CHARS"
+    )
+
     sticker_enable: bool = Field(default=True, alias="DL_SENPAI_STICKER_ENABLE")
     sticker_collect: bool = Field(default=True, alias="DL_SENPAI_STICKER_COLLECT")
     sticker_dir: str = Field(default="data/dl_senpai/stickers", alias="DL_SENPAI_STICKER_DIR")
@@ -122,6 +325,38 @@ class PluginConfig(BaseSettings):
     vision_enable: bool = Field(default=True, alias="DL_SENPAI_VISION_ENABLE")
     vision_max_images: int = Field(default=3, alias="DL_SENPAI_VISION_MAX_IMAGES")
     image_interrupt_boost: float = Field(default=0.06, alias="DL_SENPAI_IMAGE_INTERRUPT_BOOST")
+
+    # 引用图：对方「引用一张图」时本轮消息段里其实没有图（QQ 折成 [图片]），
+    # 于是永远走不到视觉。默认开启回退，但加三道闸，并且都能一键关：
+    #   same_sender_only —— 只认本人引用的图，以及引用学姐自己发过的图。
+    #     反过来（谁都认）意味着任何人引用群友的图都会触发一次下载 + 视觉调用。
+    #   ttl_seconds —— 引用几天前的图不该反复下载。
+    #   allow_mface —— 动画表情不是「配图」，认它容易把引用个表情包当成带图提问。
+    vision_quoted_enable: bool = Field(default=True, alias="DL_SENPAI_VISION_QUOTED_ENABLE")
+    vision_quoted_same_sender_only: bool = Field(
+        default=True, alias="DL_SENPAI_VISION_QUOTED_SAME_SENDER_ONLY"
+    )
+    vision_quoted_ttl_seconds: int = Field(
+        default=120, alias="DL_SENPAI_VISION_QUOTED_TTL_SECONDS"
+    )
+    vision_quoted_allow_mface: bool = Field(
+        default=False, alias="DL_SENPAI_VISION_QUOTED_ALLOW_MFACE"
+    )
+
+    # PPT 配图：复用已有的 AI 绘图后端（draw_* 那组配置），不额外引入图库 API。
+    # 上限存在的意义是控制等待时间 —— 每张图要几十秒，不设限一份 deck 能等好几分钟。
+    ppt_image_enable: bool = Field(default=True, alias="DL_SENPAI_PPT_IMAGE_ENABLE")
+    ppt_image_max: int = Field(default=2, alias="DL_SENPAI_PPT_IMAGE_MAX")
+
+    # 成品级 PPT 生成：按主题直接做出完整 deck，耗时几分钟，依赖本机常驻进程。
+    # 留这个开关的理由：它一旦卡住会占住队列，出问题时要能一键停用而不必改代码重启。
+    deck_enable: bool = Field(default=True, alias="DL_SENPAI_DECK_ENABLE")
+
+    # 附件：有人发文件并唤醒时，自动读几个、单个最大多少 MB
+    # 默认 2 个：一次丢十个 PDF 会把上下文吃爆，多的用 read_doc 手动读
+    attachment_auto_read_max: int = Field(
+        default=2, alias="DL_SENPAI_ATTACHMENT_AUTO_READ_MAX"
+    )
 
     # 语音：edge=Edge TTS；gptsovits=本地 GPT-SoVITS API（可随 bot.py 自动拉起 api_v2）
     voice_enable: bool = Field(default=True, alias="DL_SENPAI_VOICE_ENABLE")
@@ -217,6 +452,8 @@ class PluginConfig(BaseSettings):
     )
 
     # 联网检索：模型写 <<<SEARCH query>>> 后本地实时检索再续答；亦可给 Cursor MCP 复用
+    # 读群公告 / 群文件列表 / 群相册（只读，无群内副作用）
+    group_read_enable: bool = Field(default=True, alias="DL_SENPAI_GROUP_READ_ENABLE")
     search_enable: bool = Field(default=True, alias="DL_SENPAI_SEARCH_ENABLE")
     search_auto: bool = Field(
         default=True,
@@ -242,6 +479,13 @@ class PluginConfig(BaseSettings):
     )
     search_searxng_url: str = Field(default="", alias="DL_SENPAI_SEARCH_SEARXNG_URL")
     search_tavily_api_key: str = Field(default="", alias="DL_SENPAI_SEARCH_TAVILY_API_KEY")
+    # 少于这么多个独立域名时，检索结果里会明确标注「未获多方印证」。
+    # 默认 2：一条来源只能算线索，不能当定论 —— 这是「搜到一个就认可」的闸门。
+    search_min_independent_domains: int = Field(
+        default=2,
+        alias="DL_SENPAI_SEARCH_MIN_INDEPENDENT_DOMAINS",
+        description="联网结果至少要有几个独立域名才算获得交叉印证",
+    )
 
     # 生图：OpenAI 兼容 images API（默认复用中转 Key/地址）
     draw_enable: bool = Field(default=True, alias="DL_SENPAI_DRAW_ENABLE")
@@ -275,6 +519,68 @@ class PluginConfig(BaseSettings):
     )
     browser_allow_on_interrupt: bool = Field(
         default=False, alias="DL_SENPAI_BROWSER_ALLOW_ON_INTERRUPT"
+    )
+
+    # 知识库：外部 RAGFlow 检索。
+    #
+    # 默认**关闭**：knowledge 工具一旦可见，模型每轮都要多花一次「要不要查资料」
+    # 的判断；没配好地址/密钥时更会直接报错，所以要求显式开启。
+    knowledge_enable: bool = Field(
+        default=False,
+        alias="DL_SENPAI_KNOWLEDGE_ENABLE",
+        description="开启后把检索工具暴露给模型，由模型自行决定何时查资料",
+    )
+    # 自动把知识库结果和联网结果一起塞进同一次提问 = 混合检索。
+    # 默认 True：用户要的是「两种结果混合」，而不是指望模型自己想起来查库。
+    # 留开关是因为它会给每条事实类消息多加一次检索耗时。
+    knowledge_auto: bool = Field(
+        default=True,
+        alias="DL_SENPAI_KNOWLEDGE_AUTO",
+        description="事实类问题自动查知识库，与联网结果混合注入",
+    )
+    knowledge_provider: str = Field(default="ragflow", alias="DL_SENPAI_KNOWLEDGE_PROVIDER")
+    knowledge_base_url: str = Field(
+        default="",
+        alias="DL_SENPAI_KNOWLEDGE_BASE_URL",
+        description="RAGFlow 地址，需带部署前缀，如 http://10.0.0.1:31173/ontoweb-ragflow",
+    )
+    # 以 _API_KEY 结尾 → 命中后台写入黑名单，只能在 .env 手工改（有意的安全取舍）
+    knowledge_api_key: str = Field(default="", alias="DL_SENPAI_KNOWLEDGE_API_KEY")
+    knowledge_dataset_ids: str = Field(
+        default="",
+        alias="DL_SENPAI_KNOWLEDGE_DATASET_IDS",
+        description="逗号分隔的 dataset id；留空=由服务端在该 key 可见范围内检索",
+    )
+    knowledge_top_k: int = Field(default=5, alias="DL_SENPAI_KNOWLEDGE_TOP_K")
+    knowledge_similarity_threshold: float = Field(
+        default=0.2, alias="DL_SENPAI_KNOWLEDGE_SIMILARITY_THRESHOLD"
+    )
+    knowledge_vector_weight: float = Field(
+        default=0.3, alias="DL_SENPAI_KNOWLEDGE_VECTOR_WEIGHT"
+    )
+    knowledge_timeout: float = Field(default=8.0, alias="DL_SENPAI_KNOWLEDGE_TIMEOUT")
+    knowledge_max_chunks: int = Field(default=5, alias="DL_SENPAI_KNOWLEDGE_MAX_CHUNKS")
+    knowledge_max_chars: int = Field(
+        default=3000,
+        alias="DL_SENPAI_KNOWLEDGE_MAX_CHARS",
+        description="检索结果注入提示词的总字符预算",
+    )
+    knowledge_prompt_header: str = Field(
+        default="【知识库检索结果】",
+        alias="DL_SENPAI_KNOWLEDGE_PROMPT_HEADER",
+    )
+    # 本地 Markdown 知识库。与 RAGFlow **互相独立**：
+    # 它不需要地址/密钥，服务端挂了也照常工作，所以单独一个开关，
+    # 而不是挂在 knowledge_enable（那个是"把检索工具暴露给模型"）。
+    knowledge_local_enable: bool = Field(
+        default=True,
+        alias="DL_SENPAI_KNOWLEDGE_LOCAL_ENABLE",
+        description="启用本地 Markdown 知识库（knowledge_base 目录）",
+    )
+    knowledge_local_dir: str = Field(
+        default="knowledge_base",
+        alias="DL_SENPAI_KNOWLEDGE_LOCAL_DIR",
+        description="本地知识库目录；相对路径按项目根目录解析",
     )
 
     # 社交：自动同意好友 / 拉群邀请（入群申请永不自动同意，留给真人群管）
@@ -317,62 +623,6 @@ class PluginConfig(BaseSettings):
     friend_rpa_max_per_run: int = Field(
         default=20, alias="DL_SENPAI_FRIEND_RPA_MAX_PER_RUN"
     )
-
-    # 主动社交：每日给好友主页点赞（send_like，每人最多 10 赞/天；默认关）
-    like_enable: bool = Field(default=False, alias="DL_SENPAI_LIKE_ENABLE")
-    like_daily_hour: int = Field(default=10, alias="DL_SENPAI_LIKE_DAILY_HOUR")
-    like_times: int = Field(default=10, alias="DL_SENPAI_LIKE_TIMES")
-
-    # QQ 空间动态：对接 onebot-qzone HTTP 桥（A 方案）
-    qzone_enable: bool = Field(default=False, alias="DL_SENPAI_QZONE_ENABLE")
-    qzone_autostart: bool = Field(
-        default=True,
-        alias="DL_SENPAI_QZONE_AUTOSTART",
-        description="bot.py 启动时是否自动拉起 onebot-qzone 子进程",
-    )
-    qzone_dir: str = Field(
-        default="onebot-qzone",
-        alias="DL_SENPAI_QZONE_DIR",
-        description="onebot-qzone 目录（相对项目根或绝对路径）",
-    )
-    qzone_startup_timeout: float = Field(
-        default=60.0, alias="DL_SENPAI_QZONE_STARTUP_TIMEOUT"
-    )
-    qzone_bridge_url: str = Field(
-        default="http://127.0.0.1:5700", alias="DL_SENPAI_QZONE_BRIDGE_URL"
-    )
-    qzone_access_token: str = Field(default="", alias="DL_SENPAI_QZONE_ACCESS_TOKEN")
-    qzone_timeout: float = Field(default=30.0, alias="DL_SENPAI_QZONE_TIMEOUT")
-    qzone_sync_cookie: bool = Field(
-        default=True,
-        alias="DL_SENPAI_QZONE_SYNC_COOKIE",
-        description="用 NapCat get_cookies 同步到桥接 login_cookie",
-    )
-    qzone_daily_hour: int = Field(default=10, alias="DL_SENPAI_QZONE_DAILY_HOUR")
-    qzone_like_enable: bool = Field(default=True, alias="DL_SENPAI_QZONE_LIKE_ENABLE")
-    qzone_comment_enable: bool = Field(
-        default=True, alias="DL_SENPAI_QZONE_COMMENT_ENABLE"
-    )
-    qzone_like_daily_limit: int = Field(
-        default=30, alias="DL_SENPAI_QZONE_LIKE_DAILY_LIMIT"
-    )
-    qzone_comment_daily_limit: int = Field(
-        default=10, alias="DL_SENPAI_QZONE_COMMENT_DAILY_LIMIT"
-    )
-    qzone_comment_prob: float = Field(
-        default=0.35, alias="DL_SENPAI_QZONE_COMMENT_PROB"
-    )
-    qzone_comment_templates: str = Field(
-        default="好看！,冲！,学姐路过点个赞~,不错哦",
-        alias="DL_SENPAI_QZONE_COMMENT_TEMPLATES",
-        description="LLM 失败时的兜底池；正常情况按动态内容生成",
-    )
-    qzone_comment_llm: bool = Field(
-        default=True,
-        alias="DL_SENPAI_QZONE_COMMENT_LLM",
-        description="空间评论是否用模型按动态内容生成",
-    )
-    qzone_feed_num: int = Field(default=20, alias="DL_SENPAI_QZONE_FEED_NUM")
 
     # 签到：默认仅指定群启用
     checkin_enable: bool = Field(default=True, alias="DL_SENPAI_CHECKIN_ENABLE")
@@ -570,24 +820,6 @@ class PluginConfig(BaseSettings):
             and self.resolved_voice_tts_provider() == "gptsovits"
         )
 
-    def qzone_home_path(self) -> Path:
-        raw = (self.qzone_dir or "").strip() or "onebot-qzone"
-        path = Path(raw)
-        if not path.is_absolute():
-            path = self.project_root() / path
-        return path.resolve()
-
-    def qzone_bind_host_port(self) -> tuple[str, int]:
-        from urllib.parse import urlparse
-
-        parsed = urlparse(self.qzone_bridge_url.strip() or "http://127.0.0.1:5700")
-        host = parsed.hostname or "127.0.0.1"
-        port = parsed.port or 5700
-        return host, port
-
-    def should_autostart_qzone(self) -> bool:
-        return bool(self.qzone_enable and self.qzone_autostart)
-
     def gptsovits_ref_audio_path(self) -> Path | None:
         raw = self.gptsovits_ref_audio.strip()
         if not raw:
@@ -714,6 +946,74 @@ class PluginConfig(BaseSettings):
     def draw_uses_dalle_params(self) -> bool:
         return self.draw_model_resolved().lower().startswith("dall-e")
 
+    # -- 触发 --
+
+    def summon_keyword_list(self) -> list[str]:
+        """解析召唤词；留空表示不启用召唤（退回原来的 @ / 概率插嘴行为）。
+
+        为什么中英文逗号都认：这个值要在 `.env` 里手写，中文输入法下极容易
+        打出「，」。不兼容的话表现是「静默失效」——用户只会看到学姐不理人，
+        排查成本远高于这里多写一行替换。
+        """
+        raw = (self.summon_keywords or "").replace("，", ",")
+        return [x.strip() for x in raw.split(",") if x.strip()]
+
+    # -- 知识库 --
+
+    def knowledge_dataset_id_list(self) -> list[str]:
+        """解析逗号分隔的 dataset id；留空返回空列表（表示不限定）。"""
+        return [x.strip() for x in self.knowledge_dataset_ids.split(",") if x.strip()]
+
+    def knowledge_base_url_resolved(self) -> str:
+        """规范化 RAGFlow 地址（去掉尾部斜杠）。
+
+        注意：RAGFlow 的部署前缀（如 `/ontoweb-ragflow`）是地址本身的一部分，
+        这里只做尾部斜杠清理，**不会**把它当成多余的路径段去掉 ——
+        少了这个前缀会直接 404（实测过）。
+        """
+        return self.knowledge_base_url.strip().rstrip("/")
+
+    def knowledge_configured(self) -> bool:
+        """**RAGFlow** 是否具备发起检索的最低条件（开关 + 地址 + 密钥）。
+
+        三者缺一就不注册 provider，让 knowledge 工具保持不可见 ——
+        这比注册一个每次调用都报错的 provider 更符合「默认行为明确」。
+
+        注意：这个方法**只回答 RAGFlow 的事**。本地知识库与它无关，
+        判断"有没有任何知识来源"要用 knowledge_any_configured()。
+        保持这个语义是为了不破坏既有调用方与测试。
+        """
+        return bool(
+            self.knowledge_enable
+            and self.knowledge_base_url_resolved()
+            and self.knowledge_api_key.strip()
+        )
+
+    def knowledge_local_dir_resolved(self) -> Path:
+        """本地知识库目录的绝对路径。
+
+        相对路径按**项目根目录**解析而不是当前工作目录 ——
+        bot 可能从任何目录启动，用 cwd 会时灵时不灵。
+        config.py 在 src/plugins/dl_senpai/ 下，往上三层就是项目根。
+        """
+        raw = str(self.knowledge_local_dir or "").strip() or "knowledge_base"
+        path = Path(raw)
+        if path.is_absolute():
+            return path
+        return Path(__file__).resolve().parents[3] / path
+
+    def knowledge_local_configured(self) -> bool:
+        """本地知识库是否可用（开关打开即算，目录不存在时按空库处理）。"""
+        return bool(self.knowledge_local_enable)
+
+    def knowledge_any_configured(self) -> bool:
+        """有没有**任何**知识来源可用（RAGFlow 或本地）。
+
+        预取与工具装配要用这个：只要本地库能用，RAGFlow 没配好
+        也不该让整条链路失效。
+        """
+        return bool(self.knowledge_configured() or self.knowledge_local_configured())
+
     def draw_configured(self) -> bool:
         if not self.draw_enable:
             return False
@@ -721,4 +1021,19 @@ class PluginConfig(BaseSettings):
 
 
 def get_config() -> PluginConfig:
-    return PluginConfig()
+    """取当前配置（**带缓存**）。
+
+    重构前这里是 `return PluginConfig()`——每次调用都重新读一遍
+    `.env` + `.env.dev` 并跑完整的 pydantic 校验。而 `handlers._handle_chat`
+    一轮就要调它好几次（`_reply`、`_fe`、各 tool 内部），加上 47 个模块里的
+    零散调用，等于每条 QQ 消息都在做多次磁盘 IO + 200 字段校验。
+
+    现在委托给 `config.runtime.get_config()`：进程内缓存一个实例，
+    只有 `reload_config()` 或 Provider 变更时才重建。
+
+    保留本模块的 `get_config` 名字与签名，是为了让 47 个既有调用点
+    **一行都不用改**（Preserve Behavior → Introduce Abstraction）。
+    """
+    from .config_runtime.runtime import get_config as _runtime_get_config
+
+    return _runtime_get_config()

@@ -1,4 +1,4 @@
-"""NoneBot2 入口：先启动本进程，再让 NapCat 反向 WebSocket 连入。
+﻿"""NoneBot2 入口：先启动本进程，再让 NapCat 反向 WebSocket 连入。
 
 默认一并拉起：
 - 学姐 Web 控制台（DL_SENPAI_CONSOLE_AUTOSTART）
@@ -13,6 +13,19 @@ import sys
 import nonebot
 from nonebot.adapters.onebot.v11 import Adapter as OneBotV11Adapter
 from nonebot.log import logger
+
+# Windows 控制台默认是 GBK，日志里一旦出现 emoji（比如学姐回话里的 emoji 字符），
+# loguru 往**终端** sink 写时就会抛 UnicodeEncodeError，并带一句
+# 「--- End of logging error ---」，**整条日志被丢掉**，排查时会莫名其妙少几行。
+# 这里只改 errors、不改 encoding：中文照常显示，编码不下的字符退化成转义，
+# 而不是让整行消失。
+# 文件 sink 是 UTF-8（见下面 logger.add 的 encoding），emoji 完整保留；
+# Web 控制台「运行日志」读的是文件，不受此处影响。
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(errors="backslashreplace")
+    except (AttributeError, ValueError):
+        pass
 
 nonebot.init()
 
