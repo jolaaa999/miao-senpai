@@ -1,5 +1,5 @@
 {
-  "active_id": "gaoleng_ft",
+  "active_id": "senpai_relay",
   "styles": [
     {
       "id": "senpai_default",
@@ -15,6 +15,21 @@
       "trained_model_ref": "",
       "notes": "使用 .env 全局模型 + persona.py，不切换微调权重",
       "updated_at": 1789108879.8114166
+    },
+    {
+      "id": "senpai_relay",
+      "name": "学姐·DeepSeek",
+      "kind": "builtin",
+      "enabled": true,
+      "model": "",
+      "base_url": "",
+      "api_key": "",
+      "system_overlay": "",
+      "source_person": "学姐人设",
+      "qq_data_note": "",
+      "trained_model_ref": "",
+      "notes": "走 .env 的 OPENAI_* 全局配置（airelay 中转站）。model/base_url/api_key 全部留空 = 继承全局，避免模型下架时这里 pin 住旧名字导致 404。沿革：deepseek_relay → 2026-10-11 中转站下架 deepseek，改名 senpai_relay 换 GPT 系 → 2026-10-12 中转站下架 gpt-5.6-sol、deepseek 重新上架，改名为 DeepSeek 并清空 model 继承全局。",
+      "updated_at": 1791021200.0
     },
     {
       "id": "gaoleng_ft",

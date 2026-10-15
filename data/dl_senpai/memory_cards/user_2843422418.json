@@ -1,0 +1,17 @@
+{
+  "cards": [
+    {
+      "card_id": "5ad2c89ee3120376",
+      "kind": "semantic",
+      "subject": "用户",
+      "fact": "正在配置/使用 Gemini API 的思考（thinking）参数",
+      "evidence": "用户询问 gemini 的 effort JSON 如何配置，并请学姐核对一份参",
+      "qualifiers": "涉及 generationConfig.thinkingConfig 等字段",
+      "created_at": 1792048965.96284,
+      "last_seen": 1792048965.96284,
+      "hits": 0,
+      "emotion": 0.0,
+      "superseded_by": ""
+    }
+  ]
+}

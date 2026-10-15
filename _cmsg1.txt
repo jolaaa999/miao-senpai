@@ -1,0 +1,18 @@
+优化答疑能力：答疑排版、气泡换行、搜索去噪、知识库相关性闸门
+
+- persona：答疑长回复允许分点（「一、二、三」小标题 / 编号 / 条目），
+  目标 400~1500 字，按「结论 → 分点 → 可执行步骤/自测标准」组织；
+  Markdown 禁用规则对答疑长回复开口子。
+- reply_send：气泡合并按来源保留换行，修「代码被粘成一整行」；
+  含代码的长回复不再拆条。
+- web_search：过滤字典释义、磁力/种子聚合这类噪音结果；
+  兜底只在「非噪音」结果里回退，不再把字典站塞进 prompt。
+- knowledge/local_kb：领域闸门 —— 查询没点名库里任何已知领域时返回空，
+  不再硬塞无关内容（实测问「永劫无间官网」会涌进武科大长文档）。
+- knowledge/service：字面命中闸门 —— 切片标题/章节没出现查询实词即判为
+  「库里没有」。为什么需要：向量库永远返回 top-K，库里没有也会拿别的领域
+  顶上（问明日方舟返回 C++ Primer，0.352）；而分数分不开域内域外
+  （域内最低 0.380，把 vector_weight 压到 0 后域外反而更高）。
+- config / knowledge_setup：新增 knowledge_local_require_domain、
+  knowledge_relevance_gate、knowledge_high_confidence_score 三个开关。
+- 新增 tests/test_knowledge_domain_gate.py、test_knowledge_relevance_gate.py。

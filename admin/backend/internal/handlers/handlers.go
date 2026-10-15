@@ -24,6 +24,7 @@ type Handler struct {
 	draw    *services.DrawService
 	trends  *services.TrendsService
 	config  *services.ConfigReader
+	configWriter *services.ConfigWriter
 	logs    *services.LogService
 	persona *services.PersonaService
 	groupFeatures *services.GroupFeaturesService
@@ -41,6 +42,7 @@ func New(cfg config.Config, db *gorm.DB) *Handler {
 		draw:    services.NewDrawService(cfg.DrawDir),
 		trends:  services.NewTrendsService(cfg.TrendsDir),
 		config:  services.NewConfigReader(cfg.ProjectRoot),
+		configWriter: services.NewConfigWriter(cfg.ProjectRoot),
 		logs:    services.NewLogService(cfg.ProjectRoot),
 		persona: services.NewPersonaService(cfg.ProjectRoot),
 		groupFeatures: services.NewGroupFeaturesService(cfg.GroupFeaturesPath),
@@ -502,6 +504,8 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 		auth.GET("/draw-gallery/:sid/items", h.ListDrawItems)
 		auth.DELETE("/draw-gallery/:sid/items/:id", h.DeleteDrawItem)
 		auth.GET("/feature-switches", h.FeatureSwitches)
+		auth.GET("/editable-feature-switches", h.EditableFeatureSwitches)
+		auth.PATCH("/feature-switches/:key", h.EditFeatureSwitch)
 		auth.GET("/group-features", h.ListGroupFeatures)
 		auth.PATCH("/group-features/:gid", h.PatchGroupFeature)
 		auth.GET("/trends-snapshot", h.TrendsSnapshot)

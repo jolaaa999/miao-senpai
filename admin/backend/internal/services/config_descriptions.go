@@ -12,6 +12,7 @@ var configDescriptions = map[string]string{
 	"OLLAMA_MODEL":       "Ollama 本地模型名（如 qwen2.5:7b）",
 
 	// 触发与回复
+	"DL_SENPAI_INTERRUPT_ENABLE":        "是否允许学姐在群里主动插嘴；关闭后只有 @ / 私聊 / 召唤词才回复",
 	"DL_SENPAI_INTERRUPT_PROB":          "未 @ 时学姐随机插嘴的概率（0~1）",
 	"DL_SENPAI_INTERRUPT_COOLDOWN":      "插嘴后的冷却秒数，避免刷屏",
 	"DL_SENPAI_STICKER_FOLLOWUP_SEC":    "@ 学姐后多少秒内单独发表情也算找她",
@@ -32,6 +33,27 @@ var configDescriptions = map[string]string{
 	"DL_SENPAI_VERIFY_DIR":              "待认证名单 JSON 目录",
 	"DL_SENPAI_KEYWORD_BOOST":           "消息含深度学习等关键词时，插嘴概率额外加成",
 	"DL_SENPAI_MEMORY_DIR":              "聊天记忆 JSON 文件目录",
+	"DL_SENPAI_MEMORY_RECALL_ENABLE":    "是否启用关键词召回（把很久以前的旧聊天也翻出来）",
+	"DL_SENPAI_MEMORY_RECENT_TURNS":     "每次带上的最近对话轮数",
+	"DL_SENPAI_MEMORY_RECALL_TOP":       "关键词最多召回几条旧聊天",
+	"DL_SENPAI_MEMORY_CARDS_ENABLE":     "是否启用长期记忆概览（结构化事实卡常驻上下文，给学姐全局视角）",
+	"DL_SENPAI_MEMORY_CARDS_MAX":        "概览区最多放几张事实卡",
+	"DL_SENPAI_MEMORY_CARDS_MAX_CHARS":  "概览区字数上限",
+	"DL_SENPAI_MEMORY_EXTRACT_ENABLE":   "是否启用后台记忆提取（由模型从对话里抽长期事实）",
+	"DL_SENPAI_MEMORY_EXTRACT_EVERY":    "每多少轮触发一次记忆提取（批量做才省调用）",
+
+	// 高风险工具（文件 / 命令 / 代码）
+	"DL_SENPAI_AGENT_ADMIN_QQ":            "允许使用高风险工具的 QQ 号（逗号分隔；留空则对所有人关闭）",
+	"DL_SENPAI_AGENT_TOOLS_ENABLE":         "高风险工具总开关（关掉则文件/命令/代码全部隐藏）",
+	"DL_SENPAI_AGENT_FILE_ENABLE":          "是否启用文件读写工具（READ_FILE/WRITE_FILE/EDIT_FILE/GLOB/GREP）",
+	"DL_SENPAI_AGENT_SHELL_ENABLE":         "是否启用命令执行工具（SHELL）",
+	"DL_SENPAI_AGENT_CODE_ENABLE":          "是否启用代码执行工具（CODE，目前仅 Python）",
+	"DL_SENPAI_AGENT_SANDBOX_DIR":          "沙箱根目录：文件读写与命令执行都被限制在此目录之内",
+	"DL_SENPAI_AGENT_SHELL_TIMEOUT":        "单条命令的最长执行秒数，超时强制结束",
+	"DL_SENPAI_AGENT_CODE_TIMEOUT":         "单段代码的最长执行秒数，超时强制结束",
+	"DL_SENPAI_AGENT_OUTPUT_MAX_CHARS":     "命令/代码输出的字数上限（超出保留头尾、裁掉中段）",
+	"DL_SENPAI_AGENT_FILE_READ_MAX_BYTES":  "单个文件可读取的最大字节数，超过则拒绝",
+	"DL_SENPAI_AGENT_GLOB_MAX":             "GLOB 单次最多返回的文件数",
 
 	// 表情包
 	"DL_SENPAI_STICKER_ENABLE":              "是否启用表情包回复能力",

@@ -15,9 +15,63 @@ _PROCS: list[subprocess.Popen] = []
 _LOG_HANDLES: list[object] = []
 
 
+_DOTENV_CACHE: dict[str, str] | None = None
+
+
+_ROOT_DIR = Path(__file__).resolve().parent.parent
+
+
+def _read_dotenv() -> dict[str, str]:
+    """直接读 .env / .env.dev（后者覆盖前者）。
+
+    为什么要自己读一遍而不用 os.getenv：
+
+    **`nonebot.init()` 不会把 .env 灌进 os.environ。**
+    实测（nonebot 2.x）：init() 前后 `os.getenv("DL_SENPAI_MAX_HISTORY")`
+    都是 None。于是 `_env_flag` 永远只能看到 Process 环境里显式设置的变量，
+    `.env` 里写的 `DL_SENPAI_CONSOLE_AUTOSTART=false` 完全读不到，
+    每次都回落到默认值 True —— 开关写了等于没写，而且毫无报错。
+
+    优先级与插件内保持一致的语义：os.environ 优先，其次 .env，最后 default。
+    """
+    global _DOTENV_CACHE
+    if _DOTENV_CACHE is not None:
+        return _DOTENV_CACHE
+
+    values: dict[str, str] = {}
+    for name in (".env", ".env.dev"):
+        path = _ROOT_DIR / name
+        if not path.exists():
+            continue
+        try:
+            for raw in path.read_text(encoding="utf-8").splitlines():
+                line = raw.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, value = line.partition("=")
+                key = key.strip()
+                value = value.strip()
+                # 去掉成对引号，与 config_env._load_dotenv 行为一致
+                if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+                    value = value[1:-1]
+                if key:
+                    values[key] = value
+        except OSError:
+            continue
+
+    _DOTENV_CACHE = values
+    return values
+
+
 def _env_flag(name: str, default: bool = True) -> bool:
+    """读一个布尔开关：os.environ 优先，其次 .env / .env.dev。
+
+    这三者都不存在时才用 default。
+    """
     raw = os.getenv(name)
-    if raw is None:
+    if raw is None or raw == "":
+        raw = _read_dotenv().get(name)
+    if raw is None or raw == "":
         return default
     return raw.strip().lower() not in {"0", "false", "no", "off"}
 

@@ -167,6 +167,16 @@ export interface GroupFeatureCatalogItem {
   label: string
 }
 
+// 可写开关。in_env_files 说明该键在哪些文件里声明过——
+// 同时出现在 .env 与 .env.dev 时写入会覆盖两处，
+// 否则 .env.dev 的旧值会把改动盖回去。
+export interface EditableFeature {
+  key: string
+  value: string
+  writable: boolean
+  in_env_files: string[]
+}
+
 export interface GroupFeatureRow {
   group_id: string
   name: string
@@ -229,6 +239,14 @@ export const consoleApi = {
     api.get<Blob>(`/draw-gallery/assets/${encodeURIComponent(filename)}`, { responseType: 'blob' }),
   deleteDraw: (sid: string, id: string) => api.delete(`/draw-gallery/${encodeURIComponent(sid)}/items/${id}`),
   features: () => api.get<{ items: FeatureSwitch[] }>('/feature-switches'),
+  // 可写开关（只含布尔项）；PATCH 会同时写 .env 与 .env.dev，
+  // bot 侧 config_watcher 数秒内热重载生效，无需重启。
+  editableFeatures: () => api.get<{ items: EditableFeature[] }>('/editable-feature-switches'),
+  setFeature: (key: string, value: string) =>
+    api.patch<{ key: string; value: string; written_to: string[]; note: string }>(
+      `/feature-switches/${encodeURIComponent(key)}`,
+      { value },
+    ),
   groupFeatures: () =>
     api.get<{ items: GroupFeatureRow[]; features: GroupFeatureCatalogItem[] }>('/group-features'),
   patchGroupFeature: (gid: string, feature: string, value: boolean | null) =>
