@@ -59,6 +59,22 @@ def should_split_image_voice(
     return image is not None and voice is not None
 
 
+# 判断一段文本是不是「含代码」：代码跨气泡会断在半个表达式上，读的人接不起来。
+_CODE_HINT_RE = re.compile(
+    r"^\s*(#|\}|\{|for\b|while\b|if\b|else\b|return\b|int\b|void\b|char\b|float\b|"
+    r"double\b|struct\b|def\b|class\b|import\b|from\b)|\s*[;{}]\s*$"
+)
+
+
+def _looks_like_code(text: str) -> bool:
+    """多数行都像代码时返回 True（阈值取一半，避免散文里夹一行分号就误判）。"""
+    lines = [line for line in (text or "").split("\n") if line.strip()]
+    if len(lines) < 3:
+        return False
+    hits = sum(1 for line in lines if _CODE_HINT_RE.match(line))
+    return hits >= 3 and hits * 2 >= len(lines)
+
+
 def split_human_bubbles(
     text: str,
     *,
@@ -80,15 +96,24 @@ def split_human_bubbles(
         return [text]
 
     # 优先空行，其次单换行，再按句末
+    # sep 必须跟着来源走：按换行切出来的片段要按换行拼回去，否则「正文紧跟代码」
+    # 这种没有空行的回复会被粘成一整行（实测代码块全糊在一起，没法看也没法复制）。
     raw_parts: list[str] = []
+    sep = ""
     if "\n\n" in text:
         raw_parts = [p.strip() for p in _PARA_SPLIT.split(text) if p.strip()]
+        sep = "\n\n"
     elif "\n" in text:
         raw_parts = [p.strip() for p in text.split("\n") if p.strip()]
+        sep = "\n"
     else:
         raw_parts = [p.strip() for p in _BUBBLE_SENT.split(text) if p.strip()]
         if len(raw_parts) <= 1:
             return [text]
+
+    # 含代码就别拆气泡：拆点会落在代码中间，气泡分两条发出去更没法读。
+    if _looks_like_code(text):
+        return [text]
 
     # 合并过碎片段，避免一字一气泡
     merged: list[str] = []
@@ -99,7 +124,7 @@ def split_human_bubbles(
             buf = part
             continue
         if len(buf) < soft_limit and len(buf) + len(part) <= prefer_chars:
-            buf = f"{buf}{part}"
+            buf = f"{buf}{sep}{part}"
         else:
             merged.append(buf)
             buf = part
@@ -111,7 +136,7 @@ def split_human_bubbles(
 
     # 仍过多则从前合并，保留末尾情绪句
     while len(merged) > max_bubbles:
-        merged[0] = merged[0] + merged[1]
+        merged[0] = merged[0] + sep + merged[1]
         del merged[1]
     return [m for m in merged if m]
 

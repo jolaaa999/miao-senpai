@@ -430,10 +430,13 @@ class LocalMarkdownRetriever:
         *,
         name: str = "local_md",
         min_score: float = 0.0,
+        require_named_domain: bool = False,
     ) -> None:
         self._root = Path(root)
         self._name = name
         self._min_score = float(min_score)
+        # 领域闸门：查询没点名库里任何领域时直接判为无关（默认关，由装配层打开）。
+        self._require_named_domain = bool(require_named_domain)
 
     @property
     def name(self) -> str:
@@ -529,6 +532,19 @@ class LocalMarkdownRetriever:
                     ok=True, metadata={"matched": 0},
                 )
 
+        # 领域闸门：查询没点名库里任何一个领域时，直接判为「本库无关」。
+        # 为什么只能靠领域：打分用的是 unigram/bigram/长 n-gram 混合词，
+        # 无关内容会撞上「按月」「标准」「学过」这类稀有碎片，分数和 df 都拦不住
+        # （实测无关与相关的分布完全重叠）；而领域是这条库唯一稳的语义边界。
+        if self._require_named_domain and not named_domains:
+            return KnowledgeResult(
+                chunks=[], provider=self._name, duration_ms=_elapsed(), ok=True,
+                metadata={
+                    "scanned": len(all_chunks), "gate": "no_named_domain",
+                    "note": "查询没点名任何已知领域，判为与本库无关",
+                },
+            )
+
         scored: list[tuple[float, dict]] = []
         for chunk in all_chunks:
             s = _score_chunk(
@@ -544,6 +560,7 @@ class LocalMarkdownRetriever:
             )
 
         scored.sort(key=lambda pair: pair[0], reverse=True)
+
         top = scored[: max(1, int(query.top_k))]
 
         # 归一化到 0~1，纯粹为了日志好看，不影响排序

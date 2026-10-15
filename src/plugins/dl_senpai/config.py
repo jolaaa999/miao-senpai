@@ -551,6 +551,17 @@ class PluginConfig(BaseSettings):
         alias="DL_SENPAI_KNOWLEDGE_DATASET_IDS",
         description="逗号分隔的 dataset id；留空=由服务端在该 key 可见范围内检索",
     )
+    # 领域闸门：查询没点名本地知识库里任何领域时，直接返回空。
+    # 关掉就退回旧行为（靠分数硬塞，实测会塞进无关领域的内容）。
+    knowledge_local_require_domain: bool = Field(
+        default=True, alias="DL_SENPAI_KNOWLEDGE_LOCAL_REQUIRE_DOMAIN"
+    )
+    knowledge_relevance_gate: bool = Field(
+        default=True, alias="DL_SENPAI_KNOWLEDGE_RELEVANCE_GATE"
+    )
+    knowledge_high_confidence_score: float = Field(
+        default=0.75, alias="DL_SENPAI_KNOWLEDGE_HIGH_CONFIDENCE_SCORE"
+    )
     knowledge_top_k: int = Field(default=5, alias="DL_SENPAI_KNOWLEDGE_TOP_K")
     knowledge_similarity_threshold: float = Field(
         default=0.2, alias="DL_SENPAI_KNOWLEDGE_SIMILARITY_THRESHOLD"

@@ -20,7 +20,9 @@ Phase 6B 第三十三/三十七节。
 from __future__ import annotations
 
 import asyncio
+import re
 import time
+from dataclasses import replace
 from typing import Any
 
 from ..observability.logging import log_event
@@ -33,6 +35,35 @@ from .models import (
     KnowledgeSource,
 )
 from .retriever import NullRetriever, Retriever, RetrieverRegistry, get_retriever_registry
+
+
+# 查询侧「实词探针」与切片侧「自称内容」：
+# 向量库的「我没有这个内容」是表达不出来的 —— 它永远返回 top-K，库里没有
+# 明日方舟也会拿 C++ Primer 顶上（实测 0.352）。而分数分不开域内域外
+#（域外 0.352 / 域内最低 0.380；vector_weight 压到 0 后域外 0.220 > 域内 0.170），
+# 所以只能退回字面证据：切片的标题/章节里到底有没有出现你问的东西。
+_CJK_RE = re.compile(r"[\u4e00-\u9fff]+")
+_ALNUM_RE = re.compile(r"[a-z0-9_+]{2,}")
+
+
+def _probe_terms(text: str) -> set[str]:
+    """把查询拆成实词探针：中文 2~4 字 n-gram + 英文/数字词。"""
+    lowered = (text or "").casefold()
+    probes: set[str] = set(_ALNUM_RE.findall(lowered))
+    for run in _CJK_RE.findall(lowered):
+        for size in (2, 3, 4):
+            for i in range(len(run) - size + 1):
+                probes.add(run[i:i + size])
+    return probes
+
+
+def _chunk_haystack(chunk: Any) -> str:
+    """切片「自称是什么内容」：标题 + 章节。"""
+    parts = [
+        getattr(chunk, "source_name", "") or "",
+        getattr(chunk, "section", "") or "",
+    ]
+    return " ".join(p for p in parts if p).casefold()
 
 
 class KnowledgeError(RuntimeError):
@@ -59,11 +90,15 @@ class KnowledgeService:
         timeout: float = 8.0,
         max_chunks: int = 5,
         max_chars: int = 4000,
+        relevance_gate: bool = True,
+        high_confidence: float = 0.75,
     ) -> None:
         self._registry = registry or get_retriever_registry()
         self._timeout = timeout
         self._max_chunks = max_chunks
         self._max_chars = max_chars
+        self._relevance_gate = relevance_gate
+        self._high_confidence = high_confidence
         # 额外注册的 dataset 权限策略（第四十八节）
         self._extra_policies: list[KnowledgeSource] = []
 
@@ -151,6 +186,30 @@ class KnowledgeService:
                 duration_ms=duration, ok=False,
                 error=f"{type(exc).__name__}",
             )
+
+        # 4) 相关性闸门：库里没有这个内容时，向量库照样给你 5 条最不差的。
+        #    判据只能是字面证据（标题/章节里出现查询实词），分数靠不住：
+        #    域外 0.352 / 域内最低 0.380，压 vector_weight 后域外反而更高。
+        #    高置信分数（默认 0.75）直接放行，避免语义命中但标题无重词被误杀。
+        if self._relevance_gate and result.chunks:
+            probes = _probe_terms(query.query)
+            if probes:
+                haystacks = [_chunk_haystack(c) for c in result.chunks]
+                # 有标题的库只信标题：正文里什么词都可能有（「今天」「什么」），
+                # 拿正文判相关性会把「晚饭吃什么」这种问题喂进一堆书里。
+                has_titles = any(h.strip() for h in haystacks)
+                kept = []
+                for chunk, hay in zip(result.chunks, haystacks):
+                    if float(getattr(chunk, "score", 0.0) or 0.0) >= self._high_confidence:
+                        kept.append(chunk)
+                        continue
+                    surface = hay if has_titles else (getattr(chunk, "text", "") or "")[:400].casefold()
+                    if any(p in surface for p in probes):
+                        kept.append(chunk)
+                if len(kept) != len(result.chunks):
+                    meta = dict(result.metadata)
+                    meta["relevance_gate"] = "%d->%d" % (len(result.chunks), len(kept))
+                    result = replace(result, chunks=kept, metadata=meta)
 
         # 4) 预算裁剪（第五十节）
         budgeted = result.apply_budget(

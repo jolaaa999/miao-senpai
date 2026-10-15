@@ -803,6 +803,21 @@ def format_search_for_prompt(
     return text
 
 
+# 明显与「找资料」意图相反的页面：字典释义、磁力/种子聚合。
+# 实测 ddgs 会把它们排在前面（问翁恺的课，首屏全是「翁 怎么读」），
+# 靠标题/摘要特征识别比维护域名黑名单稳，也不怕换域名。
+_JUNK_HIT_RE = re.compile(
+    r"磁力|种子下载|torrent|bt下载|迅雷|字典|拼音|笔画|部首|怎么读|释义|漢語",
+    re.I,
+)
+
+
+def _is_junk_hit(hit: SearchHit) -> bool:
+    """标题或摘要带噪音特征的结果直接丢弃。"""
+    blob = "%s %s" % (getattr(hit, "title", "") or "", getattr(hit, "snippet", "") or "")
+    return bool(_JUNK_HIT_RE.search(blob))
+
+
 class WebSearcher:
     """多后端联网检索。"""
 
@@ -875,7 +890,13 @@ class WebSearcher:
                 scored.append((score_hit_relevance(query, hit), hit))
         scored.sort(key=lambda item: item[0], reverse=True)
         good = [hit for score, hit in scored if score >= 0.2]
-        pool = good or [hit for _, hit in scored]
+        # 先剔噪音：字典释义、磁力/种子聚合这类页面与「找资料」意图相反，
+        # 实测 ddgs 会把它们排到最前（问翁恺的课，首屏全是「翁 怎么读」）。
+        good = [hit for hit in good if not _is_junk_hit(hit)]
+        clean = [hit for _, hit in scored if not _is_junk_hit(hit)]
+        # 一条都不达标时仍退回全量兜底（单后端的结果照样能进），
+        # 但退回的是「非噪音」全量，不再把字典站/磁力站塞进 prompt。
+        pool = good or clean
         if not pool:
             return []
         # 域名先行：默认只取 5 条，若让同一站点占满名额，模型看到的就只是

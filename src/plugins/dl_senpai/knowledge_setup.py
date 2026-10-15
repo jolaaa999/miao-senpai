@@ -72,6 +72,9 @@ def _fingerprint(config: Any) -> tuple[Any, ...]:
         float(config.knowledge_timeout),
         float(config.knowledge_similarity_threshold),
         float(config.knowledge_vector_weight),
+        bool(getattr(config, "knowledge_local_require_domain", True)),
+        bool(getattr(config, "knowledge_relevance_gate", True)),
+        float(getattr(config, "knowledge_high_confidence_score", 0.75)),
     )
 
 
@@ -106,7 +109,15 @@ def build_knowledge_service(config: Any) -> KnowledgeService | None:
 
             local_root = config.knowledge_local_dir_resolved()
             retrievers.append(
-                LocalMarkdownRetriever(local_root, name="local_md")
+                # 带上领域闸门：查询没点名库里任何领域时宁可返回空，
+                # 也别把无关领域的切片塞进 prompt。
+                LocalMarkdownRetriever(
+                    local_root,
+                    name="local_md",
+                    require_named_domain=bool(
+                        getattr(config, "knowledge_local_require_domain", True)
+                    ),
+                )
             )
             names.append("local_md")
         except Exception as exc:  # noqa: BLE001 — 本地库起不来不该阻断 RAGFlow
@@ -160,6 +171,8 @@ def build_knowledge_service(config: Any) -> KnowledgeService | None:
         timeout=float(config.knowledge_timeout),
         max_chunks=int(config.knowledge_max_chunks),
         max_chars=int(config.knowledge_max_chars),
+        relevance_gate=bool(getattr(config, "knowledge_relevance_gate", True)),
+        high_confidence=float(getattr(config, "knowledge_high_confidence_score", 0.75)),
     )
 
 
