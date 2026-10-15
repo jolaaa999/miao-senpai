@@ -76,7 +76,22 @@ def test_strip_browse_markers() -> None:
     assert "找到了" in text
 
 
-def test_host_allowed_public_when_no_custom_list() -> None:
+def test_host_allowed_public_when_no_custom_list(monkeypatch: pytest.MonkeyPatch) -> None:
+    """未配置白名单时：公网放行、内网拒绝。
+
+    这里对 `_is_private_host` 打桩是**必要的**：它内部会做真实 DNS 解析
+    （browser_agent.py:371），而本机装了会劫持 DNS 的安全客户端 —— 实测
+    `example.com` 被解析到 127.0.0.1，导致断言随环境漂移。
+    单测不应该依赖外部 DNS，否则换一台机器就会红。
+    """
+    import dl_senpai.browser_agent as browser_agent
+
+    monkeypatch.setattr(
+        browser_agent,
+        "_is_private_host",
+        lambda host: (host or "").strip().lower()
+        in {"localhost", "127.0.0.1", "0.0.0.0"},
+    )
     assert _host_allowed("example.com", None)
     assert _host_allowed("www.pixiv.net", None)
     assert not _host_allowed("127.0.0.1", None)

@@ -7,8 +7,12 @@ from dl_senpai.web_search import (
     SearchHit,
     WebSearcher,
     build_auto_search_queries,
+    build_freshness_queries,
+    count_dated_hits,
     expand_search_queries,
     format_search_for_prompt,
+    is_time_sensitive_question,
+    normalize_hit_date,
     parse_search_request,
     refine_search_query,
     score_hit_relevance,
@@ -222,3 +226,179 @@ def test_build_auto_search_queries_caps_monster_hunter_question() -> None:
     assert queries
     assert all(len(q) <= 48 for q in queries)
     assert not any("提取" in q for q in queries)
+
+
+# ---------------- 发布日期（2026-10-14：修"搜到就抄、日期没细看"）----------------
+
+def test_normalize_hit_date_shapes() -> None:
+    """各后端日期形状差别很大，统一压成 YYYY-MM-DD / YYYY-MM。"""
+    assert normalize_hit_date("2026-10-12T00:00:00Z") == "2026-10-12"
+    assert normalize_hit_date("2026-10-12") == "2026-10-12"
+    assert normalize_hit_date("2026/1/5") == "2026-01-05"
+    assert normalize_hit_date("2026-10") == "2026-10"
+
+
+def test_normalize_hit_date_rejects_garbage() -> None:
+    # 取不出日期必须返回空串，不能瞎猜一个 —— 猜错比没有更糟
+    assert normalize_hit_date("") == ""
+    assert normalize_hit_date(None) == ""
+    assert normalize_hit_date("刚刚") == ""
+    assert normalize_hit_date("2026-13-99") == ""
+
+
+def test_count_dated_hits() -> None:
+    hits = [
+        SearchHit("a", "https://a.example", "s", "bing", "2026-10-12"),
+        SearchHit("b", "https://b.example", "s", "bing"),
+    ]
+    assert count_dated_hits(hits) == 1
+
+
+def test_format_shows_dates() -> None:
+    hits = [SearchHit("标题A", "https://a.example", "摘要A", "bing", "2026-10-12")]
+    text = format_search_for_prompt(hits, query="测试")
+    assert "2026-10-12" in text
+    assert "1 条带发布日期" in text
+
+
+def test_format_warns_when_no_dates() -> None:
+    """一条日期都没有时必须明说，否则模型会默认搜到的就是最新的。"""
+    hits = [SearchHit("标题A", "https://a.example", "摘要A", "bing")]
+    text = format_search_for_prompt(hits, query="测试")
+    assert "没有任何发布日期" in text
+    assert "无法据此判断时效" in text
+
+
+def test_is_time_sensitive_question() -> None:
+    for q in ("星穹铁道最新热补丁", "怪猎荒野 3.0 版本", "今天几号", "第五赛季内容"):
+        assert is_time_sensitive_question(q) is True, q
+
+
+def test_is_not_time_sensitive_for_chitchat() -> None:
+    for q in ("学姐你好呀", "在吗", "吃了吗"):
+        assert is_time_sensitive_question(q) is False, q
+
+
+def test_build_freshness_queries_adds_year_and_latest() -> None:
+    queries = build_freshness_queries("星穹铁道最新热补丁改了啥")
+    assert queries
+    assert any("最新" in q for q in queries)
+    assert any("年" in q for q in queries)
+
+
+def test_build_freshness_queries_empty_input() -> None:
+    assert build_freshness_queries("") == []
+    assert build_freshness_queries("   ") == []
+
+
+@pytest.mark.asyncio
+async def test_search_many_freshness_retry_when_undated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """时效问题 + 整批结果无日期 => 自动换词补搜一轮。
+
+    这是本次修复的核心路径：以前"相关但没日期"既不触发出相关度的换词重试，
+    也没有别的机制，模型只能拿旧内容当答案。
+    """
+    searcher = WebSearcher(provider="bing", max_results=3, timeout=5.0)
+    calls: list[str] = []
+
+    async def fake_search(query: str) -> list[SearchHit]:
+        calls.append(query)
+        if "最新" in query or "年" in query:
+            return [SearchHit("当期补丁", "https://official.example/p", "10月14日", "bing", "2026-10-14")]
+        return [SearchHit("第五赛季攻略", "https://old.example/s5", "上赛季", "bing")]
+
+    monkeypatch.setattr(searcher, "search", fake_search)
+    text = await searcher.search_many(
+        ["星穹铁道热补丁"],
+        intent_query="星穹铁道热补丁",
+        freshness_intent="星穹铁道最新热补丁改了啥",
+    )
+    assert "时效补搜" in text
+    assert "2026-10-14" in text
+    assert any("最新" in q for q in calls)
+
+
+@pytest.mark.asyncio
+async def test_search_many_no_freshness_retry_for_chitchat(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """闲聊不该多花钱做第二轮检索。"""
+    searcher = WebSearcher(provider="bing", max_results=3, timeout=5.0)
+    calls: list[str] = []
+
+    async def fake_search(query: str) -> list[SearchHit]:
+        calls.append(query)
+        return [SearchHit("闲聊", "https://a.example/1", "s", "bing")]
+
+    monkeypatch.setattr(searcher, "search", fake_search)
+    text = await searcher.search_many(
+        ["学姐你好"], intent_query="学姐你好", freshness_intent="学姐你好呀"
+    )
+    assert "时效补搜" not in text
+    assert all("最新" not in q for q in calls)
+
+
+@pytest.mark.asyncio
+async def test_no_freshness_retry_for_clock_questions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """问"今天几号"由系统时钟回答，不该为时效白补搜一轮。"""
+    searcher = WebSearcher(provider="bing", max_results=3, timeout=5.0)
+    calls: list[str] = []
+
+    async def fake_search(query: str) -> list[SearchHit]:
+        calls.append(query)
+        return [SearchHit("日历", "https://a.example/1", "s", "bing")]
+
+    monkeypatch.setattr(searcher, "search", fake_search)
+    text = await searcher.search_many(
+        ["今天几号"], intent_query="今天几号", freshness_intent="今天几号"
+    )
+    assert "时效补搜" not in text
+
+
+@pytest.mark.asyncio
+async def test_search_many_no_freshness_retry_when_dated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """首轮结果已经带日期 => 不补搜，省一次检索。"""
+    searcher = WebSearcher(provider="bing", max_results=3, timeout=5.0)
+    calls: list[str] = []
+
+    async def fake_search(query: str) -> list[SearchHit]:
+        calls.append(query)
+        return [SearchHit("带日期", "https://a.example/1", "s", "bing", "2026-10-14")]
+
+    monkeypatch.setattr(searcher, "search", fake_search)
+    text = await searcher.search_many(
+        ["星穹铁道热补丁"], freshness_intent="最新热补丁"
+    )
+    assert "时效补搜" not in text
+
+
+@pytest.mark.asyncio
+async def test_freshness_section_survives_budget_split(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """补搜结果不能被字符预算切掉。
+
+    预算若仍按第一轮的查询数摊，补搜段会排在后面、被调用方整体截断 ——
+    而那段正是当期证据，切掉就等于白补搜。
+    """
+    searcher = WebSearcher(provider="bing", max_results=3, timeout=5.0)
+
+    async def fake_search(query: str) -> list[SearchHit]:
+        if "最新" in query or "年" in query:
+            return [SearchHit("当期补丁内容", "https://official.example/p", "热补丁", "bing", "2026-10-14")]
+        return [SearchHit("旧内容" * 40, "https://old.example/s5", "旧" * 200, "bing")]
+
+    monkeypatch.setattr(searcher, "search", fake_search)
+    text = await searcher.search_many(
+        ["星穹铁道热补丁"],
+        intent_query="星穹铁道热补丁",
+        freshness_intent="星穹铁道最新热补丁改了啥",
+        max_chars=1200,
+    )
+    assert "当期补丁内容" in text

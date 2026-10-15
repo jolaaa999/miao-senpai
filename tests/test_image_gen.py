@@ -241,10 +241,14 @@ async def test_chat_parses_draw_marker() -> None:
 
 
 @pytest.mark.asyncio
-async def test_generate_image_file_uses_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_generate_image_file_uses_cache(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     from dl_senpai import image_gen
 
-    cache_dir = Path("data/dl_senpai/draw_test_cache")
+    # 必须用 tmp_path：这里以前写的是相对路径 data/dl_senpai/draw_test_cache，
+    # 从仓库根跑 pytest 就会把测试图落进生产数据目录。
+    cache_dir = tmp_path / "draw_cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
     cfg = PluginConfig(
         OPENAI_API_KEY="sk-test",

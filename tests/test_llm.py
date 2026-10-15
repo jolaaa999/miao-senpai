@@ -31,7 +31,8 @@ def test_system_prompt_modes() -> None:
     assert "学姐" in mention
     assert "百度迎新群" in mention
     assert "锐评" in mention or "炸毛" in mention
-    assert "傲娇" in mention or "炸毛" in mention
+    # 2026-10-12 人设由「傲娇」改为「软萌」，断言同步换到新性格标记
+    assert "委屈" in mention or "鼓腮" in mention
     assert "【当前时间】" in mention
     assert "身份保密" in mention or "真人" in mention
     assert "<<<STICKER" in mention

@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from dl_senpai.config import PluginConfig
 from dl_senpai.shop import ShopCatalog, ShopStore, SHOP_SLOT_COUNT
 from dl_senpai.shop_import import ImportResult
 from dl_senpai.shop_replenish import needs_auto_replenish, try_auto_replenish
@@ -66,12 +67,22 @@ async def test_try_auto_replenish_adds_items(store: ShopStore) -> None:
         item=fake_item,
     )
 
+    # 显式给出配置：`try_auto_replenish` 在 `api_configured()` 为假时会直接
+    # 返回 (0, "未配置识图 API…")。重构前这里靠真实 `.env` 里的中转 Key 蒙混
+    # 过关——那正是 Phase 2 要消灭的"测试隐式依赖生产配置"。现在改为显式声明。
+    cfg = PluginConfig(
+        OPENAI_API_KEY="sk-test",
+        OPENAI_BASE_URL="https://example.com/v1",
+        OPENAI_MODEL="test-model",
+    )
+    assert cfg.api_configured() is True
+
     with patch(
         "dl_senpai.shop_import.import_from_search",
         new_callable=AsyncMock,
         return_value=[fake_result],
     ) as mock_import:
-        added, note = await try_auto_replenish(gid, store)
+        added, note = await try_auto_replenish(gid, store, cfg)
         assert added == 1
         assert "上新" in note
         assert mock_import.called

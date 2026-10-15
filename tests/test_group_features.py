@@ -45,7 +45,7 @@ class _FakeConfig:
 def test_feature_catalog_complete() -> None:
     keys = {k for k, _ in FEATURES}
     assert keys == FEATURE_KEYS
-    assert len(FEATURES) == 21
+    assert len(FEATURES) == 20
     # key 与 config 的 {key}_enable 字段一一对应
     for key, _label in FEATURES:
         assert hasattr(_FakeConfig(), f"{key}_enable")
