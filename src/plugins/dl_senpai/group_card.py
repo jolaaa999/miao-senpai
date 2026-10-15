@@ -10,6 +10,8 @@ from typing import Literal
 from nonebot import logger
 from nonebot.adapters.onebot.v11 import Bot, GroupMessageEvent, MessageEvent
 
+from .cache import SessionCooldown
+
 CardKind = Literal["request", "playful"]
 
 # 模型在正文后附带的隐式指令，发送前会剥掉
@@ -52,22 +54,12 @@ class CardParseResult:
     actions: list[CardAction]
 
 
-class CardCooldown:
-    """主动改名片冷却（对方明确要求不走这里）。"""
+class CardCooldown(SessionCooldown):
+    """主动改名片冷却（对方明确要求不走这里）。
 
-    def __init__(self) -> None:
-        self._last: dict[str, float] = {}
-
-    def ready(self, session_id: str, cooldown_sec: int, now: float | None = None) -> bool:
-        if cooldown_sec <= 0:
-            return True
-        if session_id not in self._last:
-            return True
-        now = time.time() if now is None else now
-        return (now - self._last[session_id]) >= cooldown_sec
-
-    def mark(self, session_id: str, now: float | None = None) -> None:
-        self._last[session_id] = time.time() if now is None else now
+    Phase 2：原本是自带 `dict[str, float]` 的独立实现（且无界），
+    现统一到 `SessionCooldown`。`ready()` / `mark()` 语义逐字不变。
+    """
 
 
 def looks_like_card_request(text: str) -> bool:

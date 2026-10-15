@@ -41,6 +41,10 @@ if driver is not None:
     @driver.on_startup
     async def _on_startup() -> None:
         cfg = get_config()
+        # 配置热重载：Web 后台改 .env 后无需重启即可生效
+        from .config_watcher import get_watcher
+
+        get_watcher().start()
         status = "已配置" if cfg.api_configured() else "未配置（仅提示）"
         logger.info(
             f"[dl_senpai] provider={cfg.provider()} model={cfg.active_model()} "
@@ -60,8 +64,6 @@ if driver is not None:
             f"accept_friend={'on' if cfg.auto_accept_friend else 'off'} "
             f"accept_invite={'on' if cfg.auto_accept_group else 'off'} "
             f"friend_add={'on' if cfg.friend_add_enable else 'off'} "
-            f"like={'on' if cfg.like_enable else 'off'} "
-            f"qzone={'on' if cfg.qzone_enable else 'off'} "
             f"person_memory={'on' if cfg.person_memory_enable else 'off'} "
             f"verify={'on' if cfg.verify_enable else 'off'} "
             f"checkin={'on' if cfg.checkin_enable else 'off'}"
@@ -73,11 +75,6 @@ if driver is not None:
             from .gptsovits_server import start_gptsovits_server
 
             await start_gptsovits_server(cfg)
-
-        if cfg.should_autostart_qzone():
-            from .qzone_server import start_qzone_bridge
-
-            await start_qzone_bridge(cfg)
 
     @driver.on_bot_connect
     async def _on_bot_connect(bot: Bot) -> None:
@@ -96,36 +93,13 @@ if driver is not None:
         # 不传入 config 快照：循环内每轮 get_config()，.env 开关改完重启即生效
         asyncio.create_task(social_loop(bot))
 
-        # NapCat 连上后：用 Cookie 登录空间桥（桥进程已由 startup 拉起）
-        cfg = _cfg()
-        if cfg.qzone_enable and cfg.qzone_sync_cookie:
-            async def _sync_qzone() -> None:
-                # 等桥端口就绪再推 Cookie（autostart 竞态）
-                try:
-                    from .qzone_server import is_port_open, wait_for_bridge_ready
-                    from .qzone_sync import sync_napcat_cookies_to_qzone
-
-                    host, port = cfg.qzone_bind_host_port()
-                    if not is_port_open(host, port):
-                        await wait_for_bridge_ready(host, port, min(30.0, cfg.qzone_startup_timeout))
-                    await asyncio.sleep(1.0)
-                    info = await sync_napcat_cookies_to_qzone(bot, cfg)
-                    logger.info(
-                        f"[dl_senpai] qzone login via NapCat ok "
-                        f"uin={info.get('uin')} bridge_hot={info.get('bridge_hot')}"
-                    )
-                except Exception as e:  # noqa: BLE001
-                    logger.warning(f"[dl_senpai] qzone napcat cookie sync skipped: {e}")
-
-            asyncio.create_task(_sync_qzone())
-
     @driver.on_shutdown
     async def _on_shutdown() -> None:
+        from .config_watcher import get_watcher
         from .gptsovits_server import stop_gptsovits_server
-        from .qzone_server import stop_qzone_bridge
 
+        await get_watcher().stop()
         await stop_gptsovits_server()
-        await stop_qzone_bridge()
 
 
     async def _warmup_trends() -> None:

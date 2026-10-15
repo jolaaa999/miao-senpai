@@ -13,6 +13,7 @@ from nonebot import logger
 from nonebot.adapters.onebot.v11 import MessageSegment
 from openai import APIError, APIStatusError, AsyncOpenAI, RateLimitError
 
+from .cache import SessionCooldown
 from .config import PluginConfig, get_config
 
 SenpaiDrawKind = Literal["general", "appearance", "outfit"]
@@ -131,20 +132,8 @@ class DrawRequest:
     force: bool = False
 
 
-class DrawCooldown:
-    def __init__(self) -> None:
-        self._last: dict[str, float] = {}
-
-    def ready(self, session_id: str, cooldown_sec: int, now: float | None = None) -> bool:
-        if cooldown_sec <= 0:
-            return True
-        if session_id not in self._last:
-            return True
-        now = time.time() if now is None else now
-        return (now - self._last[session_id]) >= cooldown_sec
-
-    def mark(self, session_id: str, now: float | None = None) -> None:
-        self._last[session_id] = time.time() if now is None else now
+class DrawCooldown(SessionCooldown):
+    """生图冷却。Phase 2 统一到 `SessionCooldown`（原先为无界裸 dict）。"""
 
 
 def parse_draw_request(raw_reply: str) -> DrawRequest:

@@ -1,4 +1,3 @@
-from __future__ import annotations
 
 import re
 
@@ -10,27 +9,17 @@ from nonebot.adapters.onebot.v11 import (
     GroupMessageEvent,
     MessageEvent,
     MessageSegment,
+    NoticeEvent,
     PrivateMessageEvent,
 )
 from nonebot.adapters.onebot.v11 import Message as OBMessage
-from nonebot.rule import to_me, Rule
 
 from .config import PluginConfig, get_config
-from .llm import LLMError, get_llm
 from .memory import (
     ChatMemory,
     session_id_for_group,
     session_id_for_private,
 )
-from .memory_recall import messages_for_llm_with_recall
-from .inner_state import (
-    build_inner_state_brief,
-    get_inner_state_store,
-    interrupt_prob_multiplier,
-    scope_key as inner_scope_key,
-)
-from .group_style import build_group_style_brief, get_group_style_store
-from .trigger import AttentionWindow, InterruptCooldown, decide_trigger
 from .welcome import build_welcome_text
 from .group_verify import (
     build_verify_pass_text,
@@ -38,77 +27,13 @@ from .group_verify import (
     get_verify_store,
     looks_like_verify_message,
 )
-from .group_features import is_feature_enabled, observe_group
+from .group_features import is_feature_enabled
+from .observability import trace_scope
 from .persona import get_senpai_name
-from .style import polish_reply, strip_unapplied_mute_claims
-from .reply_send import send_text_reply, _send_image_with_retry
-from .reply_quote import build_chat_text_with_reply, resolve_reply_message, user_intent_text
-from .stickers import get_sticker_store, maybe_pick_sticker_reply, extract_sticker_segments
-from .voice import (
-    build_voice_segment,
-    extract_voice_quote_from_user,
-    looks_like_voice_request,
-    text_for_voice,
-)
-from .image_gen import (
-    DrawCooldown,
-    build_image_segment,
-    classify_senpai_draw,
-    draw_block_note,
-    draw_failure_note,
-    draw_retry_hint,
-    parse_draw_request,
-    resolve_draw_prompt,
-    strip_draw_markers,
-    wants_senpai_image,
-)
-from .browser_agent import (
-    BrowseCooldown,
-    browse_block_note,
-    browse_failure_note,
-    browse_retry_hint,
-    browser_configured,
-    parse_browse_request,
-    paths_to_image_segments,
-    resolve_browse_tasks,
-    run_browse_tasks,
-    strip_browse_markers,
-    wants_browser_help,
-)
-from .vision import (
-    extract_vision_image_segments,
-    format_user_text_for_chat,
-    format_user_text_for_memory,
-    resolve_vision_images,
-)
-from .group_card import (
-    CardCooldown,
-    action_summary_for_memory,
-    apply_card_actions,
-    apply_group_title,
-    bot_can_manage_cards,
-    build_card_candidates,
-    card_failure_note,
-    card_missing_marker_note,
-    extract_at_user_ids,
-    filter_actions,
-    format_candidates_for_prompt,
-    looks_like_card_request,
-    title_apply_failure_note,
-    title_apply_success_note,
-)
-from .group_mute import (
-    MuteCooldown,
-    apply_mute_actions,
-    can_emit_mute,
-    filter_mute_actions,
-    format_mute_ack,
-    looks_like_mute_request,
-    mute_block_note,
-    mute_summary_for_memory,
-    resolve_explicit_mute,
-)
-from .trends import get_trends_brief, get_hot_items
+from .style import polish_reply
+from .reply_send import send_text_reply
+from .stickers import get_sticker_store
+from .group_card import apply_group_title, bot_can_manage_cards, title_apply_failure_note, title_apply_success_note
 from .checkin import (
     TITLE_MILESTONES,
     format_checkin_reply,
@@ -119,25 +44,7 @@ from .checkin import (
     get_checkin_store,
     parse_checkin_command,
 )
-from .person_memory import (
-    ImpressionUpdate,
-    build_person_memory_brief,
-    extract_traits_from_user_text,
-    get_person_memory_store,
-)
-from .affection import (
-    all_affection_tier_titles,
-    affection_scope_private,
-    build_affection_brief,
-    format_affection_line,
-    format_gain_footnote,
-    format_help as format_affection_help,
-    format_leaderboard as format_affection_leaderboard,
-    format_status as format_affection_status,
-    get_affection_store,
-    is_private_affection_scope,
-    parse_affection_command,
-)
+from .affection import all_affection_tier_titles, affection_scope_private, format_affection_line, format_gain_footnote, format_help as format_affection_help, format_leaderboard as format_affection_leaderboard, format_status as format_affection_status, get_affection_store, is_private_affection_scope, parse_affection_command
 from .shop import (
     format_shop_help,
     get_shop_store,
@@ -297,19 +204,36 @@ async def _finalize_affection_gain(
     return text
 
 _memory: ChatMemory | None = None
-_cooldown = InterruptCooldown()
-_attention = AttentionWindow()
-_card_cooldown = CardCooldown()
-_mute_cooldown = MuteCooldown()
-_draw_cooldown = DrawCooldown()
-_browse_cooldown = BrowseCooldown()
-
 def _get_memory(config: PluginConfig | None = None) -> ChatMemory:
     global _memory
     cfg = config or get_config()
     if _memory is None:
         _memory = ChatMemory(cfg.memory_dir, max_history=cfg.max_history)
     return _memory
+
+
+_facade_singleton = None
+
+
+# -- Phase 6A：共享 Tool Dispatch --
+
+_dispatcher_singleton = None
+
+
+def _get_shared_dispatcher():
+    """取共享 ToolDispatcher 单例。
+
+    Phase 6A 第九/十节：legacy **必须**复用与 RUNTIME 相同的
+    ToolExecutor，禁止另建 LegacyToolExecutor。
+    """
+    global _dispatcher_singleton
+    if _dispatcher_singleton is None:
+        from .agent.tool_dispatch import SharedToolDispatcher
+
+        _dispatcher_singleton = SharedToolDispatcher()
+    return _dispatcher_singleton
+
+
 
 
 def _plain_text(event: MessageEvent) -> str:
@@ -398,11 +322,12 @@ async def _reply(
         bubble_max=config.bubble_max,
         bubble_min_chars=config.bubble_min_chars,
         bubble_prefer_chars=config.bubble_prefer_chars,
+        bubble_total_max_chars=config.bubble_total_max_chars,
     )
 
 
-welcome_matcher = on_notice(priority=5, block=False)
-leave_matcher = on_notice(priority=5, block=False)
+# [Phase 3 停用] welcome_matcher = on_notice(priority=5, block=False)   # 已由 gateway_matcher + Router 接管
+# [Phase 3 停用] leave_matcher = on_notice(priority=5, block=False)   # 已由 gateway_matcher + Router 接管
 
 
 async def _verify_rule(event: GroupMessageEvent, bot: Bot) -> bool:
@@ -419,10 +344,11 @@ async def _verify_rule(event: GroupMessageEvent, bot: Bot) -> bool:
     return looks_like_verify_message(event.get_plaintext() or "")
 
 
-verify_matcher = on_message(Rule(_verify_rule), priority=4, block=True)
+# [Phase 3 停用] verify_matcher = on_message(Rule(_verify_rule), priority=4, block=True)   # 已由 gateway_matcher + Router 接管
 
 
-@welcome_matcher.handle()
+# [Phase 3] 不再注册到 NoneBot；函数体保留给 Router 适配层调用
+# @welcome_matcher.handle()
 async def handle_group_increase(bot: Bot, event: GroupIncreaseNoticeEvent) -> None:
     config: PluginConfig = get_config()
     if not config.is_group_allowed(event.group_id):
@@ -473,7 +399,8 @@ async def handle_group_increase(bot: Bot, event: GroupIncreaseNoticeEvent) -> No
     await bot.send(event, OBMessage(MessageSegment.at(event.user_id) + " " + text))
 
 
-@leave_matcher.handle()
+# [Phase 3] 不再注册到 NoneBot；函数体保留给 Router 适配层调用
+# @leave_matcher.handle()
 async def handle_group_decrease(bot: Bot, event: GroupDecreaseNoticeEvent) -> None:
     """退群/被踢：清掉待认证，避免空转踢人任务。"""
     config = get_config()
@@ -484,7 +411,8 @@ async def handle_group_decrease(bot: Bot, event: GroupDecreaseNoticeEvent) -> No
     get_verify_store(config.verify_dir).drop(event.group_id, event.user_id)
 
 
-@verify_matcher.handle()
+# [Phase 3] 不再注册到 NoneBot；函数体保留给 Router 适配层调用
+# @verify_matcher.handle()
 async def handle_group_verify(bot: Bot, event: GroupMessageEvent) -> None:
     config = get_config()
     store = get_verify_store(config.verify_dir)
@@ -507,11 +435,31 @@ def _message_ats_bot(event: MessageEvent, bot: Bot) -> bool:
     return False
 
 
-# —— 被动收集群聊/私聊里的表情包 ——
-sticker_collector = on_message(priority=100, block=False)
+# —— Phase 3：以下旧 matcher 已停用，改由 gateway_matcher + Router 接管 ——
+#
+# 保留变量名与 handle 函数（`handle_checkin` / `handle_shop` 等），因为
+# Router 的 dispatch_* 适配层仍在调用它们。**只是不再注册到 NoneBot**。
+#
+# 停用而非删除的理由：这些 handler 是经过真实群聊验证的业务实现，
+# 删除会让 Router 适配层失去目标。等 Phase 4 把业务搬进独立 plugin 后，
+# 再连同适配层一起清理。
+#
+# 对应关系（详见 Phase 3 报告的 matcher 迁移表）：
+#   verify_matcher    → Command stage / command_registry / guard_verify
+#   checkin_matcher   → Command stage / command_registry / guard_checkin
+#   shop_matcher      → Command stage / command_registry / guard_shop
+#   private_matcher   → Agent stage / AgentTriggerPolicy(PRIVATE)
+#   mention_matcher   → Agent stage / AgentTriggerPolicy(MENTION)
+#   interrupt_matcher → Agent stage / AgentTriggerPolicy(INTERRUPT)
+#   sticker_collector → Observer / sticker_collector
+#   welcome_matcher   → Observer / welcome_notice
+#   leave_matcher     → Observer / leave_notice
+
+_LEGACY_MATCHERS_DISABLED = True
 
 
-@sticker_collector.handle()
+# [Phase 3] 不再注册到 NoneBot；函数体保留给 Router 适配层调用
+# @sticker_collector.handle()
 async def handle_sticker_collect(bot: Bot, event: MessageEvent) -> None:
     config = get_config()
     resolved = _resolve_session(event, config)
@@ -544,10 +492,11 @@ def _checkin_rule(event: MessageEvent) -> bool:
     )
 
 
-checkin_matcher = on_message(Rule(_checkin_rule), priority=5, block=True)
+# [Phase 3 停用] checkin_matcher = on_message(Rule(_checkin_rule), priority=5, block=True)   # 已由 gateway_matcher + Router 接管
 
 
-@checkin_matcher.handle()
+# [Phase 3] 不再注册到 NoneBot；函数体保留给 Router 适配层调用
+# @checkin_matcher.handle()
 async def handle_checkin(bot: Bot, event: GroupMessageEvent) -> None:
     config = get_config()
     if not is_feature_enabled(config, event.group_id, "checkin"):
@@ -740,10 +689,11 @@ def _shop_rule(event: MessageEvent) -> bool:
     return parse_shop_command(text) != "none"
 
 
-shop_matcher = on_message(Rule(_shop_rule), priority=5, block=True)
+# [Phase 3 停用] shop_matcher = on_message(Rule(_shop_rule), priority=5, block=True)   # 已由 gateway_matcher + Router 接管
 
 
-@shop_matcher.handle()
+# [Phase 3] 不再注册到 NoneBot；函数体保留给 Router 适配层调用
+# @shop_matcher.handle()
 async def handle_shop(bot: Bot, event: GroupMessageEvent) -> None:
     config = get_config()
     if not is_feature_enabled(config, event.group_id, "shop"):
@@ -857,14 +807,12 @@ async def handle_shop(bot: Bot, event: GroupMessageEvent) -> None:
 
 
 # —— 私聊：每条消息都当作直接找学姐 ——
-private_matcher = on_message(
-    Rule(lambda event: isinstance(event, PrivateMessageEvent)),
-    priority=8,
-    block=True,
-)
+# [Phase 3 停用] private_matcher = on_message(Rule(...), priority=8, block=True)
+#   已由 AgentTriggerPolicy(PRIVATE) 接管
 
 
-@private_matcher.handle()
+# [Phase 3] 不再注册到 NoneBot；函数体保留给 Router 适配层调用
+# @private_matcher.handle()
 async def handle_private(bot: Bot, event: PrivateMessageEvent) -> None:
     config = get_config()
     if not config.enable_private:
@@ -875,19 +823,21 @@ async def handle_private(bot: Bot, event: PrivateMessageEvent) -> None:
 
 
 # —— 被 @ 必回 ——
-mention_matcher = on_message(rule=to_me(), priority=10, block=True)
+# [Phase 3 停用] mention_matcher = on_message(rule=to_me(), priority=10, block=True)   # 已由 gateway_matcher + Router 接管
 
 
-@mention_matcher.handle()
+# [Phase 3] 不再注册到 NoneBot；函数体保留给 Router 适配层调用
+# @mention_matcher.handle()
 async def handle_mention(bot: Bot, event: MessageEvent) -> None:
     await _handle_chat(bot, event, force_mention=True)
 
 
 # —— 低概率插嘴（未 @）——
-interrupt_matcher = on_message(priority=50, block=False)
+# [Phase 3 停用] interrupt_matcher = on_message(priority=50, block=False)   # 已由 gateway_matcher + Router 接管
 
 
-@interrupt_matcher.handle()
+# [Phase 3] 不再注册到 NoneBot；函数体保留给 Router 适配层调用
+# @interrupt_matcher.handle()
 async def handle_interrupt(bot: Bot, event: MessageEvent) -> None:
     if event.is_tome():
         return
@@ -906,818 +856,342 @@ async def _handle_chat(
         return
     session_id, _ = resolved
 
-    if isinstance(event, GroupMessageEvent):
-        observe_group(event.group_id)
+    # 建立 trace 上下文：本轮消息的所有阶段（LLM/工具/记忆/发送）共用
+    # 同一个 trace_id，日志里可以整条链路 grep 出来。
+    # 这里只建立上下文，不重写任何既有日志语句（Phase 2 范围约定）。
+    with trace_scope(
+        session_id=session_id,
+        message_id=str(getattr(event, "message_id", "") or ""),
+        stage="chat",
+        user_id=str(getattr(event, "user_id", "") or ""),
+        group_id=str(getattr(event, "group_id", "") or ""),
+        force_mention=force_mention,
+    ):
+        await _handle_chat_inner(bot, event, force_mention=force_mention, config=config)
 
-    text = _plain_text(event)
+
+async def _handle_chat_inner(
+    bot: Bot,
+    event: MessageEvent,
+    *,
+    force_mention: bool,
+    config: PluginConfig,
+) -> None:
+    """**Forwarding wrapper**（Phase 6.5 第八节）。
+
+    真实实现已搬到 `agent/legacy_orchestrator.py` 的
+    `LegacyOrchestrator.run()`。本函数只做 argument 适配。
+
+    保留它的原因：兼容层与测试都按这个名字引用
+    （例如 test_phase55_acceptance 的 monkeypatch）。
+
+    禁止在这里重新加入：
+        prompt 组装 / LLM 调用 / intent 判定 / tool 逻辑 / memory 逻辑
+    """
+    from .agent.legacy_orchestrator import LegacyOrchestrator
+
+    await LegacyOrchestrator().run(
+        bot,
+        event,
+        force_mention=force_mention,
+        config=config,
+    )
+
+
+# ============================================================
+# Phase 3：Gateway matcher（Router 接管的唯一入口）
+# ============================================================
+#
+# Phase 3 的核心变化：**从 7 个 NoneBot matcher 收敛为 1 个**。
+#
+# 重构前（Phase 1 审计）：
+#     verify(4) welcome/leave(5) checkin(5) shop(5)
+#     private(8) mention(10) interrupt(50) sticker(100)
+#   —— "谁处理这条消息"由 priority 数字隐式决定，散落在 handlers.py。
+#
+# 现在：
+#     gateway_matcher(1)  →  gateway.from_onebot_event()  →  Router
+#                                                        ├ Command（Registry）
+#                                                        ├ Plugin
+#                                                        └ Agent（trigger + legacy bridge）
+#
+# 本 matcher **不做任何业务判断**，只负责：把 OneBot 事件归一化 → 交给 Router。
+#
+# 关于两个 matcher：
+#   - `gateway_notice_matcher` 处理 notice（入群/退群），只走观察者；
+#   - `gateway_message_matcher` 处理消息，走观察者 + Router。
+# 分开是因为 notice 事件没有"回复"语义，混在一起会让 Router 里到处是类型判断。
+
+gateway_notice_matcher = on_notice(priority=1, block=False)
+gateway_message_matcher = on_message(priority=1, block=False)
+
+
+async def _dispatch_via_router(bot: Bot, event: MessageEvent) -> None:
+    """把一条 OneBot 事件交给新 Router 处理。
+
+    这是 Phase 3 唯一的调度入口。`block=False` 是刻意的：即使 Router 判定
+    "这条消息不需要回复"，也不应该阻止其他插件（如果有）看到它。
+    """
+    from .gateway import from_onebot_event
+    from .core.runtime import get_runtime
+
+    ctx = from_onebot_event(event, bot)
+    if ctx is None:
+        return
+    try:
+        runtime = get_runtime()
+        await runtime.dispatch(ctx)
+    except Exception:  # noqa: BLE001 — 调度失败不应让整条链路静默
+        logger.exception("dl_senpai gateway dispatch failed")
+
+
+@gateway_notice_matcher.handle()
+async def handle_gateway_notice(bot: Bot, event: NoticeEvent) -> None:
+    """通知类事件：只走旁路观察者（入群欢迎 / 退群清理）。"""
+    from .gateway import from_onebot_event
+
+    ctx = from_onebot_event(event, bot)
+    if ctx is None:
+        return
+    try:
+        from .core.runtime import get_runtime
+
+        await get_runtime().router.dispatch_observers(ctx)
+    except Exception:  # noqa: BLE001
+        logger.exception("dl_senpai gateway notice dispatch failed")
+
+
+@gateway_message_matcher.handle()
+async def handle_gateway_message(bot: Bot, event: MessageEvent) -> None:
+    """消息事件：观察者（永不短路）+ Router（Command/Plugin/Agent）。"""
+    await _dispatch_via_router(bot, event)
+#
+# 本节把「Router 决定调用谁」与「业务怎么执行」接起来。
+#
+# 设计原则：这些函数是**薄适配器**——只从 MessageContext 取回 raw_event，
+# 然后调用既有的 `handle_*` 实现。业务逻辑一行不变。
+#
+# 之所以能这么做，是因为 `handle_checkin` / `handle_shop` 等函数本身
+# 已经是"输入 (bot, event) → 输出副作用"的纯执行器，不关心自己被谁调用。
+# Phase 3 要改的正是"谁调用它们"，因此适配成本极低。
+
+
+def _ctx_bot_event(ctx):
+    """从 MessageContext 取回 (bot, raw_event)。
+
+    新代码不应依赖 raw_event；这里是**唯一**的转换点，让 Router/Command
+    保持平台无关，而 legacy 业务继续用 OneBot 事件。
+    """
+    return getattr(ctx, "bot", None), getattr(ctx, "raw_event", None)
+
+
+async def dispatch_checkin_command(ctx, match) -> None:
+    """签到 / 好感度命令的 Router 入口。
+
+    `match.name` 区分是签到域还是好感度域，但两者共用同一个
+    `handle_checkin` 实现（原 matcher 也是同一函数处理两者）。
+    """
+    bot, event = _ctx_bot_event(ctx)
+    if bot is None or event is None:
+        return
+    if not isinstance(event, GroupMessageEvent):
+        return
+    await handle_checkin(bot, event)
+
+
+async def dispatch_shop_command(ctx, match) -> None:
+    """商店命令的 Router 入口。"""
+    bot, event = _ctx_bot_event(ctx)
+    if bot is None or event is None:
+        return
+    if not isinstance(event, GroupMessageEvent):
+        return
+    await handle_shop(bot, event)
+
+
+async def dispatch_verify_command(ctx, match) -> None:
+    """新人认证命令的 Router 入口。"""
+    bot, event = _ctx_bot_event(ctx)
+    if bot is None or event is None:
+        return
+    if not isinstance(event, GroupMessageEvent):
+        return
+    await handle_group_verify(bot, event)
+
+
+async def observe_stickers(ctx) -> None:
+    """表情采集观察者。
+
+    这是 Phase 3 「Observer ≠ Router Plugin」的样板：它**永不短路**，
+    因此即使"签到"命令已经 consume 了这条消息，它仍然会被执行
+    （观察者在 Router.dispatch 之前独立跑）。
+
+    行为与旧的 `sticker_collector` matcher（priority=100, block=False）等价。
+    """
+    bot, event = _ctx_bot_event(ctx)
+    if bot is None or event is None:
+        return
+    config = get_config()
+    resolved = _resolve_session(event, config)
+    if resolved is None:
+        return
+    session_id, _ = resolved
     await _collect_stickers(
         event,
         session_id=session_id,
-        context_text=text,
+        context_text=_plain_text(event),
         source_user=_sender_name(event),
         config=config,
         bot=bot,
     )
-    sticker_segments = extract_sticker_segments(event.message)
-    sticker_count = len(sticker_segments)
-    reply_message = await resolve_reply_message(bot, event)
-    photo_segments: list[dict] = []
-    if _fe(config, event, "vision"):
-        photo_segments.extend(extract_vision_image_segments(event.message))
-        if reply_message is not None:
-            photo_segments.extend(extract_vision_image_segments(reply_message))
-    image_urls: list[str] = []
-    if photo_segments:
-        image_urls = await resolve_vision_images(
-            bot,
-            photo_segments,
-            max_images=config.vision_max_images,
-        )
-    has_images = bool(photo_segments) or bool(image_urls)
-    image_count = len(photo_segments)
-    chat_text = format_user_text_for_chat(
-        text,
-        image_count=image_count,
-        sticker_count=sticker_count,
-    )
-    # 引用别人消息再 @学姐：把引用内容 + 自己说的一起给模型
-    chat_text = build_chat_text_with_reply(event, chat_text, reply_message=reply_message)
-    intent_text = user_intent_text(text, chat_text)
 
-    # QQ 很难同条消息又 @ 又发表情：刚找过学姐后短时间内发的表情，也算找她
-    followup_sticker = False
-    if (
-        not force_mention
-        and not _is_to_me(event)
-        and sticker_count > 0
-        and isinstance(event, GroupMessageEvent)
-        and _attention.active(
-            session_id,
-            event.user_id,
-            config.sticker_followup_sec,
-        )
-    ):
-        force_mention = True
-        followup_sticker = True
-        if chat_text.startswith("（发了个表情"):
-            chat_text = chat_text.replace("（发了个表情", "（接着找学姐，发了个表情", 1)
-        elif chat_text:
-            chat_text = f"（接着找学姐）{chat_text}"
-        else:
-            chat_text = "（接着找学姐，发了个表情）"
 
-    if force_mention and not chat_text and not has_images and sticker_count == 0:
-        chat_text = f"{get_senpai_name()}～"
-    if not chat_text and not force_mention and not has_images and sticker_count == 0:
-        return
+async def observe_recent_chat(ctx) -> None:
+    """最近聊天观察者：把**每一条**群/私聊消息记进当天流水。
 
-    # 纯表情包、未 @ 且不在跟进窗口：只被动收集，不插嘴、不调模型
-    if (
-        sticker_count > 0
-        and not text.strip()
-        and not has_images
-        and not force_mention
-    ):
-        return
+    为什么要独立于 Router：她只回被 @ 的那条，但「你怎么看」的质量取决于
+    前面那段她没参与的对话。观察者永不短路，所以即使这条消息被命令 consume
+    了，也照样进流水。
 
-    is_mentioned = (
-        force_mention
-        or _is_to_me(event)
-        or isinstance(event, PrivateMessageEvent)
-    )
+    为什么不用 context.history 顶替：那里只有她参与过的轮次，别人互聊的内容
+    从来没有进过任何存储。
 
-    # 群风格采样：凡进到聊天处理的群消息都记一笔（含未触发回复的）
-    if (
-        _fe(config, event, "group_style")
-        and isinstance(event, GroupMessageEvent)
-        and (text or "").strip()
-    ):
-        try:
-            get_group_style_store(config.group_style_dir).observe(
-                event.group_id, text or intent_text
-            )
-        except Exception:  # noqa: BLE001
-            logger.warning("dl_senpai group_style observe failed")
-
-    inner_key = "global"
-    interrupt_scale = 1.0
-    inner_state_brief = ""
-    if _fe(config, event, "inner_state"):
-        try:
-            inner_key = inner_scope_key(
-                per_group=bool(config.inner_state_per_group),
-                group_id=event.group_id if isinstance(event, GroupMessageEvent) else None,
-                private=isinstance(event, PrivateMessageEvent),
-            )
-            istore = get_inner_state_store(config.inner_state_dir)
-            istate = istore.load(inner_key)
-            interrupt_scale = interrupt_prob_multiplier(istate)
-            inner_state_brief = build_inner_state_brief(istate)
-        except Exception:  # noqa: BLE001
-            logger.warning("dl_senpai inner_state load failed")
-
-    decision = decide_trigger(
-        is_mentioned=is_mentioned,
-        text=text or chat_text,
-        session_id=session_id,
-        interrupt_prob=config.interrupt_prob,
-        cooldown_sec=config.interrupt_cooldown,
-        min_msg_len=config.min_msg_len,
-        keyword_boost=config.keyword_boost,
-        cooldown=_cooldown,
-        has_images=has_images,
-        image_boost=config.image_interrupt_boost,
-        interrupt_prob_scale=interrupt_scale,
-    )
-
-    if decision.kind == "none":
-        return
-
-    # 本轮已明确找学姐：武装窗口，方便下一条表情包接上
-    if decision.kind == "mention" and isinstance(event, GroupMessageEvent):
-        _attention.arm(session_id, event.user_id)
-        if followup_sticker:
-            logger.info(
-                f"dl_senpai sticker follow-up as mention "
-                f"session={session_id} user={event.user_id}"
-            )
-
-    interrupt = decision.kind == "interrupt"
-    if interrupt:
-        _cooldown.mark(session_id)
-
-    if not config.api_configured():
-        if is_mentioned:
-            await _reply(
-                bot,
-                event,
-                polish_reply("稍等一会啦，学姐这边还没收拾好，晚点再来找我哦～"),
-            )
-        return
-
-    if has_images and not image_urls:
-        if is_mentioned:
-            await _reply(
-                bot,
-                event,
-                polish_reply(
-                    "图学姐有点看不清呢……你再发一次，或者把文字也打出来好不好？"
-                ),
-            )
-        return
-
-    sender = _sender_name(event)
-    memory = _get_memory(config)
-    raw_history = memory.load_all(session_id)
-    history, memory_recall_brief = messages_for_llm_with_recall(
-        raw_history,
-        intent_text or chat_text,
-        recent_turns=config.memory_recent_turns,
-        recall_top=config.memory_recall_top,
-        enable=_fe(config, event, "memory_recall"),
-    )
-    llm = get_llm(config)
-
-    group_style_brief = ""
-    if _fe(config, event, "group_style") and isinstance(event, GroupMessageEvent):
-        try:
-            group_style_brief = build_group_style_brief(
-                get_group_style_store(config.group_style_dir),
-                event.group_id,
-                top_n=config.group_style_top_n,
-                min_count=config.group_style_min_count,
-                short=bool(interrupt),
-            )
-        except Exception:  # noqa: BLE001
-            logger.warning("dl_senpai group_style brief failed")
-
-    card_enable = False
-    mute_enable = False
-    draw_enable = False
-    browser_enable = False
-    card_prompt = ""
-    candidates = []
-    need_mod = False
-    local_infer = config.is_local_infer()
-    if local_infer:
-        # 本地微调模型吃不消工具指令，开着就会把候选名单/系统提示原样发出去
-        logger.info("dl_senpai local infer: disable card/mute/draw/browser/voice extras")
-    if isinstance(event, GroupMessageEvent) and not local_infer:
-        if _fe(config, event, "card") and (not interrupt or config.card_allow_on_interrupt):
-            need_mod = True
-        if _fe(config, event, "mute") and (not interrupt or config.mute_allow_on_interrupt):
-            need_mod = True
-    if need_mod:
-        if await bot_can_manage_cards(bot, event.group_id):
-            candidates = await build_card_candidates(bot, event)
-            if candidates:
-                card_prompt = format_candidates_for_prompt(candidates)
-                if _fe(config, event, "card") and (
-                    not interrupt or config.card_allow_on_interrupt
-                ):
-                    card_enable = True
-                if _fe(config, event, "mute") and (
-                    not interrupt or config.mute_allow_on_interrupt
-                ):
-                    mute_enable = True
-    if (
-        not local_infer
-        and _fe(config, event, "draw")
-        and config.draw_configured()
-        and (not interrupt or config.draw_allow_on_interrupt)
-    ):
-        draw_enable = True
-    if (
-        not local_infer
-        and _fe(config, event, "browser")
-        and browser_configured(config)
-        and (not interrupt or config.browser_allow_on_interrupt)
-    ):
-        browser_enable = True
-
-    trends_brief = ""
-    trend_titles: list[str] = []
-    if _fe(config, event, "trends"):
-        try:
-            hot_items = await get_hot_items(limit=config.trends_max_items)
-            trend_titles = [i.title for i in hot_items if i.title]
-            trends_brief = await get_trends_brief(
-                max_items=config.trends_max_items,
-                max_chars=config.trends_prompt_max_chars,
-                interrupt=interrupt,
-            )
-        except Exception:  # noqa: BLE001
-            logger.warning("dl_senpai trends brief failed")
-
-    affection_brief = ""
-    aff_scope = _affection_scope(config, event)
-    if aff_scope and is_mentioned and not interrupt:
-        aff_user = get_affection_store(config.affection_dir).get_user(
-            aff_scope, event.user_id
-        )
-        affection_brief = build_affection_brief(name=sender, value=aff_user.value)
-
-    person_memory_brief = ""
-    person_memory_enable = _fe(config, event, "person_memory")
-    if person_memory_enable:
-        pm_store = get_person_memory_store(
-            config.person_memory_dir,
-            max_traits=config.person_memory_max_traits,
-            max_note_chars=config.person_memory_max_note_chars,
-        )
-        # 每次互动都记下当前昵称，便于跨群认出同一个人
-        profile = pm_store.touch_name(event.user_id, sender)
-        person_memory_brief = build_person_memory_brief(
-            profile,
-            name=sender,
-            query=intent_text or chat_text,
-        )
-
+    失败静默：记流水是旁路行为，绝不能因为它出错就拦掉正常回复。
+    """
     try:
-        import time as _time
+        bot, event = _ctx_bot_event(ctx)
+        if bot is None or event is None:
+            return
+        config = get_config()
+        if not getattr(config, "recent_chat_enable", True):
+            return
+        resolved = _resolve_session(event, config)
+        if resolved is None:
+            return
+        session_id, _is_group = resolved
 
-        t0 = _time.perf_counter()
-        logger.info(
-            f"dl_senpai LLM call session={session_id} "
-            f"interrupt={interrupt} text_len={len(chat_text)}"
+        # 她自己的消息不进流水：那些已经以 assistant 身份在对话历史里，
+        # 再记一遍会在背景段里和自己重复。
+        self_id = str(getattr(event, "self_id", "") or "")
+        user_id = str(getattr(event, "user_id", "") or "")
+        if self_id and user_id == self_id:
+            return
+
+        text = _plain_text(event)
+        if not text:
+            return
+
+        from .recent_chat import get_recent_chat_store
+
+        store = get_recent_chat_store(getattr(config, "recent_chat_dir", None))
+        store.append(
+            session_id,
+            sender=_sender_name(event),
+            user_id=user_id,
+            text=text,
+            message_id=str(getattr(event, "message_id", "") or ""),
         )
-        private_chat = isinstance(event, PrivateMessageEvent)
-        result = await llm.chat(
-            history,
-            chat_text,
-            interrupt=interrupt,
-            sender_name=sender,
-            image_urls=image_urls or None,
-            card_enable=card_enable,
-            card_candidates_prompt=card_prompt,
-            mute_enable=mute_enable,
-            trends_brief=trends_brief,
-            trend_titles=trend_titles,
-            affection_brief=affection_brief,
-            person_memory_brief=person_memory_brief,
-            person_memory_enable=person_memory_enable,
-            draw_enable=draw_enable,
-            browser_enable=browser_enable,
-            private_chat=private_chat,
-            plain_user_text=intent_text,
-            search_enable=_fe(config, event, "search"),
-            fewshot_enable=bool(config.fewshot_enable),
-            inner_state_brief=inner_state_brief if config.inner_state_enable else "",
-            group_style_brief=group_style_brief,
-            memory_recall_brief=memory_recall_brief,
-        )
-        was_searched = result.searched
-        # 小模型常口头说「改好了」却漏写 <<<CARD>>>：意图明确时补救一轮
-        if (
-            card_enable
-            and not interrupt
-            and not result.card_actions
-            and looks_like_card_request(intent_text)
-        ):
-            logger.info(
-                f"dl_senpai card intent without marker, retry once "
-                f"session={session_id}"
-            )
-            hist2 = [
-                *history,
-                {"role": "user", "content": f"{sender}：{chat_text}"},
-                {"role": "assistant", "content": result.text},
-            ]
-            result = await llm.chat(
-                hist2,
-                (
-                    "你刚才只口头说改了名片，但没写 <<<CARD ...>>>，所以实际没改成。"
-                    "请重新简短回复，并在末尾补上指令行；user_id 必须从成员候选抄，"
-                    'kind 用 request。格式：<<<CARD {"user_id":数字,"card":"新名片","kind":"request"}>>>'
-                ),
-                interrupt=False,
-                sender_name="系统",
-                card_enable=True,
-                card_candidates_prompt=card_prompt,
-                mute_enable=False,
-            )
-        # 仅「明确要求禁言」且漏写 <<<MUTE>>> 时补救；辱骂不等于要求禁言
-        if (
-            mute_enable
-            and not interrupt
-            and not result.mute_actions
-            and looks_like_mute_request(intent_text)
-        ):
-            logger.info(
-                f"dl_senpai mute intent without marker, retry once "
-                f"session={session_id}"
-            )
-            hist2 = [
-                *history,
-                {"role": "user", "content": f"{sender}：{chat_text}"},
-                {"role": "assistant", "content": result.text},
-            ]
-            result = await llm.chat(
-                hist2,
-                (
-                    "对方在要求禁言。请简短回复一两句（别问心事、别说对方发不了消息），"
-                    "并在末尾补上指令行；user_id 必须从成员候选抄（禁言我=sender 的 user_id）。"
-                    '格式：<<<MUTE {"user_id":数字,"duration":60,"kind":"request"}>>>'
-                ),
-                interrupt=False,
-                sender_name="系统",
-                card_enable=False,
-                card_candidates_prompt=card_prompt,
-                mute_enable=True,
-            )
-        # 明确要求生图却漏写 <<<DRAW>>> 时补救一轮
-        if (
-            draw_enable
-            and not interrupt
-            and not result.draw_force
-            and wants_senpai_image(intent_text)
-        ):
-            logger.info(
-                f"dl_senpai draw intent without marker, retry once "
-                f"session={session_id}"
-            )
-            hist2 = [
-                *history,
-                {"role": "user", "content": f"{sender}：{chat_text}"},
-                {"role": "assistant", "content": result.text},
-            ]
-            retry = await llm.chat(
-                hist2,
-                draw_retry_hint(intent_text),
-                interrupt=False,
-                sender_name="系统",
-                draw_enable=True,
-                private_chat=private_chat,
-            )
-            was_searched = was_searched or retry.searched
-            result = retry
-        if (
-            browser_enable
-            and not interrupt
-            and not result.browse_force
-            and wants_browser_help(intent_text)
-        ):
-            logger.info(
-                f"dl_senpai browse intent without marker, retry once "
-                f"session={session_id}"
-            )
-            hist2 = [
-                *history,
-                {"role": "user", "content": f"{sender}：{chat_text}"},
-                {"role": "assistant", "content": result.text},
-            ]
-            browse_retry = await llm.chat(
-                hist2,
-                browse_retry_hint(intent_text),
-                interrupt=False,
-                sender_name="系统",
-                browser_enable=True,
-                private_chat=private_chat,
-            )
-            was_searched = was_searched or browse_retry.searched
-            result = browse_retry
-        elapsed = _time.perf_counter() - t0
-        logger.info(
-            f"dl_senpai LLM ok session={session_id} "
-            f"reply_len={len(result.text)} "
-            f"card_actions={len(result.card_actions)} "
-            f"mute_actions={len(result.mute_actions)} "
-            f"searched={was_searched or result.searched} elapsed={elapsed:.1f}s"
-        )
-    except LLMError as e:
-        logger.warning(f"dl_senpai LLM error: {e}")
-        if is_mentioned:
-            await _reply(bot, event, str(e))
+        # 顺手尝试落盘。flush 自己按 flush_interval 节流（默认 5 秒一次），
+        # 所以每条消息都调用并不会造成写放大——但能保证数据在进程被杀之前
+        # 最迟 5 秒内落盘，不必依赖退出钩子。
+        store.flush()
+
+        # 群风格采样：和流水共用这个「永不短路」的观察者点。
+        # 为什么不挂 agent 路径：她只回被 @ 的那条，而「本群怎么说话」恰恰
+        # 藏在那些她没参与的对话里；挂 agent 路径上只能采到被触发的消息。
+        if _is_group and getattr(config, "group_style_enable", True):
+            style_dir = getattr(config, "group_style_dir", "") or ""
+            group_id = str(getattr(event, "group_id", "") or "")
+            if style_dir and group_id:
+                try:
+                    from .group_style import get_group_style_store
+                    from .persona_filter import neutralize as _pf_neutralize
+
+                    # 过一道过滤器：别人贴的角色设定（猫娘/傲娇/凛）不该被当成
+                    # 「本群说话风格」学进去——那些词会通过风格提示词绕回来。
+                    style_text, style_hit = _pf_neutralize(text)
+                    if not style_hit:
+                        get_group_style_store(style_dir).observe(group_id, style_text)
+                except Exception:  # noqa: BLE001 — 采样是旁路，坏了也不能拦消息
+                    logger.debug("dl_senpai group_style observe failed", exc_info=True)
+    except Exception:  # noqa: BLE001
+        logger.debug("dl_senpai recent_chat observe failed", exc_info=True)
+
+
+async def observe_notice_welcome(ctx) -> None:
+    """入群欢迎/认证注册观察者（通知类事件）。"""
+    bot, event = _ctx_bot_event(ctx)
+    if bot is None or event is None:
         return
-    except Exception as e:  # noqa: BLE001
-        logger.exception(f"dl_senpai unexpected error: {e}")
-        if is_mentioned:
-            await _reply(
-                bot,
-                event,
-                polish_reply("稍等一会啦，学姐现在有些事情要做噢～晚点再叫我吧"),
-            )
+    from nonebot.adapters.onebot.v11 import GroupIncreaseNoticeEvent
+
+    if isinstance(event, GroupIncreaseNoticeEvent):
+        await handle_group_increase(bot, event)
+
+
+async def observe_notice_leave(ctx) -> None:
+    """退群清理观察者（通知类事件）。"""
+    bot, event = _ctx_bot_event(ctx)
+    if bot is None or event is None:
         return
+    from nonebot.adapters.onebot.v11 import GroupDecreaseNoticeEvent
 
-    reply = result.text
-    if "<<<DRAW" in reply.upper():
-        leaked = parse_draw_request(reply)
-        reply = strip_draw_markers(reply)
-        if leaked.prompt and not result.draw_force:
-            result.draw_prompt = leaked.prompt
-            result.draw_force = True
-    if "<<<BROWSE" in reply.upper():
-        leaked_browse = parse_browse_request(reply)
-        reply = strip_browse_markers(reply)
-        if leaked_browse.tasks and not result.browse_force:
-            result.browse_tasks = leaked_browse.tasks
-            result.browse_force = True
-    image_request = bool(
-        draw_enable and (result.draw_force or wants_senpai_image(intent_text))
-    )
-    browse_intent = browser_enable and wants_browser_help(intent_text)
-    browse_wanted = browser_enable and (
-        result.browse_force or browse_intent
-    )
-    applied_cards = []
-    applied_mutes = []
-    card_intent = card_enable and looks_like_card_request(intent_text)
-    if card_enable and result.card_actions and isinstance(event, GroupMessageEvent):
-        # 硬门槛：闲聊（晚安/QWQ）里模型乱写 CARD 一律不执行
-        if not card_intent:
-            logger.warning(
-                f"dl_senpai drop hallucinated card actions "
-                f"session={session_id} n={len(result.card_actions)} "
-                f"text={chat_text!r}"
-            )
-            # 顺带清掉「已经改成xxx」的嘴炮，避免晚安被说成改名片
-            reply = polish_reply(
-                re.sub(
-                    r"[^。！？\n]{0,40}群名片已经改成[^。！？\n]{0,30}",
-                    "",
-                    reply,
-                )
-            )
-        else:
-            playful_ready = _card_cooldown.ready(
-                session_id, config.card_playful_cooldown
-            )
-            actions = filter_actions(
-                result.card_actions,
-                candidates=candidates,
-                max_len=config.card_max_len,
-                allow_playful=True,
-                playful_ready=playful_ready,
-            )
-            if actions:
-                applied_cards = await apply_card_actions(
-                    bot,
-                    group_id=event.group_id,
-                    actions=actions,
-                )
-                if any(a.kind == "playful" for a in applied_cards):
-                    _card_cooldown.mark(session_id)
-            if result.card_actions and not applied_cards:
-                logger.warning(
-                    f"dl_senpai card actions dropped/failed "
-                    f"session={session_id} raw={len(result.card_actions)} "
-                    f"filtered={len(actions)} applied=0"
-                )
-                reply = polish_reply(f"{reply}\n{card_failure_note()}")
-    elif card_intent and not result.card_actions:
-        logger.warning(
-            f"dl_senpai card intent but still no marker session={session_id}"
-        )
-        reply = polish_reply(f"{reply}\n{card_missing_marker_note()}")
+    if isinstance(event, GroupDecreaseNoticeEvent):
+        await handle_group_decrease(bot, event)
 
-    if mute_enable and isinstance(event, GroupMessageEvent) and can_emit_mute(intent_text):
-        mute_ready = _mute_cooldown.ready(session_id, config.mute_cooldown)
-        mute_actions = list(result.mute_actions)
-        block_reason = ""
 
-        # 模型仍漏指令时：本地解析「禁言我 / @禁言」
-        if not mute_actions:
-            at_ids = extract_at_user_ids(event, self_id=int(event.self_id))
-            explicit, block_reason = resolve_explicit_mute(
-                chat_text,
-                sender_id=int(event.user_id),
-                at_ids=at_ids,
-                candidates=candidates,
-                duration=max(config.mute_min_sec, min(60, config.mute_max_sec)),
-            )
-            if explicit is not None:
-                mute_actions = [explicit]
-                logger.info(
-                    f"dl_senpai mute explicit fallback "
-                    f"user={explicit.user_id} duration={explicit.duration}"
-                )
+# -- 命令 guard：把原来的 Rule 条件搬到这里 -------------------------------
+# guard 与正则分离是刻意的：正则属于「命令语法」（静态、可枚举），
+# 群白名单/功能开关属于「运行时是否生效」（动态）。
+#
+# 所有 guard 都接受一个可选 `config` 覆盖：Router 正常运行时用全局缓存配置，
+# shadow 验证与测试可以注入一份独立配置。这让"路由决策"变成可复现的纯函数，
+# 而不依赖进程全局状态。
 
-        if mute_actions:
-            mutes, filter_reason = filter_mute_actions(
-                mute_actions,
-                candidates=candidates,
-                max_duration=config.mute_max_sec,
-                min_duration=config.mute_min_sec,
-                ready=mute_ready,
-            )
-            if not mute_ready:
-                block_reason = "cooldown"
-            elif filter_reason:
-                block_reason = filter_reason
-            if mutes:
-                applied_mutes = await apply_mute_actions(
-                    bot,
-                    group_id=event.group_id,
-                    actions=mutes,
-                )
-                if applied_mutes:
-                    _mute_cooldown.mark(session_id)
-                    ack = format_mute_ack(applied_mutes)
-                    if ack:
-                        reply = polish_reply(f"{reply}\n{ack}")
-                    block_reason = ""
-                else:
-                    block_reason = "failed"
 
-        if not applied_mutes:
-            reply = strip_unapplied_mute_claims(reply)
-            # 仅明确禁言请求失败时提示；辱骂未禁言不必贴系统说明
-            if looks_like_mute_request(intent_text):
-                note = mute_block_note(block_reason or "no_marker")
-                if note:
-                    reply = polish_reply(f"{reply}\n{note}")
-            logger.warning(
-                f"dl_senpai mute not applied session={session_id} "
-                f"reason={block_reason or 'no_marker'} "
-                f"raw={len(result.mute_actions)}"
-            )
-    elif mute_enable and result.mute_actions:
-        logger.warning(
-            f"dl_senpai drop hallucinated mute actions "
-            f"session={session_id} n={len(result.mute_actions)}"
-        )
-        reply = strip_unapplied_mute_claims(reply)
+def _guard_config(ctx, override=None):
+    """取 guard 用的配置：优先显式覆盖，其次 ctx.extra，最后全局。"""
+    if override is not None:
+        return override
+    extra = getattr(ctx, "extra", None)
+    if isinstance(extra, dict) and extra.get("config") is not None:
+        return extra["config"]
+    return get_config()
 
-    # 本轮没真正禁成：清掉「已经帮你禁言了」嘴炮，避免重复念
-    if not applied_mutes:
-        reply = polish_reply(strip_unapplied_mute_claims(reply))
 
-    user_stored = format_user_text_for_memory(
-        sender,
-        text,
-        image_count=image_count,
-        sticker_count=sticker_count,
-    )
-    # 有引用时记忆也存完整上下文，避免下轮忘掉「在回哪句」
-    if getattr(event, "reply", None) is not None and chat_text:
-        user_stored = f"{sender}：{chat_text}"
+def guard_checkin(ctx, config=None) -> bool:
+    """签到/好感度命令的生效条件（等价于旧 `_checkin_rule` 的前两段）。"""
+    if not getattr(ctx, "group_id", ""):
+        return False
+    cfg = _guard_config(ctx, config)
+    return is_feature_enabled(cfg, ctx.group_id, "checkin")
 
-    sticker = maybe_pick_sticker_reply(
-        session_id,
-        user_text=chat_text,
-        reply_text=reply,
-        interrupt=interrupt,
-        config=config,
-        force=bool(result.sticker_force),
-        extra_query=result.sticker_query or "",
-    ) if (not local_infer and not image_request and not browse_wanted) else None
-    if sticker is None and result.sticker_force and not local_infer:
-        logger.info(
-            f"dl_senpai wanted sticker ({result.sticker_query!r}) "
-            f"but collection empty for {session_id}"
-        )
 
-    voice = None
-    voice_override = result.voice_override
-    voice_wanted = (
-        not local_infer
-        and _fe(config, event, "voice")
-        and not interrupt
-        and (
-            result.voice_force
-            or looks_like_voice_request(intent_text)
-            or (
-                len(reply) <= config.voice_max_chars
-                and _random.random()
-                < max(0.0, min(1.0, config.voice_reply_prob))
-            )
-        )
-    )
-    if voice_wanted:
-        if not voice_override and looks_like_voice_request(intent_text):
-            voice_override = extract_voice_quote_from_user(intent_text)
-        try:
-            voice = await build_voice_segment(
-                reply,
-                config=config,
-                force=bool(
-                    result.voice_force or looks_like_voice_request(intent_text)
-                ),
-                override=voice_override,
-                user_request=intent_text,
-                interrupt=interrupt,
-            )
-        except Exception:  # noqa: BLE001
-            logger.warning("dl_senpai voice build failed", exc_info=True)
+def guard_shop(ctx, config=None) -> bool:
+    """商店命令的生效条件（等价于旧 `_shop_rule`）。"""
+    if not getattr(ctx, "group_id", ""):
+        return False
+    cfg = _guard_config(ctx, config)
+    if not is_feature_enabled(cfg, ctx.group_id, "shop"):
+        return False
+    return cfg.is_checkin_group(ctx.group_id)
 
-    image = None
-    draw_prompt = ""
-    draw_scene = classify_senpai_draw(intent_text)
-    draw_intent = draw_enable and wants_senpai_image(intent_text)
-    draw_wanted = (
-        draw_enable
-        and (
-            result.draw_force
-            or draw_intent
-        )
-    )
-    if draw_wanted:
-        draw_ready = _draw_cooldown.ready(session_id, config.draw_cooldown)
-        draw_prompt = resolve_draw_prompt(
-            marker_prompt=result.draw_prompt,
-            user_request=intent_text,
-            reply_text=reply,
-            max_chars=config.draw_max_prompt_chars,
-            group_id=event.group_id if isinstance(event, GroupMessageEvent) else None,
-        )
-        if not draw_ready:
-            note = draw_block_note("cooldown", scene=draw_scene)
-            if note:
-                reply = polish_reply(f"{reply}\n{note}")
-        elif not draw_prompt:
-            note = draw_block_note("empty_prompt", scene=draw_scene)
-            if note and draw_intent:
-                reply = polish_reply(f"{reply}\n{note}")
-        else:
-            try:
-                image = await build_image_segment(
-                    resolved_prompt=draw_prompt,
-                    user_request=intent_text,
-                    reply_text=reply,
-                    config=config,
-                    interrupt=interrupt,
-                    archive_session_id=session_id,
-                    archive_source_user=sender,
-                    archive_source_user_id=str(event.user_id),
-                    archive_scene=draw_scene,
-                )
-                if image is not None:
-                    _draw_cooldown.mark(session_id)
-                elif draw_intent or result.draw_force:
-                    reply = polish_reply(f"{reply}\n{draw_failure_note()}")
-            except Exception:  # noqa: BLE001
-                logger.warning("dl_senpai draw build failed", exc_info=True)
-                if draw_intent or result.draw_force:
-                    reply = polish_reply(f"{reply}\n{draw_failure_note()}")
 
-    browse_images: list[MessageSegment] = []
-    if browse_wanted:
-        browse_ready = _browse_cooldown.ready(session_id, config.browser_cooldown)
-        browse_tasks = resolve_browse_tasks(
-            marker_tasks=list(result.browse_tasks),
-            user_request=intent_text,
-        )
-        if not browse_ready:
-            note = browse_block_note("cooldown")
-            if note:
-                reply = polish_reply(f"{reply}\n{note}")
-        elif not browse_tasks:
-            if browse_intent or result.browse_force:
-                reply = polish_reply(f"{reply}\n{browse_failure_note()}")
-        else:
-            try:
-                browse_result = await run_browse_tasks(browse_tasks, config=config)
-                if browse_result.ok and browse_result.image_paths:
-                    browse_images = paths_to_image_segments(browse_result.image_paths)
-                    _browse_cooldown.mark(session_id)
-                    if browse_result.page_url and browse_result.page_url not in reply:
-                        reply = polish_reply(
-                            f"{reply}\n（来源：{browse_result.page_url}）"
-                        )
-                elif browse_intent or result.browse_force:
-                    reply = polish_reply(f"{reply}\n{browse_failure_note()}")
-            except Exception:  # noqa: BLE001
-                logger.warning("dl_senpai browse build failed", exc_info=True)
-                if browse_intent or result.browse_force:
-                    reply = polish_reply(f"{reply}\n{browse_failure_note()}")
+def guard_verify(ctx, config=None) -> bool:
+    """认证命令的生效条件（等价于旧 `_verify_rule`）。
 
-    assistant_stored = reply if sticker is None else f"{reply} [学姐发了一个表情]"
-    if voice is not None:
-        spoken = text_for_voice(
-            reply,
-            max_chars=config.voice_max_chars,
-            override=voice_override,
-        )
-        if spoken:
-            assistant_stored += f" [学姐发了一条语音：{spoken}]"
-        else:
-            assistant_stored += " [学姐发了一条语音]"
-    if image is not None:
-        preview = (draw_prompt or "").strip()
-        if len(preview) > 80:
-            preview = preview[:79] + "…"
-        if preview:
-            assistant_stored += f" [学姐发了一张图：{preview}]"
-        else:
-            assistant_stored += " [学姐发了一张图]"
-    if browse_images:
-        assistant_stored += f" [学姐发了{len(browse_images)}张网页截图]"
-    assistant_stored += action_summary_for_memory(applied_cards)
-    assistant_stored += mute_summary_for_memory(applied_mutes)
-    memory.append_turn(session_id, user_stored, assistant_stored)
-
-    if (
-        person_memory_enable
-        and (not interrupt or config.person_memory_allow_on_interrupt)
-    ):
-        updates = list(result.impression_updates or [])
-        # 模型漏写指令时：用户明确自我介绍仍记一笔
-        if not updates:
-            auto_traits = extract_traits_from_user_text(intent_text)
-            if auto_traits:
-                updates = [ImpressionUpdate(add=auto_traits, remove=[], notes=None)]
-                logger.info(
-                    f"dl_senpai person_memory heuristic traits={auto_traits!r} "
-                    f"user={event.user_id}"
-                )
-        if updates:
-            try:
-                get_person_memory_store(
-                    config.person_memory_dir,
-                    max_traits=config.person_memory_max_traits,
-                    max_note_chars=config.person_memory_max_note_chars,
-                ).apply_updates(
-                    event.user_id,
-                    updates,
-                    display_name=sender,
-                )
-            except Exception:  # noqa: BLE001
-                logger.exception(
-                    f"dl_senpai person_memory apply failed user={event.user_id}"
-                )
-
-    aff_scope = _affection_scope(config, event)
-    if aff_scope and is_mentioned and not interrupt:
-        aff = get_affection_store(config.affection_dir).add_chat(
-            aff_scope,
-            event.user_id,
-            config.affection_gain_chat,
-            display_name=sender,
-        )
-        group_id = event.group_id if isinstance(event, GroupMessageEvent) else None
-        reply = polish_reply(
-            await _finalize_affection_gain(
-                bot,
-                scope=aff_scope,
-                user_id=event.user_id,
-                text=reply,
-                result=aff,
-                config=config,
-                always_show=False,
-                group_id=group_id,
-            )
-        )
-    bundled_browse = browse_images[0] if browse_images and image is None else None
-    extra_browse = browse_images[1:] if bundled_browse else browse_images
-    await _reply(
-        bot,
-        event,
-        reply,
-        sticker=sticker,
-        voice=voice,
-        image=image or bundled_browse,
-    )
-    for seg in extra_browse:
-        await _send_image_with_retry(bot, event, seg)
-
-    if config.inner_state_enable:
-        try:
-            get_inner_state_store(config.inner_state_dir).apply_after_reply(
-                inner_key,
-                reply_len=len(reply or ""),
-                mentioned=bool(is_mentioned),
-                interrupt=bool(interrupt),
-                private_chat=isinstance(event, PrivateMessageEvent),
-            )
-        except Exception:  # noqa: BLE001
-            logger.warning("dl_senpai inner_state update failed")
+    除了群/开关，还要求该用户**确实处于待认证状态**——
+    否则"认证"两个字会被当成普通聊天。
+    """
+    gid = getattr(ctx, "group_id", "")
+    if not gid:
+        return False
+    cfg = _guard_config(ctx, config)
+    if not cfg.is_verify_group(gid):
+        return False
+    if not is_feature_enabled(cfg, gid, "verify"):
+        return False
+    store = get_verify_store(cfg.verify_dir)
+    if not store.is_pending(gid, getattr(ctx, "user_id", "")):
+        return False
+    return looks_like_verify_message(getattr(ctx, "plain_text", "") or "")

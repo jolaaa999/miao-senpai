@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import time
+
 import asyncio
 import random
 import re
@@ -187,6 +189,41 @@ def build_forward_nodes(
     return nodes
 
 
+def _instrument_send(
+    *,
+    text: str = "",
+    success: bool = True,
+    media_present: bool = False,
+    media_failure: bool = False,
+    fallback: bool = False,
+    duration_ms: float = 0.0,
+) -> None:
+    """记录一次发送（Phase 7A.1 第三十六/三十八节）。
+
+    **统一边界**：只有 reply_send 记。legacy / runtime / 其它调用方
+    都不得各自再记一次，否则一次发送被算多遍（第三十七条）。
+
+    第三十九节：一次 Agent response 可能因多气泡/碎句触发多次
+    QQ send，因此这里每次调用记一次 send operation；response 与
+    send operation 的区分由 telemetry 侧表达。
+
+    失败静默：观测绝不能影响发送。
+    """
+    try:
+        from .validation.telemetry import record_send
+
+        record_send(
+            success=success,
+            operations=1,
+            bubbles=1,
+            media_failure=media_failure,
+            fallback=fallback,
+            duration_ms=duration_ms,
+        )
+    except Exception:  # noqa: BLE001 — 观测失败不影响发送
+        pass
+
+
 async def _send_image_with_retry(
     bot: Bot,
     event: MessageEvent,
@@ -241,6 +278,7 @@ async def send_text_reply(
     bubble_max: int = 3,
     bubble_min_chars: int = 40,
     bubble_prefer_chars: int = 120,
+    bubble_total_max_chars: int = 700,
 ) -> None:
     nickname = nickname or get_senpai_name()
     """短消息直发；超长则用合并转发（聊天记录）多段发送。
@@ -252,6 +290,11 @@ async def send_text_reply(
     text = (text or "").strip()
     if not text and sticker is None and voice is None and image is None:
         return
+
+    # Phase 7A.1：统一发送边界计时（第三十六条）。
+    # 这是**唯一**统计点 —— legacy / runtime / reply_send 的调用方
+    # 都不得各自再记一次，否则一次发送被算多遍（第三十七条）。
+    _send_started = time.perf_counter()
 
     split_media = should_split_image_voice(image, voice)
     bundled_image = None if split_media else image
@@ -282,14 +325,29 @@ async def send_text_reply(
             bubble_max=bubble_max,
             bubble_min_chars=bubble_min_chars,
             bubble_prefer_chars=bubble_prefer_chars,
+            bubble_total_max_chars=bubble_total_max_chars,
         )
         logger.info(f"dl_senpai: reply body sent ok media={media_summary}")
+        _instrument_send(
+            text=text, success=True,
+            media_present=any(x is not None for x in (sticker, voice, image)),
+            duration_ms=(time.perf_counter() - _send_started) * 1000,
+        )
     except Exception as exc:  # noqa: BLE001
         if sticker is None and bundled_image is None and bundled_voice is None:
+            _instrument_send(
+                text=text, success=False, duration_ms=(time.perf_counter() - _send_started) * 1000
+            )
             raise
         logger.warning(
             f"dl_senpai: reply body send failed, fallback text-only "
             f"media={media_summary}: {exc}"
+        )
+        # 第四十一节：媒体失败 → 记 MEDIA_SEND_FAILURE；随后降级纯文字
+        # → 再记 FALLBACK_TEXT。这样能算出真实媒体降级率。
+        _instrument_send(
+            text=text, success=False, media_failure=True,
+            duration_ms=(time.perf_counter() - _send_started) * 1000,
         )
         await _send_text_reply_once(
             bot,
@@ -307,8 +365,10 @@ async def send_text_reply(
             bubble_max=bubble_max,
             bubble_min_chars=bubble_min_chars,
             bubble_prefer_chars=bubble_prefer_chars,
+            bubble_total_max_chars=bubble_total_max_chars,
         )
         logger.info("dl_senpai: reply text-only fallback sent ok")
+        _instrument_send(text=text, success=True, fallback=True)
         if bundled_image is not None:
             await _send_image_with_retry(bot, event, bundled_image)
         if bundled_voice is not None:
@@ -345,6 +405,7 @@ async def _send_text_reply_once(
     bubble_max: int = 3,
     bubble_min_chars: int = 40,
     bubble_prefer_chars: int = 120,
+    bubble_total_max_chars: int = 700,
 ) -> None:
     threshold = max(1, reply_max_chars)
 
@@ -360,6 +421,29 @@ async def _send_text_reply_once(
             prefer_chars=bubble_prefer_chars,
             max_bubbles=bubble_max,
         )
+        # 几个气泡的合计字数过多时，连发同样刷屏：改用合并转发卡片。
+        # 节点直接用拆好的气泡，保留原本的碎句节奏，不重新按字数切。
+        total_chars = sum(len(b) for b in bubbles)
+        if len(bubbles) >= 2 and total_chars > bubble_total_max_chars:
+            nodes = build_forward_nodes(
+                bubbles,
+                user_id=int(bot.self_id),
+                nickname=nickname,
+                sticker=sticker,
+                image=image,
+            )
+            try:
+                await _send_forward(bot, event, nodes)
+                if voice is not None:
+                    await bot.send(event, OBMessage(voice))
+                logger.info(
+                    f"dl_senpai: {len(bubbles)} bubble(s) merged into forward card "
+                    f"(total {total_chars} chars)"
+                )
+                return
+            except Exception as exc:  # noqa: BLE001
+                # 卡片发不出去就退回逐条气泡，不能把回复弄丢
+                logger.warning(f"dl_senpai: bubble forward failed, fallback to bubbles: {exc}")
         if len(bubbles) >= 2:
             await _typing_pause(typing_delay_ms_min // 2, typing_delay_ms_min)
             for i, chunk in enumerate(bubbles):

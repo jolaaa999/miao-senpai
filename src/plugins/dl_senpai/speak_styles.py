@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 from dataclasses import asdict, dataclass, field
@@ -224,12 +225,45 @@ _store: SpeakStyleStore | None = None
 
 
 def get_speak_style_store(data_dir: str | Path | None = None) -> SpeakStyleStore:
+    """取风格档案存储。
+
+    **测试隔离**：`DL_SENPAI_TEST_MODE=1` 时不再读
+    `data/dl_senpai/speak_styles/styles.json`。
+
+    为什么必须隔离：该文件里 `active_id = "gaoleng_ft"` 指向本地微调端点
+    `http://127.0.0.1:8001/v1` 且带独立 api_key。重构前 `active_base_url()`
+    / `active_api_key()` / `active_model()` 都会读它，导致单测里的
+    `PluginConfig(OPENAI_API_KEY="sk-test")` 实际拿到本地端点配置——
+    这是 Phase 1 审计中 13 个测试失败的**第二个**污染源（第一个是 .env）。
+    """
     global _store
     if data_dir is not None:
         return SpeakStyleStore(data_dir)
+    if os.environ.get("DL_SENPAI_TEST_MODE", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }:
+        # 返回一个绝不落盘的只读存储（dir 指向临时目录，且只暴露内置风格）
+        return _get_isolated_store()
     if _store is None:
         _store = SpeakStyleStore()
     return _store
+
+
+_isolated_store: SpeakStyleStore | None = None
+
+
+def _get_isolated_store() -> SpeakStyleStore:
+    """构造一个只含内置风格的存储，使用进程内临时目录避免污染真实数据。"""
+    global _isolated_store
+    if _isolated_store is None:
+        import tempfile
+
+        tmp_dir = Path(tempfile.mkdtemp(prefix="dl_senpai_styles_"))
+        _isolated_store = SpeakStyleStore(tmp_dir)
+    return _isolated_store
 
 
 def active_style_overlay() -> str:

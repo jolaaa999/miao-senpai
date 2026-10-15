@@ -18,6 +18,8 @@ from pathlib import Path
 from threading import Lock
 from typing import Any
 
+from .storage import JsonStore
+
 try:
     from nonebot import logger
 except Exception:  # noqa: BLE001 — 单测/独立脚本可能无 nonebot
@@ -35,9 +37,20 @@ except Exception:  # noqa: BLE001 — 单测/独立脚本可能无 nonebot
     logger = _Logger()  # type: ignore[assignment]
 
 from .group_card import loads_marker_json
+from .style import MARKER_CLOSE_PATTERN
 
+# 解析层**严格要求 >>>**：marker_baseline 把 IMPRESSION 的容错矩阵钉成
+# 「只认 >>>」，那是历史调优的结果，不能为了统一而抹平。闭合符写错的标记
+# 交给下面的残片正则从正文剥掉（正是 baseline 的「损坏 payload → 剥掉但不
+# 产生 action」），只是不再写画像 —— 线上 7 处就是这种标记留在了群消息里。
 _IMPRESSION_MARKER_RE = re.compile(
     r"<<<IMPRESSION\s*(\{.*?\})\s*>>>",
+    re.DOTALL | re.IGNORECASE,
+)
+# 剥除层宽容错：闭合符写错（>>／> > >／＞＞／】】）、payload 损坏、整段截断，
+# 一律从正文清掉。解析严格、剥除宽容，两层职责不同。
+_IMPRESSION_RESIDUE_RE = re.compile(
+    r"\[?\s*<<<IMPRESSION(?:\s*\{.*?\})?\s*" + MARKER_CLOSE_PATTERN + r"\s*\]?",
     re.DOTALL | re.IGNORECASE,
 )
 _TRAIT_SPLIT_RE = re.compile(r"[,，;；、|/]+")
@@ -214,13 +227,20 @@ def parse_impression_updates(raw_reply: str) -> ImpressionParseResult:
             )
         )
 
-    cleaned = _IMPRESSION_MARKER_RE.sub("", raw_reply or "")
+    cleaned = strip_impression_markers(raw_reply or "")
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
     return ImpressionParseResult(text=cleaned, updates=updates)
 
 
 def strip_impression_markers(text: str) -> str:
+    """剥掉正文里的 IMPRESSION 标记，**包括解析失败的残片**。
+
+    为什么这里比解析层宽：marker_baseline 规定的正是「损坏 payload 的 marker
+    被剥掉，但不产生 action」。少写一个 > 不该让标记跟着回复发到群里，
+    但也不该据此写画像 —— 两层职责不同，所以判据也不同。
+    """
     cleaned = _IMPRESSION_MARKER_RE.sub("", text or "")
+    cleaned = _IMPRESSION_RESIDUE_RE.sub('', cleaned)
     return re.sub(r"\n{3,}", "\n\n", cleaned).strip()
 
 
@@ -343,25 +363,22 @@ class PersonMemoryStore:
     def _path(self, user_id: int | str) -> Path:
         return self.data_dir / f"user_{user_id}.json"
 
+    def _store(self, user_id: int | str) -> JsonStore:
+        return JsonStore(self._path(user_id), create_parent=False)
+
     def get(self, user_id: int | str) -> PersonProfile:
-        path = self._path(user_id)
-        if not path.is_file():
-            return PersonProfile(user_id=str(user_id))
-        try:
-            raw = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return PersonProfile(user_id=str(user_id))
+        raw = self._store(user_id).load(default=None)
         if not isinstance(raw, dict):
             return PersonProfile(user_id=str(user_id))
         return PersonProfile.from_dict(str(user_id), raw)
 
     def save(self, profile: PersonProfile) -> None:
-        path = self._path(profile.user_id)
-        with self._lock:
-            path.write_text(
-                json.dumps(profile.to_dict(), ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
+        """原子写。修复重构前 `write_text` 可能写坏画像文件的问题。
+
+        路径 `data/dl_senpai/person_memory/user_{qq}.json` 与 JSON 结构
+        均未改变，历史画像文件可直接读取。
+        """
+        self._store(profile.user_id).save(profile.to_dict())
 
     def touch_name(self, user_id: int | str, display_name: str) -> PersonProfile:
         """记录见过的昵称/名片，跨群累积。"""

@@ -13,6 +13,7 @@ from urllib.parse import urlparse
 from nonebot import logger
 
 from .config import PluginConfig
+from .observability.logging import rotate_log_if_large
 
 _process: subprocess.Popen[bytes] | None = None
 _log_file = None
@@ -91,6 +92,8 @@ async def start_gptsovits_server(cfg: PluginConfig) -> bool:
 
     log_path = cfg.project_root() / "data" / "dl_senpai" / "gptsovits-api.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
+    # 这是子进程 stdout 的重定向，写入方不是我们的 logger，只能靠启动时按体积滚。
+    rotate_log_if_large(log_path)
     _log_file = open(log_path, "a", encoding="utf-8")
     _log_file.write(f"\n--- start {time.strftime('%Y-%m-%d %H:%M:%S')} ---\n")
     _log_file.flush()

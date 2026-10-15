@@ -260,6 +260,20 @@ class StickerStore:
         self.files_dir.mkdir(parents=True, exist_ok=True)
         self.max_per_session = max(10, max_per_session)
         self._lock = Lock()
+        # 已处理过的消息 id，用于防止同一条消息被重复收集（见 collect_from_event）
+        self._seen_events: set[str] = set()
+        self._max_seen_events = 4096
+
+    @staticmethod
+    def _event_key(event: MessageEvent) -> str | None:
+        """取消息的唯一标识；取不到时退化为事件对象身份。"""
+        message_id = getattr(event, "message_id", None)
+        if message_id is not None:
+            return f"mid:{message_id}"
+        try:
+            return f"obj:{id(event)}"
+        except Exception:  # noqa: BLE001
+            return None
 
     def _path(self, session_id: str) -> Path:
         safe = session_id_to_fs_key(session_id)
@@ -326,6 +340,34 @@ class StickerStore:
         source_user: str,
         bot: Bot | None = None,
     ) -> int:
+        """从一条消息里收集表情包；返回新增数量。
+
+        **同一条消息只处理一次**（Phase 2 修复的真实缺陷）。
+
+        背景：重构前 `handlers.py` 里有两个入口会收集同一条消息——
+        `sticker_collector`（NoneBot priority=100 的 matcher）和
+        `_handle_chat()` 内部的显式调用。虽然 `collect_from_event` 本身
+        对重复 sticker 幂等（`sticker_id in index` 时只合并关键词、不重复
+        计数），但重复执行仍有真实副作用：
+
+        1. 同一份 JSON 被 read + write 两次（多一次磁盘 IO 与写窗口）；
+        2. `materialize_sticker_file` 对 `local_path` 为空的记录会**下载两次**；
+        3. 收集日志重复打印，误导排查。
+
+        这里用 message_id 做一次性去重。取不到 message_id 时退化为
+        「本条事件对象身份」——同一个 event 实例仍只会被处理一次，
+        而不同 event 实例不受影响。
+        """
+        key = self._event_key(event)
+        if key is not None:
+            with self._lock:
+                if key in self._seen_events:
+                    return 0
+                self._seen_events.add(key)
+                # 防止去重表本身无界增长
+                if len(self._seen_events) > self._max_seen_events:
+                    self._seen_events.clear()
+
         segments = extract_sticker_segments(event.message)
         if not segments:
             return 0

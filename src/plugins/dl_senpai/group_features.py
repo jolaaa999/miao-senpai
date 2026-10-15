@@ -13,6 +13,8 @@ from pathlib import Path
 from threading import Lock
 from typing import TYPE_CHECKING
 
+from .cache import BoundedTTLMap
+
 try:
     from nonebot import logger
 except ImportError:  # 仅单测环境（无 nonebot driver）
@@ -33,6 +35,7 @@ FEATURES: tuple[tuple[str, str], ...] = (
     ("mute", "生气禁言"),
     ("browser", "联网浏览"),
     ("search", "网络搜索"),
+    ("group_read", "读群资源"),
     ("sticker", "表情包"),
     ("voice", "语音回复"),
     ("welcome", "入群欢迎"),
@@ -44,8 +47,6 @@ FEATURES: tuple[tuple[str, str], ...] = (
     ("vision", "识图"),
     ("trends", "热点趋势"),
     ("friend_add", "自动加好友"),
-    ("like", "每日点赞"),
-    ("qzone", "空间动态赞评"),
 )
 FEATURE_KEYS = frozenset(k for k, _ in FEATURES)
 
@@ -238,7 +239,12 @@ def is_feature_enabled(
 
 # -- 群注册表维护 --
 
-_name_fetch_ts: dict[str, float] = {}
+# 群名刷新节流表。Phase 2 治理：原本是裸 dict，每个群一条且永不释放。
+# TTL 取 7 天（远大于 _NAME_REFRESH_SEC 的 24 小时节流窗口），
+# 因此"每群每日最多拉一次"的语义完全不变。
+_name_fetch_ts: BoundedTTLMap = BoundedTTLMap(
+    ttl=7 * 86400.0, max_size=4096
+)
 
 
 def observe_group(group_id: int | str, name: str | None = None) -> None:
@@ -252,11 +258,12 @@ def observe_group(group_id: int | str, name: str | None = None) -> None:
 async def refresh_group_name(bot, group_id: int | str) -> None:
     """群名缺失或过期时经 get_group_info 补一次（每群每日最多一次）。"""
     gid = str(group_id)
-    now = time.monotonic()
-    last = _name_fetch_ts.get(gid, 0.0)
+    now = time.time()
+    last = _name_fetch_ts.timestamp(gid) or 0.0
     if now - last < _NAME_REFRESH_SEC:
         return
-    _name_fetch_ts[gid] = now
+    # 显式写入时间戳，与 BoundedTTLMap 的默认墙钟时基一致
+    _name_fetch_ts.set(gid, now)
     try:
         info = await bot.call_api("get_group_info", group_id=int(gid))
     except Exception:  # noqa: BLE001
@@ -275,8 +282,14 @@ async def register_groups(bot) -> None:
     """bot 上线时用 get_group_list 种子化注册表，并拉取缺失群名。"""
     try:
         groups = await bot.call_api("get_group_list")
-    except Exception:  # noqa: BLE001
-        logger.warning("dl_senpai group_features: get_group_list failed")
+    except Exception as exc:  # noqa: BLE001
+        # 这里原本只打一句 "failed" 就把异常吞了。线上遇到过 WebSocket
+        # "假连接"（握手成功、事件不转发）的情况，只靠这句话完全无法定位，
+        # 因此带上异常类型与原文。
+        logger.warning(
+            "dl_senpai group_features: get_group_list failed "
+            f"{type(exc).__name__}: {exc}"
+        )
         return
     store = get_group_feature_store()
     gids: list[str] = []

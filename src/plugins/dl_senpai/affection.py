@@ -9,6 +9,8 @@ from pathlib import Path
 from threading import Lock
 from typing import Any, Literal
 
+from .storage import JsonStore
+
 try:
     from zoneinfo import ZoneInfo
 
@@ -24,8 +26,8 @@ AFFECTION_TIERS: list[tuple[int, str, str]] = [
     (15, "面熟", "稍微放松，偶尔损一句。"),
     (40, "常来", "自然亲近，记得对方常来群里。"),
     (80, "亲近", "可以更损更宠，像熟人互怼。"),
-    (150, "信赖", "明显偏袒对方，嘴硬心软。"),
-    (300, "心头好", "特别亲近，偶尔撒娇式傲娇。"),
+    (150, "信赖", "明显偏袒对方，护得理所当然。"),
+    (300, "心头好", "特别亲近，会主动找人说话。"),
     (450, "热恋", "像热恋期恋人：黏、宠、会吃醋也会哄，甜里带损但明显偏爱。"),
     (700, "眷侣", "像举案齐眉的夫妻：默契、安稳、彼此撑腰，嘴上拌嘴心里全是你。"),
 ]
@@ -35,8 +37,8 @@ AFFECTION_TIER_TITLES: dict[str, tuple[str, ...]] = {
     "路人": ("过路人", "新面孔", "潜水员", "围观群众"),
     "面熟": ("面熟客", "常露面", "混脸熟", "老住户"),
     "常来": ("群常客", "老朋友", "熟面孔", "常来坐"),
-    "亲近": ("自己人", "损友位", "熟络了", "嘴硬友"),
-    "信赖": ("信赖方", "偏袒位", "嘴硬宠", "学姐向"),
+    "亲近": ("自己人", "老熟人", "熟络了", "好搭档"),
+    "信赖": ("信赖方", "偏袒位", "重点关照", "学姐向"),
     "心头好": ("心头好", "小骄傲", "偏爱位", "心尖宠"),
     "热恋": ("热恋中", "小甜心", "吃醋鬼", "黏人精"),
     "眷侣": ("眷侣档", "举案齐眉", "如胶似漆", "半边天"),
@@ -167,7 +169,7 @@ def build_affection_brief(*, name: str, value: int) -> str:
     ]
     if nxt is not None:
         lines.append(f"再涨 {nxt[0] - value} 点升到「{nxt[1]}」。")
-    lines.append("语气随档位调整，但仍保持学姐傲娇，别突然变客服。")
+    lines.append("语气随档位调整，但仍保持学姐的软萌口吻，别突然变客服。")
     return "\n".join(lines)
 
 
@@ -180,14 +182,11 @@ class AffectionStore:
     def _path(self, group_id: int | str) -> Path:
         return self.data_dir / f"group_{group_id}.json"
 
+    def _store(self, group_id: int | str) -> JsonStore:
+        return JsonStore(self._path(group_id), create_parent=False)
+
     def load_group(self, group_id: int | str) -> dict[str, UserAffection]:
-        path = self._path(group_id)
-        if not path.is_file():
-            return {}
-        try:
-            raw = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return {}
+        raw = self._store(group_id).load(default={})
         users_raw = raw.get("users") if isinstance(raw, dict) else None
         if not isinstance(users_raw, dict):
             return {}
@@ -198,16 +197,12 @@ class AffectionStore:
         return out
 
     def save_group(self, group_id: int | str, users: dict[str, UserAffection]) -> None:
-        path = self._path(group_id)
+        """原子写。路径与 JSON 结构不变，历史好感度数据可直接读取。"""
         payload = {
             "users": {uid: u.to_dict() for uid, u in users.items()},
             "updated_at": datetime.now(TZ).isoformat(),
         }
-        with self._lock:
-            path.write_text(
-                json.dumps(payload, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
+        self._store(group_id).save(payload)
 
     def get_user(self, group_id: int | str, user_id: int | str) -> UserAffection:
         users = self.load_group(group_id)

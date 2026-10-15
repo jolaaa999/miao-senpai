@@ -6,10 +6,20 @@ from threading import Lock
 from typing import Any
 
 from .session_fs import session_id_to_fs_key
+from .storage import JsonStore
 
 
 class ChatMemory:
-    """按 session 持久化 user/assistant 消息；max_history<=0 时不裁剪。"""
+    """按 session 持久化 user/assistant 消息；max_history<=0 时不裁剪。
+
+    Phase 2 改动：写入改走 `JsonStore`（原子写）而不是直接
+    `path.write_text()`。**对外接口、文件路径、JSON 结构全部不变**，
+    已有 `data/dl_senpai/memory/*.json` 无需迁移即可继续读取。
+
+    为什么必须改：`write_text` 是"先清空再写"，进程在写入途中被 kill
+    （Windows 上任务管理器结束、断电）会留下半截 JSON，用户全部聊天记忆
+    丢失。原子写保证"要么旧内容、要么新内容"。
+    """
 
     def __init__(self, memory_dir: str | Path, max_history: int = 0) -> None:
         self.memory_dir = Path(memory_dir)
@@ -37,18 +47,15 @@ class ChatMemory:
         safe = session_id_to_fs_key(session_id)
         return self.memory_dir / f"{safe}.json"
 
+    def _store(self, session_id: str) -> JsonStore:
+        return JsonStore(self._path(session_id), create_parent=False)
+
     def load(self, session_id: str) -> list[dict[str, str]]:
         return self._trim(self.load_all(session_id))
 
     def load_all(self, session_id: str) -> list[dict[str, str]]:
         """读取磁盘全量历史（不做 max_history 裁剪），供召回使用。"""
-        path = self._path(session_id)
-        if not path.exists():
-            return []
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            return []
+        data = self._store(session_id).load(default=[])
         if not isinstance(data, list):
             return []
         cleaned: list[dict[str, str]] = []
@@ -62,13 +69,8 @@ class ChatMemory:
         return cleaned
 
     def save(self, session_id: str, messages: list[dict[str, str]]) -> None:
-        path = self._path(session_id)
         trimmed = self._trim(messages)
-        with self._lock:
-            path.write_text(
-                json.dumps(trimmed, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
+        self._store(session_id).save(trimmed)
 
     def append_turn(
         self,

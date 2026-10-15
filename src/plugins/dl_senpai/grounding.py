@@ -134,9 +134,16 @@ def requires_strict_grounding(text: str) -> bool:
         return False
     if _GAME_OR_MEDIA_CONTEXT_RE.search(raw):
         return True
-    # 配装/装备/技能类：即便没写游戏名，也禁止凭印象编专名
+    # 配装/装备/技能类：即便没写游戏名，也禁止凭印象编专名。
+    # 「角色/皮肤/材料/掉落/怪物」这些同样高频，以前漏在外面 ——
+    # 「新角色有哪些」「材料怎么刷」这类问题压根不会进检查。
     return bool(
-        re.search(r"配装|装备|技能|干员|护石|头盔|宝珠|弓|弩|太刀|大剑", raw, re.IGNORECASE)
+        re.search(
+            r"配装|装备|技能|干员|护石|头盔|宝珠|弓|弩|太刀|大剑|"
+            r"角色|皮肤|材料|掉落|boss|怪物|肉质|弱点|词条",
+            raw,
+            re.IGNORECASE,
+        )
     )
 
 
@@ -213,15 +220,49 @@ def extract_entity_terms(text: str) -> list[str]:
     return found
 
 
+# 免责语：名字出现在这些话附近，说明模型是在「否认」它而不是断言它。
+# 没有这层豁免的话，老实回答「搜了没查到 XX」会被反复判成编造，
+# 重写两次后反而被兜底文案盖掉 —— 把本来正确的答案改坏（实测踩过）。
+_DISCLAIMER_RE = re.compile(
+    r"没查到|没搜到|查不到|搜不到|没找到|找不到|没看到|"
+    r"不敢|不确定|不知道|不清楚|没把握|没印象|记不清|"
+    r"瞎编|乱报|别信|没依据|没有依据|存疑|可能有误|未必"
+)
+
+# 免责语与名字之间允许的字符距离。中文里这层否定通常紧贴名字（「没查到XX」），
+# 取 24 字足够覆盖「搜了没查到」「这几个我确实没找到靠谱的说法」这类写法。
+_DISCLAIMER_WINDOW = 24
+
+
+def _mentioned_with_disclaimer(reply: str, term: str) -> bool:
+    """该专名是否出现在免责语附近（即：正在被否认，而非被断言）。"""
+    start = 0
+    while True:
+        idx = reply.find(term, start)
+        if idx < 0:
+            return False
+        lo = max(0, idx - _DISCLAIMER_WINDOW)
+        hi = min(len(reply), idx + len(term) + _DISCLAIMER_WINDOW)
+        if _DISCLAIMER_RE.search(reply[lo:hi]):
+            return True
+        start = idx + len(term)
+
+
 def find_ungrounded_terms(reply: str, allowed_context: str) -> list[str]:
-    """回复里出现、但上下文（检索+用户话）找不到的疑似编造专名。"""
+    """回复里出现、但上下文（检索+用户话）找不到的疑似编造专名。
+
+    带免责语豁免：明确说「没查到/不敢报」时提到的名字不算编造。
+    """
     context = (allowed_context or "").casefold()
     context_compact = re.sub(r"[αβ＋+\s·•]", "", context)
     bad: list[str] = []
-    for term in extract_entity_terms(reply):
+    raw_reply = reply or ""
+    for term in extract_entity_terms(raw_reply):
         key = term.casefold()
         compact = re.sub(r"[αβ＋+\s·•]", "", key)
         if key in context or compact in context_compact:
+            continue
+        if _mentioned_with_disclaimer(raw_reply, term):
             continue
         bad.append(term)
     return bad
@@ -237,6 +278,23 @@ def build_grounding_retry_user_message(ungrounded: list[str]) -> str:
         "3. 禁止把别的游戏/角色机制串过来；\n"
         "4. 保持学姐口吻，简短一点。"
     )
+
+
+def build_grounding_fallback_reply(ungrounded: list[str]) -> str:
+    """重写到上限仍不达标时的兜底回复。
+
+    为什么需要兜底而不是继续让模型改：能改到上限说明它手里确实没有依据，
+    再问只会得到一个换了说法的编造。这里用确定性文案收场，宁可不答。
+    文案保持学姐口吻，且不透露任何实现细节。
+    """
+    names = [t for t in (ungrounded or []) if t][:3]
+    if names:
+        hint = "「" + "」「".join(names) + "」"
+        return (
+            f"刚翻了下手头的资料，{hint}这几个我确实没看到靠谱的说法，"
+            "不想瞎报给你。你要是有出处可以发我，我看看。"
+        )
+    return "这个我手头资料里没查到可靠的，不想现编一个给你。回头确认了再说。"
 
 
 def should_grounding_retry(

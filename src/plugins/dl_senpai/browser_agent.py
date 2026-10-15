@@ -21,6 +21,7 @@ import httpx
 from nonebot import logger
 from nonebot.adapters.onebot.v11 import MessageSegment
 
+from .cache import SessionCooldown
 from .config import PluginConfig, get_config
 
 _MARKER_CLOSE = r"(?:>>>|>>|＞＞＞|＞＞|】】|】>|】)"
@@ -111,20 +112,8 @@ class BrowseResult:
     page_url: str = ""
 
 
-class BrowseCooldown:
-    def __init__(self) -> None:
-        self._last: dict[str, float] = {}
-
-    def ready(self, session_id: str, cooldown_sec: int, now: float | None = None) -> bool:
-        if cooldown_sec <= 0:
-            return True
-        if session_id not in self._last:
-            return True
-        now = time.time() if now is None else now
-        return (now - self._last[session_id]) >= cooldown_sec
-
-    def mark(self, session_id: str, now: float | None = None) -> None:
-        self._last[session_id] = time.time() if now is None else now
+class BrowseCooldown(SessionCooldown):
+    """浏览器任务冷却。Phase 2 统一到 `SessionCooldown`（原先为无界裸 dict）。"""
 
 
 def browser_available() -> bool:

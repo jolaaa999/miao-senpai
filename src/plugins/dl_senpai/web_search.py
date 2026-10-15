@@ -16,7 +16,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 import httpx
 
-from .clock import current_beijing_year
+from .clock import beijing_now, current_beijing_year, is_asking_current_datetime
 from .reply_quote import user_intent_text
 
 try:
@@ -193,6 +193,41 @@ class SearchHit:
     url: str = ""
     snippet: str = ""
     source: str = ""
+    # 发布日期（YYYY-MM-DD / YYYY-MM，取不到就是空串）。
+    # 为什么必须有这个字段：没有日期的检索简报，模型**无从判断内容是不是过期的**，
+    # 只能默认"搜到的就是最新的" —— 实测就是这样把上赛季的旧内容当成当期答案抄了。
+    date: str = ""
+
+
+_DIGIT_DATE_RE = re.compile(r"(20\d{2})[-/.](\d{1,2})[-/.](\d{1,2})")
+_YEAR_MONTH_RE = re.compile(r"(20\d{2})[-/.](\d{1,2})")
+
+
+def normalize_hit_date(raw: Any) -> str:
+    """把各后端五花八门的日期压成 YYYY-MM-DD，取不出来返回空串。
+
+    后端返回的形状差别很大：Tavily 是 ISO（2026-10-12T00:00:00Z），
+    SearXNG 也是 ISO，ddgs 有时只给 YYYY-MM。统一压平后渲染层不用分支。
+    """
+    text = str(raw or "").strip()
+    if not text:
+        return ""
+    m = _DIGIT_DATE_RE.search(text)
+    if m:
+        month, day = int(m.group(2)), int(m.group(3))
+        if 1 <= month <= 12 and 1 <= day <= 31:
+            return "%s-%02d-%02d" % (m.group(1), month, day)
+    m2 = _YEAR_MONTH_RE.search(text)
+    if m2:
+        month = int(m2.group(2))
+        if 1 <= month <= 12:
+            return "%s-%02d" % (m2.group(1), month)
+    return ""
+
+
+def count_dated_hits(hits: list[SearchHit]) -> int:
+    """这批结果里有几条带发布日期。"""
+    return sum(1 for h in hits if (h.date or "").strip())
 
 
 @dataclass
@@ -415,6 +450,56 @@ def build_fallback_search_queries(query: str, *, max_total: int = 3) -> list[str
     return _dedupe_queries(fallbacks)[: max(1, max_total)]
 
 
+# 时效敏感词：单独一条正则，不复用 _AUTO_SEARCH_TIME_RE。
+# 后者是"要不要自动联网"的判定，含"几号/哪天"这类问日期的词；
+# 这里问的是"答案会不会随时间变"，赛季/版本/补丁/热修 同样属于会变的内容。
+_FRESHNESS_RE = re.compile(
+    r"(最新|最近|当前|目前|实时|今天|今日|昨天|明天|刚刚|刚才|今年|本月|本周|这周|上周|"
+    r"赛季|版本|更新|补丁|热修|热补丁|上线|发售|开服|停服|维护|公告|"
+    r"出了吗|发布了吗|上线了吗|发售了吗|什么时候出|啥时候|20\d{2}年?)",
+    re.IGNORECASE,
+)
+
+
+def is_time_sensitive_question(text: str) -> bool:
+    """问题是否在问"会随时间变"的事（最新/版本/赛季/补丁…）。
+
+    判定为真且首轮结果没有任何日期时，才值得再补搜一轮 ——
+    这条闸门避免闲聊也去做第二轮检索，白花时间和 token。
+    """
+    raw = _normalize_for_search_heuristics(text) or (text or "")
+    if len(raw.strip()) < 2:
+        return False
+    return bool(_FRESHNESS_RE.search(raw))
+
+
+def build_freshness_queries(text: str, *, max_total: int = 2) -> list[str]:
+    """时效问题的补搜词：给核心词加上"最新"与年月，逼出当期内容。
+
+    为什么不复用 build_fallback_search_queries：那套是按**相关度太低**触发的
+    （best_hit_relevance < 阈值）。"相关但对不上当期"恰恰相关度很高，
+    永远走不到那条路 —— 而它才是出错最多的一种。
+    """
+    base = refine_search_query(text) or _compact_query_core(text) or (text or "").strip()
+    base = _WS_RE.sub(" ", base).strip()
+    if not base:
+        return []
+    now = beijing_now()
+    core = _compact_query_core(base) or base
+    found: list[str] = []
+
+    def add(q: str) -> None:
+        item = _WS_RE.sub(" ", (q or "").strip())
+        if item and len(item) <= _QUERY_MAX_CHARS:
+            found.append(item)
+
+    # 先试"最新"这类词（搜索引擎对时效词更敏感），再补具体年月（对当期更准）
+    add("%s 最新" % core)
+    add("%s %d年%d月" % (core, now.year, now.month))
+    add("%s 更新公告 %d" % (core, now.year))
+    return _dedupe_queries(found)[: max(1, max_total)]
+
+
 def should_skip_auto_search(text: str) -> bool:
     """逛网站 / 搜图 / 提取提示词类任务：不走文字联网检索。"""
     raw = (text or "").strip()
@@ -562,7 +647,7 @@ def build_auto_search_queries(text: str, *, max_queries: int = 4) -> list[str]:
     return expand_search_queries(focus, max_total=max(1, max_queries), source_text=raw)
 
 
-async def prefetch_search_brief(
+async def grounding_prefetch(
     text: str,
     config: Any,
     *,
@@ -570,7 +655,26 @@ async def prefetch_search_brief(
     trend_titles: list[str] | None = None,
     aggressive: bool | None = None,
 ) -> tuple[str, list[str]]:
-    """自动预判并检索；返回 (brief, queries)。无需检索时 brief 为空。"""
+    """自动预判并检索；返回 (brief, queries)。无需检索时 brief 为空。
+
+    Phase 6.6 命名澄清（第二十六节）：
+
+        原名 `prefetch_search_brief` 容易让人误以为它是 SEARCH Tool 的
+        第二个实现。实际上它是 **Model orchestration 的 grounding 预取**：
+
+            - 在**首次模型响应之前**执行（llm.chat L408，模型调用在 L506）
+            - 由 heuristic（`should_auto_search`）决定是否检索
+            - 结果直接作为 context 注入 prompt，不是模型请求的 Tool 调用
+
+        真正的 SEARCH Tool 走 `ToolRegistry` → `execute_search`；
+        模型在响应里写 `<<<SEARCH ...>>>` 时触发的**多轮 grounding 循环**
+        在 `llm.chat` 内，与 Tool 共享同一个底层 searcher。
+
+        三者关系：
+            grounding_prefetch   ← 本函数（响应前预取）
+            multi-round grounding ← llm.chat 循环（模型写 marker 后补检索）
+            SEARCH Tool           ← ToolRegistry + execute_search（统一入口）
+    """
     if aggressive is None:
         aggressive = bool(getattr(config, "search_auto_aggressive", True))
     trend_titles = trend_titles or []
@@ -589,7 +693,16 @@ async def prefetch_search_brief(
         return "", []
     searcher = searcher_from_config(config)
     try:
-        brief = await searcher.search_many(queries, intent_query=queries[0])
+        # 把总预算交给 search_many 自己分摊到每个查询上。
+        # 不传的话每段都按默认上限生成，拼完再整体截断，只有第一条能活下来。
+        brief = await searcher.search_many(
+            queries,
+            intent_query=queries[0],
+            max_chars=int(getattr(config, "search_prompt_max_chars", 2400)),
+            # 传原始问题而不是检索词：时效词（最新/补丁/赛季）在用户话里，
+            # 而 search_many 要靠它决定"整批无日期时是否再补一轮"。
+            freshness_intent=text,
+        )
     except Exception as exc:  # noqa: BLE001
         logger.warning(f"dl_senpai auto search failed: {exc}")
         brief = "【联网检索结果】\n（检索暂时不可用）"
@@ -622,6 +735,26 @@ def _clean_bing_url(url: str) -> str:
     return raw
 
 
+def hit_domain(url: str) -> str:
+    """取结果链接的域名（去掉 www.）。
+
+    交叉验证只认域名：同一个站点的三条结果仍是「一个来源」，
+    不能因为条数多就当成了多方印证。
+    """
+    try:
+        netloc = urlparse((url or "").strip()).netloc.lower()
+    except Exception:  # noqa: BLE001
+        return ""
+    if netloc.startswith("www."):
+        netloc = netloc[4:]
+    return netloc
+
+
+def count_independent_domains(hits: list[SearchHit]) -> int:
+    """这批结果来自几个互不相同的域名。"""
+    return len({d for d in (hit_domain(h.url) for h in hits) if d})
+
+
 def format_search_for_prompt(
     hits: list[SearchHit],
     *,
@@ -631,14 +764,31 @@ def format_search_for_prompt(
     if not hits:
         q = f"「{query}」" if query else ""
         return f"【联网检索结果】{q}\n（没有搜到可用结果）"
-    lines = [f"【联网检索结果】查询：{query}" if query else "【联网检索结果】"]
-    used = len(lines[0]) + 1
+    head = f"【联网检索结果】查询：{query}" if query else "【联网检索结果】"
+    # 把来源数量和日期覆盖情况摆在最前面：前者决定能不能互相印证，
+    # 后者决定**有没有资格谈时效**。一条日期都没有时必须明说，
+    # 否则模型会默认"搜索返回的就是最新的"。
+    dated = count_dated_hits(hits)
+    head += f"（共 {len(hits)} 条 / {count_independent_domains(hits)} 个独立来源）"
+    if dated:
+        head += f"\n（其中 {dated} 条带发布日期，见行尾）"
+    else:
+        head += (
+            "\n（本批结果没有任何发布日期：你无法据此判断时效。"
+            "涉及版本/赛季/补丁/最新/今天的问题，先补搜再下结论，不要默认它是最新的。）"
+        )
+    lines = [head]
+    used = len(head) + 1
     for i, hit in enumerate(hits, start=1):
         title = (hit.title or "无标题").strip()
         snippet = (hit.snippet or "").strip()
         url = (hit.url or "").strip()
-        src = f" · {hit.source}" if hit.source else ""
-        block = f"{i}. {title}{src}"
+        # 标域名而不是引擎名：同一引擎的多条结果经常来自同一个站，
+        # 只写引擎名会让模型误以为拿到了多个来源。
+        tag = hit_domain(url) or hit.source
+        src = f" · {tag}" if tag else ""
+        when = f" · {hit.date}" if (hit.date or "").strip() else ""
+        block = f"{i}. {title}{src}{when}"
         if snippet:
             block += f"\n   {snippet}"
         if url:
@@ -665,9 +815,12 @@ class WebSearcher:
         region: str = "zh-cn",
         searxng_url: str = "",
         tavily_api_key: str = "",
+        min_independent_domains: int = 1,
     ) -> None:
         self.provider = (provider or "auto").strip().lower() or "auto"
         self.max_results = max(1, min(10, int(max_results)))
+        # 少于这个数量的独立来源时，会在结果里明确标注「未获多方印证」
+        self.min_independent_domains = max(1, int(min_independent_domains))
         self.timeout = max(3.0, float(timeout))
         self.region = (region or "zh-cn").strip() or "zh-cn"
         self.searxng_url = (searxng_url or "").strip().rstrip("/")
@@ -722,9 +875,31 @@ class WebSearcher:
                 scored.append((score_hit_relevance(query, hit), hit))
         scored.sort(key=lambda item: item[0], reverse=True)
         good = [hit for score, hit in scored if score >= 0.2]
-        if good:
-            return good[: self.max_results]
-        return [hit for _, hit in scored[: self.max_results]]
+        pool = good or [hit for _, hit in scored]
+        if not pool:
+            return []
+        # 域名先行：默认只取 5 条，若让同一站点占满名额，模型看到的就只是
+        # 一家之言，无从交叉印证。先每个域名取一条，铺满不同来源后再回填同域名的高分结果。
+        picked: list[SearchHit] = []
+        picked_idx: set[int] = set()
+        used_domains: set[str] = set()
+        for idx, hit in enumerate(pool):
+            dom = hit_domain(hit.url)
+            if dom and dom in used_domains:
+                continue
+            picked.append(hit)
+            picked_idx.add(idx)
+            if dom:
+                used_domains.add(dom)
+            if len(picked) >= self.max_results:
+                return picked
+        for idx, hit in enumerate(pool):
+            if idx in picked_idx:
+                continue
+            picked.append(hit)
+            if len(picked) >= self.max_results:
+                break
+        return picked
 
     async def _search_auto_multi(self, query: str) -> list[SearchHit]:
         order = self._provider_order()
@@ -744,15 +919,37 @@ class WebSearcher:
         *,
         intent_query: str = "",
         min_relevance: float = 0.35,
+        max_chars: int = 2400,
+        freshness_intent: str = "",
     ) -> str:
-        """并行检索多个 query；弱结果时自动换词重试。"""
+        """并行检索多个 query；弱结果时自动换词重试。
+
+        freshness_intent 传原始问题：它是**时效补搜**的判定依据。
+        弱结果重试看的是相关度，管不到"相关但对不上当期"，
+        所以那类问题需要单独一条触发路径。
+        """
         cleaned = _dedupe_queries(queries)
         if not cleaned:
             return "【联网检索结果】\n（查询为空）"
 
         intent = (intent_query or cleaned[0]).strip()
         sections: list[str] = []
+        # 先把每轮拿到的结果攒起来、最后一并渲染。
+        # 为什么不在每轮里就渲染：预算要按**总段数**摊，提前算会把补搜那几段挤出去。
+        pending: list[tuple[str, list[SearchHit]]] = []
         weak_queries: list[str] = []
+        attempted: list[str] = []
+        domains: set[str] = set()
+        dated_hits = 0
+
+        def _collect(hits: list[SearchHit]) -> None:
+            nonlocal dated_hits
+            for hit in hits:
+                d = hit_domain(hit.url)
+                if d:
+                    domains.add(d)
+                if (hit.date or "").strip():
+                    dated_hits += 1
 
         async def _one(q: str) -> tuple[str, list[SearchHit]]:
             hits = await self.search(q)
@@ -760,7 +957,8 @@ class WebSearcher:
 
         first_pass = await asyncio.gather(*(_one(q) for q in cleaned))
         for q, hits in first_pass:
-            sections.append(format_search_for_prompt(hits, query=q))
+            _collect(hits)
+            pending.append((q, hits))
             if best_hit_relevance(intent, hits) < min_relevance:
                 weak_queries.append(q)
 
@@ -777,14 +975,63 @@ class WebSearcher:
                     f"dl_senpai web_search retry weak={weak_queries!r} "
                     f"fallback={fallback_queries!r}"
                 )
+                attempted.extend(fallback_queries)
                 retry_pass = await asyncio.gather(*(_one(q) for q in fallback_queries))
                 for q, hits in retry_pass:
                     if not hits:
                         continue
+                    _collect(hits)
                     if best_hit_relevance(intent, hits) >= min_relevance * 0.7:
-                        sections.append(format_search_for_prompt(hits, query=f"{q}（换词重试）"))
+                        pending.append((f"{q}（换词重试）", hits))
                     elif best_hit_relevance(q, hits) >= min_relevance:
-                        sections.append(format_search_for_prompt(hits, query=f"{q}（换词重试）"))
+                        pending.append((f"{q}（换词重试）", hits))
+
+        # 时效补搜：问题在问"最新/版本/赛季/补丁"，而这一整批结果**一条日期都没有**。
+        # 这时模型没有依据判断内容是否过期，只能默认它是最新的 —— 实测就是这样
+        # 把上赛季的旧内容当成当期答案。这里换成带年月/"最新"的词再搜一轮。
+        # 一条日期都没有才补，既避免多花一次检索，也保证补搜是"有的放矢"。
+        if (
+            freshness_intent
+            # 问「今天几号/现在几点」由系统时钟回答，不需要为时效补搜 ——
+            # 这条正则很窄（要求"几"紧跟"今天/现在"），不会误伤"今天有什么新闻"。
+            and not is_asking_current_datetime(freshness_intent)
+            and is_time_sensitive_question(freshness_intent)
+            and not dated_hits
+        ):
+            known = {q.casefold() for q in cleaned} | {q.casefold() for q in attempted}
+            fresh_queries = [
+                q
+                for q in build_freshness_queries(freshness_intent, max_total=2)
+                if q.casefold() not in known
+            ]
+            if fresh_queries:
+                logger.info(
+                    f"dl_senpai web_search freshness retry queries={fresh_queries!r}"
+                )
+                fresh_pass = await asyncio.gather(*(_one(q) for q in fresh_queries))
+                for q, hits in fresh_pass:
+                    if not hits:
+                        continue
+                    _collect(hits)
+                    pending.append((f"{q}（时效补搜）", hits))
+
+        # 预算在这里按**总段数**摊，而不是按第一轮的查询数：
+        # 补搜段如果按第一轮的份额生成，拼起来会被调用方从尾部整体截断，
+        # 而那段恰恰是最该让模型看到的当期证据。
+        per_section = max(400, int(max_chars) // max(1, len(pending)))
+        sections = [
+            format_search_for_prompt(hits, query=label, max_chars=per_section)
+            for label, hits in pending
+        ]
+
+        # 来源不足时明说，而不是把一条结果当成已证实的定论丢给模型
+        need = self.min_independent_domains
+        if need > 1 and len(domains) < need:
+            sections.append(
+                "【来源不足】本次只检索到 %d 个独立来源，未达到交叉印证要求（需 %d 个）。"
+                "请把它当作单一来源的说法：明确告诉对方只查到这一处，不要讲成已证实的事实。"
+                % (len(domains), need)
+            )
 
         return "\n\n".join(sections)
 
@@ -948,6 +1195,9 @@ class WebSearcher:
                     url=url,
                     snippet=snippet[:280],
                     source="searxng",
+                    date=normalize_hit_date(
+                        item.get("publishedDate") or item.get("published_date")
+                    ),
                 )
             )
             if len(hits) >= self.max_results:
@@ -987,6 +1237,7 @@ class WebSearcher:
                     url=url,
                     snippet=snippet[:280],
                     source="tavily",
+                    date=normalize_hit_date(item.get("published_date") or item.get("date")),
                 )
             )
             if len(hits) >= self.max_results:
@@ -1024,6 +1275,7 @@ class WebSearcher:
                             url=url,
                             snippet=snippet[:280],
                             source="ddgs",
+                            date=normalize_hit_date(item.get("date")),
                         )
                     )
                     if len(hits) >= self.max_results:
@@ -1041,6 +1293,7 @@ def searcher_from_config(config: Any) -> WebSearcher:
         region=getattr(config, "search_region", "zh-cn"),
         searxng_url=getattr(config, "search_searxng_url", ""),
         tavily_api_key=getattr(config, "search_tavily_api_key", ""),
+        min_independent_domains=int(getattr(config, "search_min_independent_domains", 2)),
     )
 
 
@@ -1055,3 +1308,9 @@ def dumps_hits(hits: list[SearchHit]) -> str:
         for h in hits
     ]
     return json.dumps(payload, ensure_ascii=False, indent=2)
+
+
+# 向后兼容别名（Phase 6.6 重命名）。
+# 保留一段时间，方便外部脚本/旧笔记继续引用；
+# 新代码请用 grounding_prefetch —— 名字才表达了它的真实归属。
+prefetch_search_brief = grounding_prefetch

@@ -1,9 +1,11 @@
-"""主动社交：遍历群成员发好友申请 + 名片赞 + QQ 空间动态赞评。
+"""主动社交：遍历群成员发好友申请。
 
 - 加好友：优先用 NapCat Cookie 调空间 CGI（全自动）；失败再试 OneBot 扩展 API。
   按 group_features 注册表（= 上线同步的全部群）扫成员，每日配额 + 随机间隔。
-- 名片赞：北京时间过 like_daily_hour 后 send_like。
-- 空间：对接 onebot-qzone HTTP 桥（A 方案）拉好友动态并点赞/评论。
+
+2026-10-15：名片赞（NapCat send_like）与 QQ 空间动态赞评（onebot-qzone 桥）
+按需求整体退役，连带 qzone_client / qzone_sync / qzone_server / qzone_comment
+四个模块与相关配置一起删除——赞评是那套桥唯一的使用者，留着就是死代码。
 """
 
 from __future__ import annotations
@@ -28,8 +30,6 @@ from typing import TYPE_CHECKING
 
 from .friend_add_web import send_friend_request_via_web
 from .group_features import is_feature_enabled
-from .qzone_client import QZoneBridgeClient, QZoneBridgeError, normalize_feeds
-from .qzone_comment import generate_qzone_comment
 
 if TYPE_CHECKING:
     from .config import PluginConfig
@@ -40,10 +40,6 @@ _SOCIAL_DIR = Path(__file__).resolve().parents[3] / "data" / "dl_senpai" / "soci
 
 # 加好友申请间随机间隔（秒）：3–8 分钟
 _FRIEND_ADD_GAP = (180, 480)
-# 名片赞间随机间隔（秒）：5–15
-_LIKE_GAP = (5, 15)
-# 空间互动间隔（秒）
-_QZONE_GAP = (8, 25)
 # 后台循环空转间隔（秒）
 _LOOP_IDLE = 60
 
@@ -56,7 +52,6 @@ _FRIEND_ADD_APIS = (
 )
 _friend_add_onebot_dead = False
 _locked_add_api: str | None = None
-_qzone_cookie_synced = False
 _onebot_unsupported_logged = False
 # QQ CGI「服务器繁忙」后冷却到此时间戳（monotonic）再试，避免每分钟空打
 _friend_add_busy_until = 0.0
@@ -68,7 +63,7 @@ def _today() -> str:
 
 
 class SocialStateStore:
-    """当日已发申请 / 名片赞 / 空间互动记录，day-key 翻转自动重置。"""
+    """当日已发好友申请记录，day-key 翻转自动重置。"""
 
     def __init__(self, data_dir: str | Path = _SOCIAL_DIR) -> None:
         self.dir = Path(data_dir)
@@ -118,43 +113,6 @@ class SocialStateStore:
             "ts": datetime.now(_TZ).isoformat(timespec="seconds"),
         }
         self._save("friend_requests.json", {"day": day, "sent": sent})
-
-    def liked_today(self) -> set[str]:
-        raw = self._load("likes.json")
-        if raw.get("day") == _today() and isinstance(raw.get("liked"), list):
-            return {str(u) for u in raw["liked"]}
-        return set()
-
-    def record_like(self, user_id: int | str) -> None:
-        raw = self._load("likes.json")
-        day = _today()
-        liked = (
-            raw.get("liked")
-            if raw.get("day") == day and isinstance(raw.get("liked"), list)
-            else []
-        )
-        uid = str(user_id)
-        if uid not in liked:
-            liked.append(uid)
-        self._save("likes.json", {"day": day, "liked": liked})
-
-    def qzone_done_today(self) -> dict[str, list]:
-        raw = self._load("qzone.json")
-        if raw.get("day") != _today():
-            return {"liked": [], "commented": []}
-        liked = raw.get("liked") if isinstance(raw.get("liked"), list) else []
-        commented = raw.get("commented") if isinstance(raw.get("commented"), list) else []
-        return {"liked": [str(x) for x in liked], "commented": [str(x) for x in commented]}
-
-    def record_qzone(self, *, liked_tid: str | None = None, commented_tid: str | None = None) -> None:
-        raw = self._load("qzone.json")
-        day = _today()
-        done = self.qzone_done_today() if raw.get("day") == day else {"liked": [], "commented": []}
-        if liked_tid and liked_tid not in done["liked"]:
-            done["liked"].append(str(liked_tid))
-        if commented_tid and commented_tid not in done["commented"]:
-            done["commented"].append(str(commented_tid))
-        self._save("qzone.json", {"day": day, **done})
 
 
 _store: SocialStateStore | None = None
@@ -341,192 +299,6 @@ async def friend_add_tick(bot, config: "PluginConfig") -> int:
     return sent
 
 
-def like_hour_reached(config: "PluginConfig", now: datetime | None = None) -> bool:
-    now = now or datetime.now(_TZ)
-    return now.astimezone(_TZ).hour >= max(0, min(23, int(config.like_daily_hour)))
-
-
-async def like_tick(bot, config: "PluginConfig") -> int:
-    """名片赞：给当日未点赞的好友 send_like。"""
-    if not config.like_enable:
-        return 0
-    if not like_hour_reached(config):
-        return 0
-    store = get_social_store()
-    liked = store.liked_today()
-    friends = await _get_friend_ids(bot)
-    self_id = str(getattr(bot, "self_id", "") or "")
-    times = max(1, min(10, int(config.like_times)))
-    count = 0
-    for uid in sorted(friends):
-        if not uid or uid == self_id or uid in liked:
-            continue
-        try:
-            await bot.call_api("send_like", user_id=int(uid), times=times)
-        except Exception as e:  # noqa: BLE001
-            err = str(e)
-            # 自己出现在好友列表时跳过，避免每分钟刷「禁止给自己点赞」
-            if "禁止给自己点赞" in err or uid == self_id:
-                store.record_like(uid)
-                continue
-            logger.warning(f"dl_senpai social: send_like failed uid={uid}: {e}")
-            continue
-        store.record_like(uid)
-        count += 1
-        if count % 20 == 0:
-            logger.info(f"dl_senpai social: liked {count} friends today")
-        await asyncio.sleep(random.uniform(*_LIKE_GAP))
-    if count:
-        logger.info(
-            f"dl_senpai social: like tick done, {count} new + {len(liked)} already"
-        )
-    return count
-
-
-def _qzone_client(config: "PluginConfig") -> QZoneBridgeClient:
-    return QZoneBridgeClient(
-        getattr(config, "qzone_bridge_url", "") or "",
-        access_token=getattr(config, "qzone_access_token", "") or "",
-        timeout=float(getattr(config, "qzone_timeout", 30) or 30),
-    )
-
-
-def _comment_templates(config: "PluginConfig") -> list[str]:
-    raw = getattr(config, "qzone_comment_templates", "") or ""
-    parts = [p.strip() for p in raw.replace("，", ",").split(",") if p.strip()]
-    return parts or ["好看！", "冲！", "学姐路过点个赞~"]
-
-
-async def _sync_qzone_cookie(bot, client: QZoneBridgeClient) -> None:
-    global _qzone_cookie_synced
-    if _qzone_cookie_synced:
-        return
-    try:
-        from .config import get_config
-        from .qzone_sync import sync_napcat_cookies_to_qzone
-
-        await sync_napcat_cookies_to_qzone(bot, get_config())
-        _qzone_cookie_synced = True
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(f"dl_senpai social: qzone cookie sync skipped: {exc}")
-        # 仍尝试旧路径：仅 login_cookie
-        try:
-            data = await bot.call_api("get_cookies", domain="qzone.qq.com")
-            cookie = ""
-            if isinstance(data, dict):
-                cookie = str(data.get("cookies") or "").strip()
-            if cookie:
-                await client.login_cookie(cookie)
-                _qzone_cookie_synced = True
-                logger.info("dl_senpai social: qzone bridge cookie synced (fallback)")
-        except Exception as exc2:  # noqa: BLE001
-            logger.warning(f"dl_senpai social: qzone cookie fallback failed: {exc2}")
-
-
-async def qzone_tick(bot, config: "PluginConfig") -> dict[str, int]:
-    """刷好友动态：点赞 + 可选评论。依赖 onebot-qzone 桥。"""
-    result = {"liked": 0, "commented": 0}
-    if not getattr(config, "qzone_enable", False):
-        return result
-    qh = getattr(config, "qzone_daily_hour", None)
-    hour = int(config.like_daily_hour if qh is None else qh)
-    now = datetime.now(_TZ)
-    if now.astimezone(_TZ).hour < max(0, min(23, hour)):
-        return result
-
-    client = _qzone_client(config)
-    if not client.configured():
-        logger.warning("dl_senpai social: qzone_enable but bridge url empty")
-        return result
-
-    if getattr(config, "qzone_sync_cookie", True):
-        await _sync_qzone_cookie(bot, client)
-
-    store = get_social_store()
-    done = store.qzone_done_today()
-    like_quota = max(
-        0, int(getattr(config, "qzone_like_daily_limit", 30)) - len(done["liked"])
-    )
-    comment_quota = max(
-        0,
-        int(getattr(config, "qzone_comment_daily_limit", 10)) - len(done["commented"]),
-    )
-    do_like = bool(getattr(config, "qzone_like_enable", True)) and like_quota > 0
-    do_comment = (
-        bool(getattr(config, "qzone_comment_enable", True)) and comment_quota > 0
-    )
-    if not do_like and not do_comment:
-        return result
-
-    try:
-        raw = await client.get_friend_feeds(
-            num=max(5, min(50, int(getattr(config, "qzone_feed_num", 20) or 20))),
-            include_image_data=False,
-        )
-    except QZoneBridgeError as exc:
-        logger.warning(f"dl_senpai social: get_friend_feeds failed: {exc}")
-        return result
-
-    feeds = normalize_feeds(raw)
-    self_id = str(getattr(bot, "self_id", "") or "")
-
-    for feed in feeds:
-        if like_quota <= 0 and comment_quota <= 0:
-            break
-        uid, tid = feed["user_id"], feed["tid"]
-        if uid == self_id:
-            continue
-        key = f"{uid}:{tid}"
-
-        if do_like and like_quota > 0 and key not in done["liked"] and not feed.get("liked"):
-            try:
-                await client.like_feed(uid, tid, feed.get("abstime") or "")
-                store.record_qzone(liked_tid=key)
-                done["liked"].append(key)
-                like_quota -= 1
-                result["liked"] += 1
-                logger.info(f"dl_senpai social: qzone liked {key}")
-            except QZoneBridgeError as exc:
-                logger.warning(f"dl_senpai social: qzone like failed {key}: {exc}")
-            await asyncio.sleep(random.uniform(*_QZONE_GAP))
-
-        if do_comment and comment_quota > 0 and key not in done["commented"]:
-            # 低概率评论，避免刷屏：默认约 35%
-            if random.random() > float(getattr(config, "qzone_comment_prob", 0.35) or 0.35):
-                continue
-            summary = str(feed.get("summary") or "")
-            nick = str(feed.get("nickname") or "")
-            try:
-                text = await generate_qzone_comment(
-                    config, summary=summary, nickname=nick
-                )
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(f"dl_senpai social: qzone comment gen failed {key}: {exc}")
-                text = random.choice(_comment_templates(config))
-            if not (text or "").strip():
-                continue
-            try:
-                await client.comment_feed(uid, tid, text.strip())
-                store.record_qzone(commented_tid=key)
-                done["commented"].append(key)
-                comment_quota -= 1
-                result["commented"] += 1
-                logger.info(
-                    f"dl_senpai social: qzone commented {key} "
-                    f"text={text!r} feed={summary[:40]!r}"
-                )
-            except QZoneBridgeError as exc:
-                logger.warning(f"dl_senpai social: qzone comment failed {key}: {exc}")
-            await asyncio.sleep(random.uniform(*_QZONE_GAP))
-
-    if result["liked"] or result["commented"]:
-        logger.info(
-            f"dl_senpai social: qzone tick liked={result['liked']} "
-            f"commented={result['commented']}"
-        )
-    return result
-
-
 async def social_loop(bot, config: "PluginConfig | None" = None) -> None:
     """后台主循环。"""
     from .config import get_config
@@ -534,18 +306,6 @@ async def social_loop(bot, config: "PluginConfig | None" = None) -> None:
     logger.info("[dl_senpai] social loop started")
     while True:
         cfg = config if config is not None else get_config()
-        try:
-            liked = await like_tick(bot, cfg)
-            if liked:
-                logger.info(f"dl_senpai social: like tick liked={liked}")
-        except Exception:  # noqa: BLE001
-            logger.exception("dl_senpai social: like tick crashed")
-        try:
-            qz = await qzone_tick(bot, cfg)
-            if qz.get("liked") or qz.get("commented"):
-                logger.info(f"dl_senpai social: qzone tick {qz}")
-        except Exception:  # noqa: BLE001
-            logger.exception("dl_senpai social: qzone tick crashed")
         try:
             sent = await friend_add_tick(bot, cfg)
             if sent:

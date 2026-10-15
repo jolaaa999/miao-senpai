@@ -182,7 +182,13 @@ def format_user_text_for_chat(
     """
     stripped = text.strip()
     if stripped:
-        return stripped
+        # 别人贴给学姐的角色设定模板在这里中和掉。
+        # 放在这个函数里而不是调用点，是因为 format_user_text_for_memory
+        # 也是先调它再拼昵称 —— 一处生效就同时挡住"进模型"和"进记忆"两条路。
+        from .persona_filter import neutralize
+
+        cleaned, _hit = neutralize(stripped)
+        return cleaned
     if image_count > 0:
         if sticker_count > 0:
             if sticker_count == 1:
