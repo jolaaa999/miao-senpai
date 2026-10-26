@@ -83,40 +83,6 @@ def test_handlers_still_has_no_orchestration_symbols() -> None:
     assert len(code_lines) < 30, "forwarder 变厚了，可能在重新实现编排"
 
 
-def test_legacy_still_has_zero_handlers_references() -> None:
-    tree = ast.parse(LEGACY.read_text(encoding="utf-8"))
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom):
-            assert "handlers" not in (node.module or "")
-        elif isinstance(node, ast.Import):
-            for a in node.names:
-                assert "handlers" not in a.name
-        elif isinstance(node, ast.Name):
-            assert node.id != "handlers"
-        elif isinstance(node, ast.Attribute):
-            assert node.attr != "handlers"
-
-
-def test_legacy_run_stages_still_intact() -> None:
-    """Legacy run 的阶段拆分不得被回退成巨石方法。"""
-    tree = ast.parse(LEGACY.read_text(encoding="utf-8"))
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ClassDef) and node.name == "LegacyOrchestrator":
-            run = next(
-                m for m in node.body
-                if isinstance(m, ast.AsyncFunctionDef) and m.name == "run"
-            )
-            loc = (run.end_lineno or run.lineno) - run.lineno + 1
-            assert loc < 200, f"run() 回退成 {loc} 行"
-            stages = [
-                m.name for m in node.body
-                if isinstance(m, ast.AsyncFunctionDef) and m.name != "run"
-            ]
-            assert len(stages) >= 8, f"阶段被合并: {stages}"
-            return
-    pytest.fail("找不到 LegacyOrchestrator")
-
-
 def test_single_tool_executor() -> None:
     """Tool executor 仍只有一套。"""
     from dl_senpai.agent.tools.builtin import build_production_tools

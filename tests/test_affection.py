@@ -80,7 +80,18 @@ def test_build_affection_brief() -> None:
     brief = build_affection_brief(name="测试", value=42)
     assert "测试" in brief
     assert "常来" in brief
-    assert "距" in brief
+    # 2026-10-25 改：不再把分数和「还差几点升级」写进提示词。
+    # 那个数字进提示词会被当成任务指标，她会为了加分说客套话。
+    assert "距" not in brief
+    assert "42" not in brief
+
+
+def test_build_affection_brief_prefers_subjective_view() -> None:
+    brief = build_affection_brief(
+        name="阿康", value=42, view="跟他在一起踏实，但有时候觉得他太会哄人。"
+    )
+    assert "太会哄人" in brief
+    assert "42" not in brief
 
 
 def test_pick_tier_title_stable_per_user() -> None:

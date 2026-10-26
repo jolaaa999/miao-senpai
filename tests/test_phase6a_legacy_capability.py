@@ -76,25 +76,6 @@ def test_legacy_orchestration_still_present() -> None:
     assert hasattr(handlers, "_handle_chat_inner")
 
 
-def test_legacy_orchestration_uses_shared_dispatcher() -> None:
-    """legacy orchestration 内部确实调用共享 dispatcher。
-
-    Phase 6.5：编排主体已从 handlers.py 搬到
-    `agent/legacy_orchestrator.py`，因此改为检查新位置。
-    handlers 只保留 forwarding wrapper。
-    """
-    import inspect
-
-    from dl_senpai.agent import legacy_orchestrator
-
-    src = inspect.getsource(legacy_orchestrator)
-    assert "_dispatch_legacy_tool_calls" in src
-    # 六处工具调用都应经它转发
-    assert src.count("await _dispatch_legacy_tool_calls(") >= 6, (
-        "legacy orchestration 仍有未迁移的 tool dispatch"
-    )
-
-
 def test_handlers_is_now_a_thin_forwarder() -> None:
     """Phase 6.5：handlers 不再持有编排主体。"""
     import inspect
@@ -143,13 +124,6 @@ def test_both_modes_share_same_executor_instance_type() -> None:
     # SharedToolDispatcher 也用 ToolExecutor
     src_dispatch = inspect.getsource(SharedToolDispatcher)
     assert "ToolExecutor" in src_dispatch
-
-
-def test_legacy_context_adapter_exists() -> None:
-    """legacy 缺上下文时有 adapter（第十一节）。"""
-    from dl_senpai.agent.legacy_context import build_legacy_context
-
-    assert callable(build_legacy_context)
 
 
 def test_legacy_adapter_does_not_parse_markers() -> None:

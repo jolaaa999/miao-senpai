@@ -45,7 +45,9 @@ class _FakeConfig:
 def test_feature_catalog_complete() -> None:
     keys = {k for k, _ in FEATURES}
     assert keys == FEATURE_KEYS
-    assert len(FEATURES) == 20
+    # 2026-10-24 删除 friend_add（主动加好友）后由 20 降为 19；
+    # 数量钉死是为了逼人显式处理新增/删除，别改成动态断言。
+    assert len(FEATURES) == 19
     # key 与 config 的 {key}_enable 字段一一对应
     for key, _label in FEATURES:
         assert hasattr(_FakeConfig(), f"{key}_enable")

@@ -418,16 +418,6 @@ def test_legacy_capability_has_converter(tool: str) -> None:
     assert expected[tool] in names, f"{tool} 缺少转换器 {expected[tool]}"
 
 
-def test_legacy_tool_context_adapter_only_converts() -> None:
-    """LegacyToolExecutionContextAdapter 只能转换上下文（第十一节）。"""
-    from dl_senpai.agent import legacy_context
-
-    src = (PKG / "agent" / "legacy_context.py").read_text(encoding="utf-8")
-    # 不得实现工具行为
-    for banned in ("apply_card_actions", "apply_mute_actions", "build_image_segment"):
-        assert banned not in src, f"上下文 adapter 侵入了工具行为: {banned}"
-
-
 def test_shared_dispatcher_is_singleton_in_handlers() -> None:
     """handlers 使用单例 dispatcher（避免每次新建 executor）。"""
     src = (PKG / "handlers.py").read_text(encoding="utf-8")

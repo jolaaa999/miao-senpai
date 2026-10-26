@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import ast
+import importlib
 import inspect
 from pathlib import Path
 from typing import Any
@@ -94,11 +95,11 @@ def test_handlers_does_not_import_raw_memory_stores() -> None:
     `get_affection_store` 仍被 affection / checkin / shop **命令**使用
     （那是平台业务命令，不是 Agent 编排），属合理例外。
 
-    判定方式：检查 `_handle_chat_inner` 的代码路径里没有这些调用。
+    2026-10 注：旧编排实现已删除，这条断言的对象只剩 handlers 里的
+    `_handle_chat_inner`（现在是一个显式抛错的桩）。
     """
     import dl_senpai.handlers as handlers
 
-    # 编排主体已搬走，handlers 里的 forwarder 必须是薄的
     src = inspect.getsource(handlers._handle_chat_inner)
     for banned in (
         "get_person_memory_store", "get_affection_store",
@@ -106,14 +107,6 @@ def test_handlers_does_not_import_raw_memory_stores() -> None:
         "MemoryFacade",
     ):
         assert banned not in src, f"编排路径仍访问 raw store: {banned}"
-
-    # 编排主体也不得访问 raw store
-    legacy_src = LEGACY.read_text(encoding="utf-8")
-    for banned in (
-        "get_person_memory_store", "get_affection_store",
-        "get_inner_state_store", "get_group_style_store",
-    ):
-        assert banned not in legacy_src, f"legacy 编排访问了 raw store: {banned}"
 
 
 def test_handlers_does_not_parse_markers() -> None:
@@ -141,56 +134,6 @@ def test_handlers_has_no_system_prompt_assembly() -> None:
 # ================================================================
 # 2. Legacy boundary（第三十一节）
 # ================================================================
-
-
-def test_legacy_may_depend_on_allowed_infrastructure() -> None:
-    """LegacyOrchestrator 允许依赖 SenpaiLLM / MemoryFacade /
-    SharedToolDispatcher / Observability。"""
-    imps = " ".join(imports_of(LEGACY))
-    assert "get_llm" in imps, "legacy 应使用 SenpaiLLM"
-    assert "MemoryRef" in imps or "memory_facade" in imps
-    assert "tool_dispatch" in imps
-    assert "polish_reply" in imps, "legacy 应复用 style 层"
-
-
-def test_legacy_does_not_import_raw_memory_stores() -> None:
-    imps = " ".join(imports_of(LEGACY))
-    for banned in (
-        "get_person_memory_store", "get_affection_store",
-        "get_inner_state_store", "get_group_style_store",
-    ):
-        assert banned not in imps, f"legacy 直接访问了 raw memory store: {banned}"
-
-
-def test_legacy_does_not_import_marker_parsers() -> None:
-    imps = " ".join(imports_of(LEGACY))
-    for banned in (
-        "parse_card_actions", "parse_mute_actions", "parse_draw_request",
-        "parse_browse_request", "parse_sticker_request", "parse_voice_request",
-        "parse_impression_updates", "parse_search_request",
-    ):
-        assert banned not in imps, f"legacy 直接 import 了 parser: {banned}"
-
-
-def test_legacy_does_not_import_tool_executor() -> None:
-    """legacy 只能调 SharedToolDispatcher，不得直接 new ToolExecutor。"""
-    names = code_names(LEGACY)
-    assert "ToolExecutor" not in names, "legacy 直接使用了 ToolExecutor"
-
-
-def test_legacy_uses_shared_dispatcher() -> None:
-    """legacy 的工具调用必须经共享 dispatcher。"""
-    src = LEGACY.read_text(encoding="utf-8")
-    assert "SharedToolDispatcher" in src
-    assert src.count("await _dispatch_legacy_tool_calls(") >= 6
-
-
-def test_legacy_has_no_inline_recovery() -> None:
-    """第十三/二十一节：不得重新引入内联 recovery。"""
-    src = LEGACY.read_text(encoding="utf-8")
-    assert "retry once" not in src, "legacy 重新引入了内联 recovery 日志"
-    assert "draw_retry_hint(" not in src
-    assert "browse_retry_hint(" not in src
 
 
 # ================================================================
@@ -252,68 +195,21 @@ def test_agent_entry_is_thin() -> None:
 
 
 def test_no_module_level_cycle_handlers_legacy() -> None:
-    """handlers → legacy → handlers 不得形成**模块级**循环。
+    """handlers 与旧编排之间不得有**模块级** import（历史上有过循环）。
 
-    legacy 通过 `_SharedHelper` 描述符在**调用时**解析 handlers，
-    因此模块级没有循环。
+    旧编排已删除，这条仍然要守：它是"handlers 不深入 Agent 内部"的
+    结构信号。如果哪天有人又在 handlers 顶部 import 某个 Agent 模块，
+    模块级循环会立刻回来。
     """
     handlers_tree = ast.parse(HANDLERS.read_text(encoding="utf-8"))
-    # handlers 对 legacy 的 import 必须在函数体内（延迟导入）
     for node in handlers_tree.body:
         if isinstance(node, (ast.Import, ast.ImportFrom)):
             mod = getattr(node, "module", "") or ""
             names = [a.name for a in node.names]
             assert "legacy_orchestrator" not in mod, (
-                "handlers 在模块级 import 了 legacy_orchestrator（会成环）"
+                "handlers 在模块级 import 了 legacy_orchestrator（已不存在的模块）"
             )
             assert "LegacyOrchestrator" not in names
-
-    legacy_tree = ast.parse(LEGACY.read_text(encoding="utf-8"))
-    for node in legacy_tree.body:
-        if isinstance(node, (ast.Import, ast.ImportFrom)):
-            mod = getattr(node, "module", "") or ""
-            assert mod not in {"handlers", "..handlers", ".handlers"}, (
-                "legacy 在模块级 import 了 handlers（会成环）"
-            )
-
-
-def test_legacy_module_imports_cleanly_standalone() -> None:
-    """legacy 模块可独立 import（无循环依赖）。"""
-    import importlib
-
-    mod = importlib.import_module("dl_senpai.agent.legacy_orchestrator")
-    assert hasattr(mod, "LegacyOrchestrator")
-
-
-def test_shared_helper_is_removed() -> None:
-    """Phase 6.6：`_SharedHelper` 必须已删除（第二十节）。
-
-    它的唯一用途是解决 legacy → handlers 反向依赖。
-    helper 抽到 gateway.platform / core.domain 之后，
-    这层间接不再需要。
-    """
-    import dl_senpai.agent.legacy_orchestrator as mod
-
-    assert not hasattr(mod, "_SharedHelper"), (
-        "_SharedHelper 仍存在 —— 反向依赖可能没清干净"
-    )
-
-
-def test_legacy_imports_helpers_directly() -> None:
-    """helper 现在是直接 import，不再经 handlers 转发。"""
-    import dl_senpai.agent.legacy_orchestrator as mod
-
-    # 平台 helper
-    assert mod.plain_text.__module__ == "dl_senpai.gateway.platform"
-    assert mod.reply.__module__ == "dl_senpai.gateway.platform"
-    assert mod.resolve_session.__module__ == "dl_senpai.gateway.platform"
-    assert mod.sender_name.__module__ == "dl_senpai.gateway.platform"
-    assert mod.is_to_me.__module__ == "dl_senpai.gateway.platform"
-    # 领域 helper
-    assert mod.feature_enabled.__module__ == "dl_senpai.core.domain"
-    assert mod.affection_scope.__module__ == "dl_senpai.core.domain"
-    assert mod.collect_stickers.__module__ == "dl_senpai.core.domain"
-    assert mod.finalize_affection_gain.__module__ == "dl_senpai.core.domain"
 
 
 # ================================================================
@@ -322,38 +218,38 @@ def test_legacy_imports_helpers_directly() -> None:
 
 
 @pytest.mark.asyncio
-async def test_runtime_survives_legacy_breakage() -> None:
-    """RUNTIME 下把 LegacyOrchestrator 打成废的，仍全部通过。"""
-    from dl_senpai.agent import legacy_orchestrator
+async def test_runtime_survives_broken_legacy(monkeypatch) -> None:
+    """配成 LEGACY、且 legacy handler 抛错时，仍必须给出回复（降级到 runtime）。
 
-    original = legacy_orchestrator.LegacyOrchestrator.run
+    这是删除 legacy_orchestrator 之后唯一的行为保险：
+    以前靠"旧实现还在、只是坏了"，现在靠"坏得明明白白 + 稳定降级"。
+    如果这条挂了，说明 `_run_legacy` 的降级分支被改坏了 —— 那时
+    `DL_SENPAI_AGENT_MODE=legacy` 会变成"机器人完全不回话"。
+    """
+    monkeypatch.setenv("DL_SENPAI_AGENT_MODE", "legacy")
 
-    async def boom(*a: Any, **k: Any) -> None:
-        raise RuntimeError("legacy intentionally broken")
+    from dl_senpai.agent.context import AgentContext, AgentResult
+    from dl_senpai.agent.entry import AgentEntry
+    from dl_senpai.gateway import MessageContext
 
-    legacy_orchestrator.LegacyOrchestrator.run = boom
-    try:
-        from dl_senpai.agent.context import AgentContext, AgentResult
-        from dl_senpai.agent.entry import AgentEntry
-        from dl_senpai.gateway import MessageContext
+    class RT:
+        executor = None
 
-        class RT:
-            executor = None
+        async def run(self, *a: Any, **k: Any) -> Any:
+            return AgentResult(text="runtime ok")
 
-            async def run(self, *a: Any, **k: Any) -> Any:
-                return AgentResult(text="runtime ok")
+    async def broken_legacy(context: Any) -> None:
+        raise RuntimeError("legacy_path_removed: 旧编排实现已删除")
 
-        msg = MessageContext(
-            message_type="group", group_id="900001", user_id="10001",
-            session_id="group:900001", plain_text="你好",
-        )
-        ctx = AgentContext(session_id="group:900001", message_context=msg)
-        entry = AgentEntry(runtime=RT(), legacy_handler=None)
-        outcome = await entry.handle(ctx)
-        assert outcome.used_runtime is True
-        assert outcome.result.text == "runtime ok"
-    finally:
-        legacy_orchestrator.LegacyOrchestrator.run = original
+    msg = MessageContext(
+        message_type="group", group_id="900001", user_id="10001",
+        session_id="group:900001", plain_text="你好",
+    )
+    ctx = AgentContext(session_id="group:900001", message_context=msg)
+    entry = AgentEntry(runtime=RT(), legacy_handler=broken_legacy)
+    outcome = await entry.handle(ctx)
+    assert outcome.used_runtime is True
+    assert outcome.result.text == "runtime ok"
 
 
 @pytest.mark.asyncio
@@ -539,9 +435,10 @@ def test_orchestrator_protocol_exists() -> None:
 
     assert is_orchestrator(type("X", (), {"run": lambda self: None})())
 
-    from dl_senpai.agent.legacy_orchestrator import LegacyOrchestrator
+    # 唯一实现者：AgentRuntime 必须满足这层契约（旧实现已删除）。
+    from dl_senpai.agent.runtime import AgentRuntime
 
-    assert is_orchestrator(LegacyOrchestrator())
+    assert is_orchestrator(AgentRuntime())
 
 
 def test_entry_logs_mode() -> None:
@@ -552,11 +449,18 @@ def test_entry_logs_mode() -> None:
 
 
 def test_orchestrator_does_not_log_full_prompt() -> None:
-    """第四十八节：不得记录完整 prompt。"""
-    src = LEGACY.read_text(encoding="utf-8")
-    # 允许记录长度/哈希，不允许记录整个 prompt 文本
-    for banned in ('logger.info(system_prompt', 'logger.info(prompt', 'logger.debug(prompt'):
-        assert banned not in src, f"记录了完整 prompt: {banned}"
+    """第四十八节：不得记录完整 prompt。
+
+    2026-10：断言对象从已删除的 legacy_orchestrator 换成生产路径的
+    runtime + entry —— 守的东西没变，只是现在只剩这一条路径可守。
+    """
+    for path in (AGENT / "runtime.py", AGENT / "entry.py"):
+        src = path.read_text(encoding="utf-8")
+        for banned in (
+            "logger.info(system_prompt", "logger.info(prompt",
+            "logger.debug(prompt", "log_event(system_prompt=",
+        ):
+            assert banned not in src, f"{path.name} 记录了完整 prompt: {banned}"
 
 
 # ================================================================
@@ -564,11 +468,18 @@ def test_orchestrator_does_not_log_full_prompt() -> None:
 # ================================================================
 
 
-def test_legacy_orchestrator_exists_independently() -> None:
-    assert LEGACY.exists(), "LegacyOrchestrator 未独立存在"
-    src = LEGACY.read_text(encoding="utf-8")
-    assert "class LegacyOrchestrator" in src
-    assert "async def run" in src
+def test_legacy_orchestrator_is_gone() -> None:
+    """旧编排必须**不存在**。
+
+    反过来的结构断言：2026-10 之前这里断言"LegacyOrchestrator 独立存在"，
+    但它从来跑不起来（LegacyRunState 没接上），留着只是给回滚制造错觉。
+    现在断言它消失，防止有人再塞一个"看起来能回滚"的假入口进来。
+    """
+    assert not LEGACY.exists(), "legacy_orchestrator.py 又回来了？旧路径已判定不可维护"
+    assert not (AGENT / "legacy_state.py").exists()
+    assert not (AGENT / "legacy_context.py").exists()
+    with pytest.raises(ImportError):
+        importlib.import_module("dl_senpai.agent.legacy_orchestrator")
 
 
 def test_handlers_no_longer_contains_orchestration() -> None:

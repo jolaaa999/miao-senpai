@@ -290,14 +290,13 @@ def test_permission_rules_confined_to_permission_service() -> None:
 
     允许出现的例外：
         handlers.py            —— legacy 路径（显式 LEGACY 模式才走）
-        legacy_orchestrator.py —— legacy 编排主体（Phase 6.5 搬来的）
+        （legacy_orchestrator.py 已于 2026-10 删除，不再需要例外）
         permissions.py         —— PermissionService 的 adapter 内部
         recovery.py            —— 触发谓词（intent 判断，不是权限）
         builtin.py             —— 可见性谓词（intent 判断）
     """
     allowed_files = {
         "handlers.py",
-        "legacy_orchestrator.py",
         "permissions.py",
         "group_mute.py",
         "group_card.py",

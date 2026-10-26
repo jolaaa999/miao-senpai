@@ -386,11 +386,25 @@ _ADMIN_ALLOWED_CHANGES = (
     "admin/backend/internal/services/config_descriptions.go",
     "admin/frontend/src/api/client.ts",
     "admin/frontend/src/views/FeaturesView.vue",
+    # 2026-10-24 整体删除「主动遍历群成员发好友申请」功能：
+    # 功能键表（后端）与默认关闭键集合（前端）必须同步去掉 friend_add，
+    # 否则后台会残留一个点了没反应的开关 —— 属于「确实为功能开关而改」。
+    "admin/backend/internal/services/group_features.go",
+    "admin/frontend/src/views/GroupFeaturesView.vue",
     # 控制台自启动开关：_env_flag 原本只看 os.getenv，
     # 而 nonebot.init() 并不会把 .env 灌进进程环境，
     # 导致 .env 里写 DL_SENPAI_CONSOLE_AUTOSTART=false 完全无效。
     # 修的是「功能开关读不到」这个缺陷本身，属于本阶段范围。
     "admin/autostart.py",
+    # 2026-10 新增「调用链」页（架构审计 §5.7）：只读 data/logs 里的
+    # agent.request_summary，把每条消息的结论可视化。
+    # 属于「确实为一个明确需求而改」，不是为了顺手改 admin。
+    # 注意 AppLayout / router 是共用外壳：后续再动这两个文件需要单独评审。
+    "admin/backend/internal/services/traces.go",
+    "admin/backend/internal/services/traces_test.go",
+    "admin/frontend/src/views/AgentTracesView.vue",
+    "admin/frontend/src/router/index.ts",
+    "admin/frontend/src/components/AppLayout.vue",
 )
 
 

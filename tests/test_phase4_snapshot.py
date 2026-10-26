@@ -142,8 +142,10 @@ async def test_snapshot_plain_chat() -> None:
     assert result.voice_force is False
     assert result.impression_updates == []
 
-    # 最终 reply 无 marker 泄漏
-    assert result.text == "在呢～有什么事儿吗？"
+    # 最终 reply 无 marker 泄漏。
+    # 2026-10-25 起闲聊会按句拆成多条气泡，正文里因此多了换行——
+    # 断言只关心「文本内容没被 marker 污染」，把换行归一化掉再比。
+    assert result.text.replace("\n", "") == "在呢～有什么事儿吗？"
     assert "<<<" not in result.text
 
 

@@ -28,7 +28,9 @@ def test_select_recent_and_recall() -> None:
         recall_top=3,
     )
     assert len(recent) == 10
-    assert "【相关旧聊天】" in brief
+    # 标题从「相关旧聊天」改成「更早的对话」：这些条目是关键词捞上来的旧话题，
+    # 原文措辞会让模型以为它们和当前这句强相关，从而把旧事混进来答。
+    assert "【更早的对话" in brief
     assert "冰牙龙" in brief
 
 

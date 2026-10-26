@@ -70,21 +70,32 @@ def test_bubbles_below_threshold_still_sent_one_by_one(monkeypatch) -> None:
     assert len(bot.sent) >= 2
 
 
-def test_bubbles_above_threshold_merged_into_forward(monkeypatch) -> None:
+def test_bubbles_above_threshold_sent_as_single_message(monkeypatch) -> None:
+    """合计超阈值就整条单发，不再转合并转发卡片（2026-10-25 改）。
+
+    理由：一条 200 字的正经答疑塞进「聊天记录」卡片很突兀，而它本来也不该
+    拆成三条。拆泡只服务短句闲聊。
+    """
     _patch_events(monkeypatch)
     bot = _FakeBot()
     asyncio.run(_send(bot, _text_with_bubbles(120), total_max=1))
-    assert len(bot.forwards) == 1, "合计超阈值应合并成一张转发卡片"
-    assert bot.sent == [], "合并后不应再逐条发气泡"
+    assert bot.forwards == [], "不再转卡片"
+    assert len(bot.sent) == 1, "超阈值应该整条单发"
 
 
-def test_forward_failure_falls_back_to_bubbles(monkeypatch) -> None:
+def test_no_newline_text_stays_one_message(monkeypatch) -> None:
+    """require_newline 打开时，单段文本即使能按句切也不拆。"""
     _patch_events(monkeypatch)
     bot = _FakeBot()
-    bot.fail_forward = True
-    asyncio.run(_send(bot, _text_with_bubbles(120), total_max=1))
+    asyncio.run(_send_text_reply_once(
+        bot, _FakeGroupEvent(), _text_with_bubbles(120),
+        sticker=None, voice=None, image=None,
+        reply_max_chars=1500, reply_chunk_chars=900, nickname="学姐",
+        humanize_send=True, bubble_total_max_chars=10000,
+        bubble_require_newline=True,
+    ))
     assert bot.forwards == []
-    assert len(bot.sent) >= 2, "卡片失败要退回逐条气泡，不能把回复弄丢"
+    assert len(bot.sent) == 1
 
 
 def test_long_text_still_uses_forward(monkeypatch) -> None:

@@ -116,6 +116,38 @@ def isolate_recent_chat(tmp_path_factory, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def isolate_send_guard():
+    """每个用例前把发送闸门的单例状态清空。
+
+    为什么必须隔离：熔断器和限流窗口都是**进程级单例**，计数会跨用例累积。
+    实测踩过——前面的用例（reply_send / own_life）发了几条消息，后面的
+    用例就被「每分钟上限 6 条」拦住，消息发不出去，断言莫名其妙失败，
+    而且单跑那个文件又是绿的，非常难查。
+
+    生产行为本身是对的（防封号的配额本来就该全局），所以修的是测试隔离，
+    不是放宽闸门。
+    """
+    try:
+        from dl_senpai.dedupe import reset_deduper
+        from dl_senpai.send_guard import reset_send_guard
+        from dl_senpai.typing_status import reset_typing_reporter
+    except Exception:  # noqa: BLE001 — 早期导入阶段允许失败
+        yield
+        return
+
+    def _reset() -> None:
+        reset_send_guard()
+        reset_typing_reporter()
+        # 去重表同样会跨用例累积：用例里用固定 message_id 时，
+        # 后一个用例会被前一个「已经见过」而整条丢掉。
+        reset_deduper()
+
+    _reset()
+    yield
+    _reset()
+
+
+@pytest.fixture(autouse=True)
 def no_wait_retry(monkeypatch):
     """把 LLM 重试等待归零。
 

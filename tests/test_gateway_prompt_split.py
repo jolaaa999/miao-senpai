@@ -151,10 +151,11 @@ async def test_runtime_call_model_fills_structured_fields() -> None:
     assert req.history == history
     assert req.user_text == "你好"
     assert req.image_urls == ["data:image/png;base64,AAA"]
-    # messages 仍然完整（system 在首位、末尾是带人称的用户消息、状态栏更靠后）
+    # messages 仍然完整（system 在首位、用户消息只放原话、状态栏更靠后）
     assert req.messages[0] == {"role": "system", "content": "SYS"}
     assert req.messages[1] == {"role": "assistant", "content": "在的"}
-    assert req.messages[2]["content"] == "小明：你好"
+    # 正文不带「昵称：」前缀：昵称进正文会被模型当成发言内容（见 runtime 注释）
+    assert req.messages[2]["content"] == "你好"
     assert req.messages[-1]["content"].startswith("<agent_status>")
 
 
@@ -180,3 +181,17 @@ def test_extract_user_text_still_works() -> None:
     """老的兜底取值不能坏（它还被别处依赖）。"""
     assert _extract_user_text([{"role": "user", "content": "hi"}]) == "hi"
     assert _extract_user_text([]) == ""
+
+def test_status_bar_declares_current_speaker() -> None:
+    """说话人必须在状态栏里声明。
+
+    昵称是用户可控文本（「失语.」这种自带句点的），写进正文会被模型
+    当成发言内容来解释。状态栏是代码算出的元数据，模型不会把它当对话。
+    """
+    msg = MessageContext(
+        message_type="private", user_id="2", is_private=True, actor="失语.",
+    )
+    bar = _build_status_bar(msg, {})
+    assert "正在跟你说话的人：失语." in bar
+    # 昵称不能出现在正文位置：正文由 runtime 单独拼，状态栏只做声明
+    assert bar.count("失语.") == 1

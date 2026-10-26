@@ -11,8 +11,18 @@ def test_polish_reply_keeps_tone() -> None:
     assert polish_reply("已经有了哦～") == "已经有了哦～"
 
 
-def test_polish_reply_empty() -> None:
-    assert polish_reply("") == "在呢～"
+def test_polish_reply_empty_uses_short_fallback() -> None:
+    """空串兜底从固定的「在呢～」改成一句短反应 + 冷却。
+
+    2026-10-25 线上数据：一天 99 条发送里 32 条是「在呢～」，其中 12 条还带图，
+    同一个群连着出现过六条一模一样。真人不会这样，宁可这轮不说话。
+    """
+    import dl_senpai.style as style_mod
+
+    style_mod.reset_fallback_state()
+    first = polish_reply("")
+    assert first in style_mod._FALLBACK_LINES, first
+    assert polish_reply("") == "", "冷却期内必须安静，不能连发第二句"
 
 
 def test_polish_reply_strips_fake_emoji_and_markers() -> None:
