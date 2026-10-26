@@ -292,5 +292,69 @@
     "collected_at": "2026-10-13T04:03:36+00:00",
     "source_user": "失语.",
     "local_path": "E:\\PROJECT\\QQBot\\data\\dl_senpai\\stickers\\files\\84398d1e2539692b.jpg"
+  },
+  {
+    "id": "680777ccc37c216d",
+    "segment_type": "image",
+    "segment_data": {
+      "url": "https://multimedia.nt.qq.com.cn/download?appid=1407&fileid=EhRCGUlWPHaHEtHLCovocyjapnVMnBjOGSD_CiiTt6KQ39SXAzIEcHJvZFCAvaMBWhCg2YKXsScclu79eWXqiVUregIloYIBAmd6&spec=0&rkey=CAQSMO2teoEKzxVc-JWW-wM6yE5OCL8mr3yibSIr4XqccmrEMDFI5Wt_1y5a5A6a9fQlPA",
+      "file": "EABEB076BE0B95646952B36477A9D2D5.jpg",
+      "sub_type": 1,
+      "summary": "[动画表情]"
+    },
+    "context_text": "",
+    "keywords": [],
+    "use_count": 0,
+    "collected_at": "2026-10-25T08:24:43+00:00",
+    "source_user": "失语.",
+    "local_path": "E:\\PROJECT\\QQBot\\data\\dl_senpai\\stickers\\files\\680777ccc37c216d.jpg"
+  },
+  {
+    "id": "24a259be5c59a2e2",
+    "segment_type": "image",
+    "segment_data": {
+      "url": "https://multimedia.nt.qq.com.cn/download?appid=1407&fileid=EhS7xvPpsIRKXSYHdG7CF_H8V22moBjyyQUg_woo5O_Y2-DUlwMyBHByb2RQgL2jAVoQGyarpQdkytOpPjKTxugUVHoCegeCAQJneg&spec=0&rkey=CAQSMO2teoEKzxVc-JWW-wM6yE5OCL8mr3yibSIr4XqccmrEMDFI5Wt_1y5a5A6a9fQlPA",
+      "file": "DC8C6DB3219F76732C71E45F346ED947.jpg",
+      "sub_type": 1,
+      "summary": "[动画表情]"
+    },
+    "context_text": "",
+    "keywords": [],
+    "use_count": 0,
+    "collected_at": "2026-10-25T08:31:50+00:00",
+    "source_user": "失语.",
+    "local_path": "E:\\PROJECT\\QQBot\\data\\dl_senpai\\stickers\\files\\24a259be5c59a2e2.gif"
+  },
+  {
+    "id": "0794ba02297cd81e",
+    "segment_type": "image",
+    "segment_data": {
+      "url": "https://multimedia.nt.qq.com.cn/download?appid=1407&fileid=EhSAjf5IxfLXgicMhhwX-NFFcUmkPhjTPiD_Cij4h5Kvv9aXAzIEcHJvZFCAvaMBWhCIQIyu0wPbvt4T6qzARMs_egInKIIBAmd6&spec=0&rkey=CAQSMBMJK6LjxPEK0P2V7ixUrwORFTlBq5DeRBF42b6LNet7l4RzUXCr6CT1GNVew1cFSw",
+      "file": "C8CA2C523886D072A18CAD4767CDAEF4.jpg",
+      "sub_type": 2,
+      "summary": "[动画表情]"
+    },
+    "context_text": "",
+    "keywords": [],
+    "use_count": 0,
+    "collected_at": "2026-10-26T01:07:57+00:00",
+    "source_user": "失语.",
+    "local_path": "E:\\PROJECT\\QQBot\\data\\dl_senpai\\stickers\\files\\0794ba02297cd81e.jpg"
+  },
+  {
+    "id": "f8d6752dbd11fc4a",
+    "segment_type": "image",
+    "segment_data": {
+      "url": "https://multimedia.nt.qq.com.cn/download?appid=1407&fileid=EhQ5hgdy4iItFez0CjFG6m4nWDadRBj9oV4g_woo4cWVsL_WlwMyBHByb2RQgL2jAVoQSDgmp1riu3J0AppGd1dERnoChWGCAQJuag&spec=0&rkey=CAQSMBMJK6LjxPEK0P2V7ixUrwORFTlBq5DeRBF42b6LNet7l4RzUXCr6CT1GNVew1cFSw",
+      "file": "CEEE50054B854A363F04A56D3D1326C3.jpg",
+      "sub_type": 1,
+      "summary": "[动画表情]"
+    },
+    "context_text": "",
+    "keywords": [],
+    "use_count": 0,
+    "collected_at": "2026-10-26T01:08:00+00:00",
+    "source_user": "沐心",
+    "local_path": "E:\\PROJECT\\QQBot\\data\\dl_senpai\\stickers\\files\\f8d6752dbd11fc4a.gif"
   }
 ]

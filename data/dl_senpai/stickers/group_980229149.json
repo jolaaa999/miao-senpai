@@ -464,7 +464,7 @@
       "得意",
       "橙色胖卡通闭眼大笑捂肚子"
     ],
-    "use_count": 0,
+    "use_count": 1,
     "collected_at": "2026-08-25T11:21:32+00:00",
     "source_user": "姚琛永远得不到的爸爸",
     "local_path": "E:\\PROJECT\\QQBot\\data\\dl_senpai\\stickers\\files\\ed3da5af6b4b3fd8.gif"
@@ -658,5 +658,101 @@
     "collected_at": "2026-09-06T09:51:50+00:00",
     "source_user": "废物癞蛤蟆——不肖子孙",
     "local_path": "E:\\PROJECT\\QQBot\\data\\dl_senpai\\stickers\\files\\881de59a06c0ab42.jpg"
+  },
+  {
+    "id": "a016219edcb9cc45",
+    "segment_type": "image",
+    "segment_data": {
+      "url": "https://multimedia.nt.qq.com.cn/download?appid=1407&fileid=EhQQ39pyMzfeaLsJaaXxDC5avpJpPhjn4D0g_woo8aztjrbVlwMyBHByb2RQgL2jAVoQQRDj2KtopexRzpWSomL8EHoCPz-CAQJneg&spec=0&rkey=CAMSMI5eArCUtQl4s8JknWXSnEkeviil63Y6kQtPAVJjs8WdvbQf-5EdydwXIRt5bJp9xg",
+      "file": "9FA5EA47E7662879F4DAB798BA19D9AC.jpg",
+      "sub_type": 1,
+      "summary": "[动画表情]"
+    },
+    "context_text": "",
+    "keywords": [],
+    "use_count": 0,
+    "collected_at": "2026-10-25T14:53:54+00:00",
+    "source_user": "香香胡桃",
+    "local_path": "E:\\PROJECT\\QQBot\\data\\dl_senpai\\stickers\\files\\a016219edcb9cc45.gif"
+  },
+  {
+    "id": "db488e28fd9e6aad",
+    "segment_type": "image",
+    "segment_data": {
+      "url": "https://multimedia.nt.qq.com.cn/download?appid=1407&fileid=EhQsat5ZzUX2j7mhvEZXbwLDPdJgFhidcSD_CiiT1vOP0taXAzIEcHJvZFCAvaMBWhCvsjdOQX6J_fDGE1K6t4r8egIYbYIBAmd6&spec=0&rkey=CAISMF135V9dU8GnaskYuWJ874zgnfKMrvk8MCiP3obFZ_jOwWpL6WZe1CvebqLCwKl0jw",
+      "file": "E263473605ED15401861192D36FD10A1.jpg",
+      "sub_type": 1,
+      "summary": "[动画表情]"
+    },
+    "context_text": "",
+    "keywords": [],
+    "use_count": 0,
+    "collected_at": "2026-10-26T02:31:52+00:00",
+    "source_user": "既见雷枪为何不跪",
+    "local_path": "E:\\PROJECT\\QQBot\\data\\dl_senpai\\stickers\\files\\db488e28fd9e6aad.jpg"
+  },
+  {
+    "id": "9427cd3b845cb75d",
+    "segment_type": "image",
+    "segment_data": {
+      "url": "https://multimedia.nt.qq.com.cn/download?appid=1407&fileid=EhQujl2c6Da5OTwT7jTiJu82jlceSxjiEiD_Cijuzpjm-9aXAzIEcHJvZFCAvaMBWhBQ2DZOFmNbJCO7oPBK8zMbegI72oIBAmd6&spec=0&rkey=CAMSMBnJqzxBY_uJzALHGszOYdOfD0DY8X6Nr4urA2Y7WZQqRxG3lReJsqfnHLSY3-3QYA",
+      "file": "C1A3244620377AF7B8F74C5520A82F73.jpg",
+      "sub_type": 1,
+      "summary": "[动画表情]"
+    },
+    "context_text": "",
+    "keywords": [],
+    "use_count": 0,
+    "collected_at": "2026-10-26T05:38:18+00:00",
+    "source_user": "胡桃小凳",
+    "local_path": "E:\\PROJECT\\QQBot\\data\\dl_senpai\\stickers\\files\\9427cd3b845cb75d.jpg"
+  },
+  {
+    "id": "2607dd9687c0850d",
+    "segment_type": "image",
+    "segment_data": {
+      "url": "https://multimedia.nt.qq.com.cn/download?appid=1407&fileid=EhTM4ChbC6LRufh4gwXqa_H8il3QQBiJDiD_Cijt3qXzjdeXAzIEcHJvZFCAvaMBWhC2JpvilA9pzxYhe_1w-ObcegKWmYIBAmd6&spec=0&rkey=CAESMEjVN2gQ6xup95ly7r7h7oUV4Jf75zDOhnzT181FB0w-0JROKo7mCyiox4TrFYJfew",
+      "file": "8602DC933C680936663C9D8EE983A139.jpg",
+      "sub_type": 1,
+      "summary": "[动画表情]"
+    },
+    "context_text": "",
+    "keywords": [],
+    "use_count": 0,
+    "collected_at": "2026-10-26T06:59:19+00:00",
+    "source_user": "胡桃小凳",
+    "local_path": "E:\\PROJECT\\QQBot\\data\\dl_senpai\\stickers\\files\\2607dd9687c0850d.jpg"
+  },
+  {
+    "id": "6cf1f8efc90f5aed",
+    "segment_type": "image",
+    "segment_data": {
+      "url": "https://multimedia.nt.qq.com.cn/download?appid=1407&fileid=EhTVdeqfiV_PJJaOiJZ6RfO5a7mR2RjuDyD_CiixptWOkteXAzIEcHJvZFCAvaMBWhAQAPDaDgBfYEgPbH_4lajgegL4cYIBAmd6&spec=0&rkey=CAESMEjVN2gQ6xup95ly7r7h7oUV4Jf75zDOhnzT181FB0w-0JROKo7mCyiox4TrFYJfew",
+      "file": "C27F9F2AEC519E32547F9CBCF61DF45F.jpg",
+      "sub_type": 1,
+      "summary": "[动画表情]"
+    },
+    "context_text": "",
+    "keywords": [],
+    "use_count": 0,
+    "collected_at": "2026-10-26T07:18:09+00:00",
+    "source_user": "香香胡桃",
+    "local_path": "E:\\PROJECT\\QQBot\\data\\dl_senpai\\stickers\\files\\6cf1f8efc90f5aed.jpg"
+  },
+  {
+    "id": "463184adeaf011c8",
+    "segment_type": "image",
+    "segment_data": {
+      "url": "https://multimedia.nt.qq.com.cn/download?appid=1407&fileid=EhSbHWR3xmiEMTNz8282wEPlVq70ehjz9gYg_wookaC5lJLXlwMyBHByb2RQgL2jAVoQ7ON62T8B-5CbzDi0NRI09noCtJqCAQJneg&spec=0&rkey=CAESMEjVN2gQ6xup95ly7r7h7oUV4Jf75zDOhnzT181FB0w-0JROKo7mCyiox4TrFYJfew",
+      "file": "94170AA510099A96E73ADA6A0739E8C8.jpg",
+      "sub_type": 1,
+      "summary": "[动画表情]"
+    },
+    "context_text": "",
+    "keywords": [],
+    "use_count": 0,
+    "collected_at": "2026-10-26T07:18:22+00:00",
+    "source_user": "君の名は。",
+    "local_path": "E:\\PROJECT\\QQBot\\data\\dl_senpai\\stickers\\files\\463184adeaf011c8.jpg"
   }
 ]

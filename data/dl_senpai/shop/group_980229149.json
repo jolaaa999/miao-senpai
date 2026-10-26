@@ -1,12 +1,12 @@
 {
   "slots": [
-    "kimono_floral",
-    "black_lolita",
-    "princess_gown",
-    "jk_blazer"
+    "cyber_jacket",
+    "pink_lolita",
+    "jk_sailor",
+    "green_lolita"
   ],
   "current_outfit_id": "white_lolita",
-  "slots_refresh_day": "2026-09-06",
+  "slots_refresh_day": "2026-10-26",
   "user_warehouses": {},
-  "updated_at": "2026-09-06T17:19:12.160644+08:00"
+  "updated_at": "2026-10-26T17:26:38.547739+08:00"
 }

@@ -1,11 +1,12 @@
 {
   "slots": [
-    "princess_gown",
     "green_lolita",
-    "hoodie_casual"
+    "idol_stage",
+    "qipao_black",
+    "sundress_yellow"
   ],
-  "current_outfit_id": "black_lolita",
-  "slots_refresh_day": "2026-08-24",
+  "current_outfit_id": "witch_dress",
+  "slots_refresh_day": "2026-10-26",
   "user_warehouses": {
     "2843422418": [
       {
@@ -13,8 +14,14 @@
         "buyer_id": "2843422418",
         "buyer_name": "失语.",
         "purchased_at": "2026-08-24T17:45:55.404998+08:00"
+      },
+      {
+        "item_id": "witch_dress",
+        "buyer_id": "2843422418",
+        "buyer_name": "失语.",
+        "purchased_at": "2026-10-24T21:51:04.690255+08:00"
       }
     ]
   },
-  "updated_at": "2026-08-24T17:45:55.415459+08:00"
+  "updated_at": "2026-10-26T17:26:53.603562+08:00"
 }
