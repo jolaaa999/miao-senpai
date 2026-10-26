@@ -15,6 +15,7 @@ import {
   SwitchButton,
   Operation,
   ChatLineRound,
+  Connection,
 } from '@element-plus/icons-vue'
 
 const route = useRoute()
@@ -32,6 +33,7 @@ const navItems = [
   { path: '/features', name: '功能开关', icon: Setting },
   { path: '/group-features', name: '群功能开关', icon: Operation },
   { path: '/logs', name: '运行日志', icon: Document },
+  { path: '/agent-traces', name: '调用链', icon: Connection },
 ]
 
 const active = computed(() => route.path)

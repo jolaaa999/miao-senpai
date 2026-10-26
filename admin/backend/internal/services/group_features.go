@@ -34,7 +34,6 @@ var GroupFeatureCatalog = []struct {
 	{"inner_state", "内心状态"},
 	{"vision", "识图"},
 	{"trends", "热点趋势"},
-	{"friend_add", "自动加好友"},
 	{"like", "每日点赞"},
 	{"qzone", "空间动态赞评"},
 }

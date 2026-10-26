@@ -25,6 +25,7 @@ const router = createRouter({
         { path: 'persona', name: 'persona', component: () => import('@/views/PersonaView.vue') },
         { path: 'speak-styles', name: 'speak-styles', component: () => import('@/views/SpeakStylesView.vue') },
         { path: 'logs', name: 'logs', component: () => import('@/views/LogsView.vue') },
+        { path: 'agent-traces', name: 'agent-traces', component: () => import('@/views/AgentTracesView.vue') },
       ],
     },
   ],

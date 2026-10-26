@@ -18,7 +18,7 @@ const savingKeys = ref(new Set<string>())
 
 // —— 全局 .env 开关（跟随全局时的显示基准）——
 // 与 config.py 默认值对齐：绝大多数功能默认开；主动社交默认关防风控
-const DEFAULT_OFF_KEYS = new Set(['friend_add', 'like', 'qzone'])
+const DEFAULT_OFF_KEYS = new Set(['like', 'qzone'])
 
 function envBool(featureKey: string): boolean {
   const envKey = `DL_SENPAI_${featureKey.toUpperCase()}_ENABLE`

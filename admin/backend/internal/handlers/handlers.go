@@ -26,6 +26,7 @@ type Handler struct {
 	config  *services.ConfigReader
 	configWriter *services.ConfigWriter
 	logs    *services.LogService
+	traces  *services.TraceService
 	persona *services.PersonaService
 	groupFeatures *services.GroupFeaturesService
 	speakStyles   *services.SpeakStylesService
@@ -44,6 +45,7 @@ func New(cfg config.Config, db *gorm.DB) *Handler {
 		config:  services.NewConfigReader(cfg.ProjectRoot),
 		configWriter: services.NewConfigWriter(cfg.ProjectRoot),
 		logs:    services.NewLogService(cfg.ProjectRoot),
+		traces:  services.NewTraceService(cfg.ProjectRoot),
 		persona: services.NewPersonaService(cfg.ProjectRoot),
 		groupFeatures: services.NewGroupFeaturesService(cfg.GroupFeaturesPath),
 		speakStyles:   services.NewSpeakStylesService(cfg.ProjectRoot),
@@ -478,6 +480,22 @@ func (h *Handler) DeleteSpeakStyle(c *gin.Context) {
 	c.JSON(http.StatusOK, snap)
 }
 
+// AgentTraces 返回最近的 Agent 调用链摘要（读日志，不读数据库）。
+//
+// 只读、无副作用：控制台是**排障工具**，不能有自己的状态。
+// 参数全部走 querystring，前端刷新就是重新查一次，不存在缓存不一致。
+func (h *Handler) AgentTraces(c *gin.Context) {
+	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "200"))
+	result := h.traces.Query(services.TraceQuery{
+		Session: c.Query("session_id"),
+		Keyword: c.Query("keyword"),
+		ReplyBy: c.Query("reply_by"),
+		Mode:    c.Query("mode"),
+		Limit:   limit,
+	})
+	c.JSON(http.StatusOK, result)
+}
+
 func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	api := r.Group("/x7k9-dl-senpai-console/v1")
 	api.POST("/auth/token", h.Login)
@@ -511,6 +529,7 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 		auth.GET("/trends-snapshot", h.TrendsSnapshot)
 		auth.GET("/log-streams", h.ListLogStreams)
 		auth.GET("/log-streams/:id/lines", h.TailLogStream)
+		auth.GET("/agent-traces", h.AgentTraces)
 		auth.GET("/senpai-persona-draft", h.GetPersonaDraft)
 		auth.PUT("/senpai-persona-draft", h.PutPersonaDraft)
 		auth.GET("/speak-styles", h.GetSpeakStyles)

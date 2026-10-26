@@ -206,6 +206,40 @@ export const authApi = {
     api.post<{ token: string; username: string }>('/auth/token', { username, password }),
 }
 
+// 一行 agent.request_summary 的结构化视图。
+//
+// 字段与 bot 侧一致（见 src/plugins/dl_senpai/agent/entry.py）；
+// raw 保留整行原文 —— 后端解析漏字段时还能自己看。
+export interface AgentTrace {
+  time: string
+  session_id: string
+  trace: string
+  mode: string
+  reply_by: string
+  stop: string
+  trigger: string
+  total_ms: number
+  queue_ms: number
+  model_ms: number
+  tool_ms: number
+  send_ms: number
+  model_calls: number
+  usage: number
+  tool_calls: number
+  tools: string
+  capabilities: string
+  error: string
+  file: string
+  raw: string
+}
+
+export interface AgentTraceResult {
+  items: AgentTrace[]
+  scanned: number
+  files: string[]
+  notice: string
+}
+
 export interface PersonaDraft {
   senpai_name: string
   system_prompt: string
@@ -255,6 +289,8 @@ export const consoleApi = {
   logStreams: () => api.get<{ items: LogFileInfo[] }>('/log-streams'),
   logTail: (id: string, tail = 300) =>
     api.get<LogTailResult>(`/log-streams/${encodeURIComponent(id)}/lines`, { params: { tail } }),
+  agentTraces: (params: { session_id?: string; keyword?: string; reply_by?: string; mode?: string; limit?: number }) =>
+    api.get<AgentTraceResult>('/agent-traces', { params }),
   personaDraft: () => api.get<PersonaDraft>('/senpai-persona-draft'),
   savePersonaDraft: (data: Partial<PersonaDraft>) => api.put<PersonaDraft>('/senpai-persona-draft', data),
   speakStyles: () => api.get<SpeakStylesSnapshot>('/speak-styles'),

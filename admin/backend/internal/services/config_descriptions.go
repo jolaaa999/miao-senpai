@@ -161,11 +161,6 @@ var configDescriptions = map[string]string{
 	"DL_SENPAI_AUTO_ACCEPT_FRIEND":       "是否自动同意好友申请",
 	"DL_SENPAI_AUTO_ACCEPT_GROUP":        "是否自动同意入群/拉群邀请",
 	"DL_SENPAI_AUTO_ACCEPT_FRIEND_REMARK": "同意好友后设置的备注（可留空）",
-	"DL_SENPAI_FRIEND_ADD_ENABLE":        "是否主动遍历群成员发好友申请（默认关，防风控）",
-	"DL_SENPAI_FRIEND_ADD_MODE":          "加好友通道：auto=Cookie优先 / web=仅Cookie / onebot=仅协议扩展",
-	"DL_SENPAI_FRIEND_ADD_DAILY_LIMIT":   "每日最多发出的好友申请数",
-	"DL_SENPAI_FRIEND_ADD_VERIFY_MSG":    "好友申请验证消息",
-	"DL_SENPAI_FRIEND_ADD_EXCLUDE":       "永不发好友申请的 QQ 号，逗号分隔",
 	"DL_SENPAI_LIKE_ENABLE":              "是否每日给好友主页点赞（默认关）",
 	"DL_SENPAI_LIKE_DAILY_HOUR":          "北京时间几点后开始点赞（0–23）",
 	"DL_SENPAI_LIKE_TIMES":               "每个好友点赞次数（1–10）",
@@ -221,6 +216,12 @@ var configDescriptions = map[string]string{
 	"DL_SENPAI_SHOP_AFFECTION_DISCOUNT_BASE_RATE":    "路人档触发时的基础折扣比例（0~1）",
 	"DL_SENPAI_SHOP_AFFECTION_DISCOUNT_RATE_PER_TIER": "每升一档额外增加的折扣比例",
 	"DL_SENPAI_SHOP_AFFECTION_DISCOUNT_MAX_RATE":     "单次好感特惠折扣比例上限",
+
+	// 技能层（Skills）：按需注入的一页领域说明书
+	"DL_SENPAI_SKILL_ENABLE":     "是否启用技能层（命中触发词时把对应 SKILL.md 注入本轮提示）",
+	"DL_SENPAI_SKILL_DIR":        "技能文档根目录（每个技能一个子目录，内含 SKILL.md）",
+	"DL_SENPAI_SKILL_MAX_CHARS":  "单条技能正文注入上限（字），过长会稀释注意力",
+	"DL_SENPAI_SKILL_MAX_SKILLS": "单条消息最多注入几个技能（默认 1，多个领域规范会互相打架）",
 }
 
 func describeConfigKey(key string) string {
