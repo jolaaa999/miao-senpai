@@ -245,19 +245,39 @@ async def execute_shell(context: Any, call: ToolCall) -> ToolResult:
     )
 
 
+_CODE_BLOCK_RE = re.compile(
+    r"<<<CODE[ \t]*(?:([A-Za-z0-9+#._-]+)[ \t]*)?>{0,3}[ \t]*\r?\n?"
+    r"(.*?)"
+    r"(?:\r?\n?[ \t]*<<<END[ \t]*>{0,3}|\Z)",
+    re.IGNORECASE | re.DOTALL,
+)
+
+def _strip_code_fence(code: str) -> str:
+    """去掉模型套在代码外面的 ``` 围栏，只留纯代码。"""
+    lines = (code or "").splitlines()
+    if lines and lines[0].strip().startswith("```"):
+        lines = lines[1:]
+    if lines and lines[-1].strip().startswith("```"):
+        lines = lines[:-1]
+    return "\n".join(lines).strip("\n")
+
+
 def _parse_code(text: str) -> tuple[str, list[ToolCall]]:
-    """解析块式 marker：<<<CODE>>> 代码 <<<END>>>（可选语言 <<<CODE python>>>）。"""
-    pattern = re.compile(
-        r"<<<CODE(?:\s+([A-Za-z0-9+#]+))?\s*>>>\r?\n(.*?)\r?\n<<<END>>>",
-        re.IGNORECASE | re.DOTALL,
-    )
+    """解析块式 marker：<<<CODE>>> 代码 <<<END>>>（语言可选，闭括号可缺）。
+
+    为什么这么宽松：模型实测会写 <<<CODE（少 >>>）、<<<CODE python>>> 不带换行、
+    <<<END 少括号。原来的严格正则一条都不认，于是整段 Python 原样发到群里
+    （第六问真实翻车）。这里只坚持「开头像 CODE」，收尾尽量宽容；连 <<<END 都
+    没有就一直吃到结尾 —— 让代码漏给用户，比让这段文本被吞掉更糟。
+    """
     calls: list[ToolCall] = []
     cleaned = text or ""
-    for match in pattern.finditer(text or ""):
+    for match in _CODE_BLOCK_RE.finditer(text or ""):
         language = (match.group(1) or "python").strip().lower()
-        code = match.group(2)
-        if not code.strip():
+        code = _strip_code_fence(match.group(2))
+        if not code:
             continue
+
         calls.append(
             ToolCall(
                 tool_name="code",
@@ -266,9 +286,8 @@ def _parse_code(text: str) -> tuple[str, list[ToolCall]]:
             )
         )
     if calls:
-        cleaned = pattern.sub("", cleaned)
+        cleaned = _CODE_BLOCK_RE.sub("", cleaned)
     return cleaned, calls
-
 
 async def execute_code(context: Any, call: ToolCall) -> ToolResult:
     """跑一段代码，把 stdout/stderr 交回模型。

@@ -93,6 +93,14 @@ class ToolDefinition:
     # **必须挂在定义上**，而不是让 AgentRuntime 写
     # `if tool_name == "card"` —— 见第六节的硬性约束。
     recovery_policy: Any = None
+    # 工具能力来源：builtin / plugin:<id> / mcp:<server> / ...
+    #
+    # 为什么要有它：诊断时必须回答得出「这个工具是谁提供的」。
+    # 现有的 owner 只表达归属（用于批量注销），表达不了来源种类——
+    # MCP 服务器贡献的工具和一个内置工具，owner 都是普通字符串。
+    # 默认空串，由 effective_source 派生兜底，既有工具**一个都不用改**。
+    # 字段放在 dataclass 末尾：既有按位置构造的代码不会错位。
+    source: str = ""
 
     def is_visible(self, context: Any) -> bool:
         """该工具对当前上下文是否可见。
@@ -120,9 +128,34 @@ class ToolDefinition:
 
         return is_irreversible(self.name)
 
+    @property
+    def effective_source(self) -> str:
+        """能力来源（派生值）。
+
+        显式声明优先；没声明时按 owner 推导——既有工具都设了 owner，
+        因此不逐个回填也能得到有用的来源标签。
+        """
+        if self.source:
+            return self.source
+        if self.owner:
+            return f"plugin:{self.owner}"
+        return "builtin"
+
+    @property
+    def side_effect_level(self) -> str:
+        """副作用的**分级**视图（刻意不做第二份事实来源）。
+
+        不新增"等级字段"的原因：判断"失败后能否重放"的口径已经由
+        `side_effect` + journal.IRREVERSIBLE_TOOLS 定死了，
+        再存一个枚举就会出现两份可能互相矛盾的真相。
+        这里只把既有判定渲染成可读标签，供日志与诊断使用。
+        """
+        return "irreversible" if self.has_side_effect() else "none"
+
     def as_log_fields(self) -> dict[str, Any]:
         return {
             "tool": self.name,
+            "source": self.effective_source,
             "marker": self.marker or None,
             "owner": self.owner or None,
             "continuation": self.continuation.value,
@@ -254,6 +287,27 @@ class ToolRegistry:
         if service is None:
             return [t for t in self._sorted() if t.is_visible(context)]
         return [t for t in self._sorted() if service.visible(t, context)]
+
+    def capability_summary(self, context: Any) -> dict[str, Any]:
+        """本轮能力集摘要（只读，不改变任何行为）。
+
+        回答现场最常问的三件事：这一轮模型**能看见**几个工具、分别来自哪里、
+        哪些带不可逆副作用。
+
+        刻意**不缓存**：可见性依赖当前发言者身份与群状态，
+        缓存等于把上一轮的结果喂给这一轮。
+        """
+        visible = self.visible_tools(context)
+        sources: dict[str, int] = {}
+        for tool in visible:
+            key = tool.effective_source
+            sources[key] = sources.get(key, 0) + 1
+        return {
+            "visible": len(visible),
+            "registered": len(self._tools),
+            "sources": ",".join(f"{k}:{v}" for k, v in sorted(sources.items())),
+            "irreversible": ",".join(t.name for t in visible if t.has_side_effect()),
+        }
 
     def markers(self) -> dict[str, ToolDefinition]:
         """marker 名 → 工具定义（供 MarkerToolAdapter 反查）。"""

@@ -86,10 +86,19 @@ def _parse_person_memory(text: str) -> tuple[str, list[ToolCall]]:
         calls.append(
             ToolCall(
                 tool_name="impression",
+                # vibe/style/relation/moment/pending 必须一起带过去：
+                # 它们是「判断这个人性格」的载体，之前只搬运 add/remove/notes，
+                # 导致画像里 vibe/style/relation 永远为空——模型在 marker 里
+                # 明明写了，落盘时被这一层悄悄丢掉。
                 arguments={
                     "add": list(getattr(upd, "add", []) or []),
                     "remove": list(getattr(upd, "remove", []) or []),
                     "notes": getattr(upd, "notes", None),
+                    "vibe": getattr(upd, "vibe", None),
+                    "style": getattr(upd, "style", None),
+                    "relation": getattr(upd, "relation", None),
+                    "moment": getattr(upd, "moment", None),
+                    "pending": getattr(upd, "pending", None),
                 },
                 raw="<<<IMPRESSION>>>",
                 marker="IMPRESSION",
@@ -451,12 +460,37 @@ def build_production_tools() -> list[ToolDefinition]:
             priority=PRIORITY_PERSON_MEMORY,
             # 参数形状必须与 _parse_person_memory 填的 arguments 一致，
             # 否则 native 调用喂进来的 dict 对不上 executor 的取值键。
+            # schema 必须把 vibe/style/relation/moment/note 都列出来：
+            # 原生 function calling 模式下，模型只能按 schema 填参数，
+            # 没声明的字段它根本不会发。之前这里只有 add/remove/notes，
+            # 于是 persona 里教了半天的「判断性格」字段全部落空，
+            # 31 个用户的 vibe/style/relation 全是空串。
             parameter_schema={
                 "type": "object",
                 "properties": {
                     "add": {"type": "array", "items": {"type": "string"}},
                     "remove": {"type": "array", "items": {"type": "string"}},
                     "notes": {"type": ["string", "null"]},
+                    "vibe": {
+                        "type": ["string", "null"],
+                        "description": "对方是什么样的人（气质/性格），一两句话，可覆盖旧值",
+                    },
+                    "style": {
+                        "type": ["string", "null"],
+                        "description": "说话习惯：短句多、爱阴阳、爱撒娇、爱发表情等",
+                    },
+                    "relation": {
+                        "type": ["string", "null"],
+                        "description": "跟你处成什么关系感：损友、常来问问题的学弟、爱找茬的等",
+                    },
+                    "moment": {
+                        "type": ["string", "null"],
+                        "description": "一条难忘小瞬间，一句话即可",
+                    },
+                    "pending": {
+                        "type": ["string", "null"],
+                        "description": "还没说出口的牵挂/心事，一句话；传空串表示清空",
+                    },
                 },
             },
         ),

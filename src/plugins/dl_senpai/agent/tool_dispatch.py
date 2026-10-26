@@ -83,6 +83,13 @@ class SharedToolDispatcher:
         from .tools.creator_tools import register_creator_tools
 
         register_creator_tools(registry)
+        # 记心事工具也在这里补一次：本分发器可能在 Runtime 之前被调用
+        # （legacy 形状的 card/sticker 分发），那时注册表里还没有它。
+        from .tools.note_tool import register_note_tool
+        from .tools.diary_tool import register_diary_tool
+
+        register_note_tool(registry)
+        register_diary_tool(registry)
 
         from .permissions import PermissionService
 

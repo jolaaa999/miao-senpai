@@ -76,6 +76,122 @@ class AgentOutcome:
         }
 
 
+def _reply_source(outcome: "AgentOutcome | None") -> str:
+    """最终这条回复是谁生成的（摘要里必须能一眼看出来）。"""
+    if outcome is None:
+        return "none"
+    if outcome.used_runtime:
+        return "runtime"
+    if outcome.fallback_used:
+        return "legacy_fallback"
+    if outcome.handled:
+        return "legacy"
+    return "safe_fallback"
+
+
+def _log_request_summary(
+    context: AgentContext,
+    outcome: "AgentOutcome | None",
+    telemetry: Any,
+    runtime: Any = None,
+) -> None:
+    """一条请求一行 trace 摘要（DL_SENPAI_AGENT_TRACE_SUMMARY）。
+
+    为什么需要它：telemetry 已经把工具耗时、模型调用次数、token、队列等待、
+    记忆命中全采集了，但**默认没有任何一行日志落地**——只有打开
+    DL_SENPAI_VALIDATION 才会写 JSONL，而那份数据要跑离线脚本才看得见。
+    线上排查「这条消息为什么进了 Agent / 为什么调这个工具 / 最后谁生成的回复」
+    时，手里必须有一行能按 trace_id grep 的东西。这就是那一行。
+
+    **只写元数据**：工具名、耗时、计数、状态。不写用户原话、不写回复正文、
+    不写记忆内容——日志是会被复制粘贴出去的东西。
+
+    全程吞异常：观测失败绝不影响已经执行完的业务。
+    """
+    try:
+        cfg = getattr(context, "config", None)
+        if cfg is not None and not bool(getattr(cfg, "agent_trace_summary", True)):
+            return
+
+        # -- 工具链 --
+        tools = list(getattr(telemetry, "tools", []) or [])
+        shown = tools[:8]
+        tool_text = ",".join(
+            f"{t.tool}:{t.outcome}:{round(t.duration_ms)}ms" for t in shown
+        )
+        if len(tools) > len(shown):
+            tool_text += f",+{len(tools) - len(shown)}"
+
+        # -- 模型调用 --
+        model_calls = list(getattr(telemetry, "model_calls", []) or [])
+        tokens = 0
+        tokens_unknown = False
+        model_errors = 0
+        retries = 0
+        for call in model_calls:
+            if call.total_tokens is None:
+                tokens_unknown = True
+            else:
+                tokens += int(call.total_tokens)
+            if call.error:
+                model_errors += 1
+            retries += int(call.retry_count or 0)
+
+        # -- 能力集（本轮模型能看见什么、来自哪里） --
+        # 这一项回答的是「模型为什么会去调那个工具」：先确认它在不在能力集里。
+        capability = ""
+        registry = getattr(runtime, "registry", None) if runtime is not None else None
+        if registry is not None and hasattr(registry, "capability_summary"):
+            summary = registry.capability_summary(context)
+            capability = (
+                f"visible={summary.get('visible')}"
+                f";registered={summary.get('registered')}"
+                f";sources={summary.get('sources') or '-'}"
+            )
+            if summary.get("irreversible"):
+                capability += ";irreversible=" + str(summary["irreversible"])
+
+        send = getattr(telemetry, "send", None)
+        memory = getattr(telemetry, "memory", None)
+        log_event(
+            "agent.request_summary",
+            stage="summary",
+            session_id=getattr(context, "session_id", "") or None,
+            trace=getattr(telemetry, "trace_id", "") or None,
+            mode=getattr(outcome, "mode", "") or None,
+            reply_by=_reply_source(outcome),
+            stop=getattr(outcome, "stop_reason", "") or None,
+            trigger=getattr(context, "trigger_reason", "") or None,
+            interrupt=bool(getattr(context, "interrupt", False)),
+            total_ms=round(float(telemetry.total_latency_ms()), 1),
+            queue_ms=round(float(getattr(telemetry, "queue_wait_ms", 0.0)), 1),
+            memory_ms=round(float(getattr(telemetry, "memory_ms", 0.0)), 1),
+            model_ms=round(float(getattr(telemetry, "model_ms", 0.0)), 1),
+            tool_ms=round(float(getattr(telemetry, "tool_ms", 0.0)), 1),
+            send_ms=round(float(getattr(telemetry, "send_ms", 0.0)), 1),
+            model_calls=len(model_calls),
+            # 注意：字段名不能叫 tokens / total_tokens —— log_event 的脱敏规则
+            # 会把任何含 "token" 的字段渲染成 <redacted>（那条规则是给 API Key
+            # 用的）。这里叫 usage，含义一样但不会被吞掉。
+            usage=None if tokens_unknown else tokens,
+            usage_unknown=tokens_unknown or None,
+            model_errors=model_errors or None,
+            retries=retries or None,
+            tools=tool_text or None,
+            tool_calls=len(tools),
+            history=getattr(memory, "history_count", None),
+            recalled=getattr(memory, "recalled_count", None),
+            send_ok=getattr(send, "send_success", None),
+            send_fail=getattr(send, "send_failure", None),
+            bubbles=getattr(send, "bubbles", None),
+            capabilities=capability or None,
+            error=getattr(outcome, "error", "") or None,
+            error_class=getattr(telemetry, "error_class", "") or None,
+        )
+    except Exception:  # noqa: BLE001 —— 观测失败绝不影响业务
+        pass
+
+
 class AgentEntry:
     """Agent 执行入口与 fallback 边界。
 
@@ -117,10 +233,16 @@ class AgentEntry:
         from ..validation.telemetry import RequestTelemetry, bind_telemetry, unbind_telemetry
 
         telemetry = RequestTelemetry(trace_id=context.trace_id or "")
+
+        # 显式声明：请求级摘要需要在 finally 里读到它（异常时保持 None）
+        outcome: AgentOutcome | None = None
         token = bind_telemetry(telemetry)
         try:
             outcome = await self._handle_inner(context)
         finally:
+            # 请求级摘要必须在 unbind 之前取：unbind 之后 telemetry 就取不到了。
+            # 它自己全程吞异常，不会影响下面这行清理。
+            _log_request_summary(context, outcome, telemetry, self._runtime)
             unbind_telemetry(token)
         return outcome
 
@@ -163,11 +285,11 @@ class AgentEntry:
         try:
             result = await self._legacy_handler(context)
         except Exception as exc:  # noqa: BLE001
-            # legacy 编排器在 Phase 6.6 的 state 重构中没做完（详见
-            # agent/legacy_orchestrator.py）。这里**降级到 runtime**，而不是
-            # 把异常抛给上层：用户该看到的是回复，不是 traceback。
-            # 把 mode 设成 legacy 的人想要的正是「保险的回退路径」，
-            # 那这条降级恰恰是它该有的行为。
+            # 旧编排实现已在 2026-10 删除（见 handlers._handle_chat_inner）。
+            # 这里**降级到 runtime**，而不是把异常抛给上层：
+            # 用户该看到的是回复，不是 traceback；而把 mode 设成 legacy 的人
+            # 想要的正是「别让机器人哑掉」这层保险——
+            # 旧实现已经不存在，退到 runtime 是唯一有意义的落点。
             log_event(
                 "agent.legacy_fallback_runtime",
                 level="warning",
@@ -244,15 +366,15 @@ class AgentEntry:
             基础设施异常 → 记录 error + 返回安全 fallback text
             （文案复用现有错误回复，不新写人格文案）
 
-        **没有部署级回滚了**。`DL_SENPAI_AGENT_MODE=legacy` 这条路已经不通：
-        `LegacyOrchestrator.run()` 在 Phase 6.6 的 state 重构里没完成
-        （`LegacyRunState` 从未定义，各阶段读的是未定义的局部变量），
-        现在它一进来就抛可行动的 RuntimeError。
+        **没有部署级回滚了**。旧编排实现（`agent/legacy_orchestrator.py`）
+        已在 2026-10 审计后整体删除：它不是"暂时坏了"，而是从 Phase 6.6 起
+        就没接上 `LegacyRunState`，永远不可能跑通，留着只是给回滚制造错觉。
 
-        所以 legacy 模式下的实际行为是：`AgentEntry` 捕获这个异常并
-        **降级到 runtime**（见 `_run_legacy`）。配成 legacy 的人要的是
-        「退回旧实现」这层保险，而不是「整个 bot 不再回话」——
-        既然旧实现已经不可运行，退到 runtime 才是唯一有意义的结果。
+        所以 `DL_SENPAI_AGENT_MODE=legacy` 现在的实际行为是：
+        走到 `_handle_chat_inner` 的显式 RuntimeError，被 `_run_legacy` 捕获，
+        **降级到 runtime**。配成 legacy 的人要的是「别让 bot 哑掉」这层保险，
+        而不是「整个 bot 不再回话」—— 退到 runtime 是唯一有意义的结果。
+        要真正回滚，只能回滚代码版本。
         """
         started_at = time.perf_counter()
         if self._runtime is None:

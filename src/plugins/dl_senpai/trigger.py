@@ -172,6 +172,7 @@ def decide_trigger(
     has_images: bool = False,
     image_boost: float = 0.0,
     interrupt_prob_scale: float = 1.0,
+    is_owner: bool = False,
     rng: random.Random | None = None,
     now: float | None = None,
 ) -> TriggerDecision:
@@ -180,6 +181,12 @@ def decide_trigger(
 
     if should_ignore_text(text, min_msg_len, has_images=has_images):
         return TriggerDecision(kind="none", reason="ignored")
+
+    # 主人（或指定的人）说话：跳过冷却和骰子，一定接。
+    # 为什么排在长度过滤**之后**：那样「嗯」「草」「/reset」这类仍然不走 AI，
+    # 主人也不需要机器人对每个语气词都回一句。这里只解决「被概率/冷却晾着」。
+    if is_owner:
+        return TriggerDecision(kind="mention", reason="owner")
 
     if not cooldown.ready(session_id, cooldown_sec, now=now):
         return TriggerDecision(kind="none", reason="cooldown")

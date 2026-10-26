@@ -9,6 +9,7 @@ from typing import Literal
 
 from nonebot import logger
 from nonebot.adapters.onebot.v11 import Bot, GroupMessageEvent, MessageEvent
+from nonebot.adapters.onebot.v11.exception import ActionFailed
 
 from .cache import SessionCooldown
 
@@ -283,7 +284,7 @@ def title_apply_success_note(result: TitleApplyResult) -> str:
 def title_apply_failure_note() -> str:
     return (
         "\n（头衔这次好像没真正挂上……可能是 QQ/NapCat 接口抽风了，"
-        "晚点再触发一次好感或让管理检查机器人有没有群管权限）"
+        "晚点再触发一次好感；如果一直不行，多半是机器人不是群主 —— 群头衔一般只有群主能设）"
     )
 
 
@@ -310,6 +311,33 @@ async def _read_special_title(bot: Bot, *, group_id: int, user_id: int) -> str |
     return ""
 
 
+_TITLE_REFUSAL_TTL = 6 * 3600
+# 群头衔被协议层拒绝后别再每轮都试：一次要等 30 秒超时，还会刷一屏 traceback。
+_title_refusal_until: dict[int, float] = {}
+
+
+def _reset_title_refusal_cache() -> None:
+    """清空拒绝缓存（测试用）。"""
+    _title_refusal_until.clear()
+
+
+def _title_refused(group_id: int) -> bool:
+    return (_title_refusal_until.get(group_id) or 0.0) > time.time()
+
+
+async def _member_role(bot: Bot, *, group_id: int, user_id: int) -> str:
+    """取群成员身份（owner/admin/member），取不到返回空串。"""
+    try:
+        info = await bot.get_group_member_info(
+            group_id=group_id, user_id=user_id, no_cache=True,
+        )
+    except Exception:  # noqa: BLE001
+        return ""
+    if not isinstance(info, dict):
+        return ""
+    return str(info.get("role") or "")
+
+
 async def _try_special_title(
     bot: Bot,
     *,
@@ -317,29 +345,54 @@ async def _try_special_title(
     user_id: int,
     special_title: str,
 ) -> bool:
-    try:
-        await bot.call_api(
-            "set_group_special_title",
-            group_id=group_id,
-            user_id=user_id,
-            special_title=special_title,
-            duration=-1,
-        )
-    except TypeError:
+    """设置群专属头衔；成功（并读到回显）返回 True。
+
+    为什么这里这么啰嗦：实测这个接口在本机 6/6 次被协议层拒绝
+    （ActionFailed: OIDB error 1013 on 0x8fc_2）。每次失败都要等 30 秒超时、
+    刷一屏 traceback，然后降级去改群名片 —— 用户看到的就是「头衔没变、名片被改了」。
+    所以做三件事：
+      1. 先按最简参数试（部分实现不认 duration=-1，带上会被整条拒绝）；
+      2. 失败就把双方身份写进日志，好判断是权限问题还是参数问题；
+      3. 协议层拒绝后 6 小时内不再重试，省掉等待和刷屏。
+    """
+    if _title_refused(group_id):
+        return False
+
+    payloads: list[dict[str, object]] = [
+        {"group_id": group_id, "user_id": user_id, "special_title": special_title},
+        {"group_id": group_id, "user_id": user_id, "special_title": special_title, "duration": -1},
+    ]
+    last_error: Exception | None = None
+    for payload in payloads:
         try:
-            await bot.set_group_special_title(
-                group_id=group_id,
-                user_id=user_id,
-                special_title=special_title,
-            )
-        except Exception:  # noqa: BLE001
-            logger.exception(
-                f"dl_senpai set_group_special_title failed group={group_id} user={user_id}"
-            )
-            return False
-    except Exception:  # noqa: BLE001
-        logger.exception(
-            f"dl_senpai set_group_special_title failed group={group_id} user={user_id}"
+            await bot.call_api("set_group_special_title", **payload)
+            last_error = None
+            break
+        except TypeError:
+            # 适配层签名不认这些参数时退回官方方法
+            try:
+                await bot.set_group_special_title(
+                    group_id=group_id,
+                    user_id=user_id,
+                    special_title=special_title,
+                )
+                last_error = None
+                break
+            except Exception as exc:  # noqa: BLE001
+                last_error = exc
+        except Exception as exc:  # noqa: BLE001
+            last_error = exc
+
+    if last_error is not None:
+        bot_role = await _member_role(bot, group_id=group_id, user_id=int(bot.self_id))
+        target_role = await _member_role(bot, group_id=group_id, user_id=user_id)
+        if isinstance(last_error, ActionFailed):
+            _title_refusal_until[group_id] = time.time() + _TITLE_REFUSAL_TTL
+        logger.warning(
+            f"dl_senpai set_group_special_title refused group={group_id} "
+            f"bot_role={bot_role or '?'} target_role={target_role or '?'} "
+            f"title={special_title!r} err={last_error}"
+            "（群头衔通常只有群主能设；管理员身份会被协议拒绝，已停止重试 6 小时）"
         )
         return False
 
@@ -360,7 +413,6 @@ async def _try_special_title(
         f"user={user_id} want={special_title!r} got={actual!r}"
     )
     return False
-
 
 def _card_safe_for_managed_title(current_card: str, *, known_titles: frozenset[str]) -> bool:
     card = (current_card or "").strip()

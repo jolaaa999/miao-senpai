@@ -25,11 +25,14 @@ from enum import Enum
 class AgentExecutionMode(str, Enum):
     """Agent 执行模式。"""
 
-    # 100% 旧路径。用于紧急回滚。
+    # 旧路径的名义保留值。
     #
-    # **Phase 5.5 起标记为 deprecated**：它仍是合法的部署级回滚手段，
-    # 但不再作为 RUNTIME 模式的自动 fallback 目标。
-    # 计划在真实流量验证充分后（Phase 6/7）删除。
+    # **2026-10 起行为已变**：旧编排实现（agent/legacy_orchestrator.py）
+    # 被整体删除，因此这个模式不再"执行旧路径"，而是
+    # 「按 runtime 跑，并在启动时打一条 deprecated warning」。
+    #
+    # 为什么不直接删掉枚举值：旧部署的 .env 里可能还写着 legacy，
+    # 删值会让启动期校验失败、bot 起不来。把"配错"降级成"警告"更安全。
     LEGACY = "legacy"
     # 旧路径真正执行；AgentRuntime 只计算（dry_run，无副作用）。
     SHADOW = "shadow"
@@ -47,9 +50,8 @@ def is_deprecated_mode(mode: AgentExecutionMode) -> bool:
 def deprecation_warning(mode: AgentExecutionMode) -> str:
     """生成启动 warning 文本（第二十节要求 legacy mode 明确标记 deprecated）。
 
-    文案要点：**legacy 不再是可用的回滚路径**。
-    `LegacyOrchestrator` 在 Phase 6.6 的重构中未完成，run() 会直接抛异常，
-    AgentEntry 捕获后降级到 runtime。也就是说配了 legacy 实际跑的还是 runtime，
+    文案要点：**legacy 不是可用的回滚路径**。
+    旧编排实现已于 2026-10 删除，配了 legacy 实际跑的是 runtime，
     只是多一条 warning、多一次异常捕获。
 
     为什么保留这个模式而不是直接删掉：配置里可能还有旧值，
@@ -61,9 +63,9 @@ def deprecation_warning(mode: AgentExecutionMode) -> str:
     # 加一个逗号就变成返回 tuple 了，`"deprecated" in warning` 会直接为假，
     # 而函数签名写的还是 str，类型检查也未必拦得住。
     return (
-        "legacy agent mode is deprecated and no longer functional: "
-        "DL_SENPAI_AGENT_MODE=legacy 的旧实现已不可运行，"
-        "本次启动实际会降级到 runtime 模式。建议把配置改为 runtime。"
+        "legacy agent mode is deprecated: "
+        "DL_SENPAI_AGENT_MODE=legacy 的旧实现已被删除，"
+        "本次启动实际按 runtime 运行。建议把配置改为 runtime。"
     )
 
 

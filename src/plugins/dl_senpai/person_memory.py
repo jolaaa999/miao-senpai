@@ -80,6 +80,10 @@ class PersonProfile:
     style: str = ""
     relation: str = ""
     moments: list[str] = field(default_factory=list)
+    # 「她心里记着、但没说出口的事」。搬自 ai-companion-kit 的 pending：
+    # 记忆光有档案没有心事，就只是数据库；有了这一层，下次见面她能自己
+    # 想起来「他还欠我一个解释」，而不是干等着对方提。
+    pending: list[str] = field(default_factory=list)
     notes: str = ""
     updated_at: float = 0.0
 
@@ -106,6 +110,12 @@ class PersonProfile:
             if isinstance(moments_raw, list)
             else []
         )
+        pending_raw = data.get("pending") or []
+        pending = (
+            [str(p).strip() for p in pending_raw if str(p).strip()]
+            if isinstance(pending_raw, list)
+            else []
+        )
         return cls(
             user_id=str(user_id),
             display_names=names,
@@ -114,6 +124,7 @@ class PersonProfile:
             style=str(data.get("style") or "").strip(),
             relation=str(data.get("relation") or "").strip(),
             moments=moments,
+            pending=pending,
             notes=str(data.get("notes") or "").strip(),
             updated_at=float(data.get("updated_at") or 0),
         )
@@ -127,6 +138,7 @@ class PersonProfile:
             or self.style
             or self.relation
             or self.moments
+            or self.pending
         )
 
 
@@ -139,6 +151,8 @@ class ImpressionUpdate:
     style: str | None = None
     relation: str | None = None
     moment: str | None = None  # 追加一条难忘瞬间
+    # 追加一条「没说出口的事」；传空串表示清空（事情说开了就不再挂着）
+    pending: str | None = None
 
 
 @dataclass
@@ -204,6 +218,7 @@ def parse_impression_updates(raw_reply: str) -> ImpressionParseResult:
         style = opt_field("style", "talk", "tone", max_len=80)
         relation = opt_field("relation", "bond", "with_me", max_len=80)
         moment = opt_field("moment", "memory", "episode", max_len=80)
+        pending = opt_field("pending", "unsaid", "heart", max_len=120)
 
         if (
             not add
@@ -213,6 +228,7 @@ def parse_impression_updates(raw_reply: str) -> ImpressionParseResult:
             and style is None
             and relation is None
             and moment is None
+            and pending is None
         ):
             continue
         updates.append(
@@ -224,6 +240,7 @@ def parse_impression_updates(raw_reply: str) -> ImpressionParseResult:
                 style=style,
                 relation=relation,
                 moment=moment,
+                pending=pending,
             )
         )
 
@@ -329,6 +346,10 @@ def build_person_memory_brief(
         lines.append(f"已知事实/兴趣：{'；'.join(traits)}")
     if moments:
         lines.append(f"难忘瞬间：{'；'.join(moments)}")
+    if profile.pending:
+        # 用「⚠️」而不是普通列表：这一条最容易在长上下文里被忽略，
+        # 而它恰恰是「她心里挂着的事」——漏掉的代价比别的条目大。
+        lines.append(f"⚠️ 你心里还记着、没说出口的事：{'；'.join(profile.pending[-4:])}")
     if profile.notes:
         lines.append(f"总备注：{profile.notes}")
     lines.append(
@@ -350,6 +371,7 @@ class PersonMemoryStore:
         max_names: int = 6,
         max_moments: int = 8,
         max_vibe_chars: int = 160,
+        max_pending: int = 6,
     ) -> None:
         self.data_dir = Path(data_dir)
         self.data_dir.mkdir(parents=True, exist_ok=True)
@@ -358,6 +380,8 @@ class PersonMemoryStore:
         self.max_names = max(2, int(max_names))
         self.max_moments = max(2, int(max_moments))
         self.max_vibe_chars = max(40, int(max_vibe_chars))
+        # 心事留 6 条上限：再多就不是「挂着的事」，而是待办清单了
+        self.max_pending = max(1, int(max_pending))
         self._lock = Lock()
 
     def _path(self, user_id: int | str) -> Path:
@@ -411,6 +435,7 @@ class PersonMemoryStore:
 
         traits = list(profile.traits)
         moments = list(profile.moments)
+        pending_items = list(profile.pending)
         notes = profile.notes
         vibe = profile.vibe
         style = profile.style
@@ -453,6 +478,17 @@ class PersonMemoryStore:
                 if not any(x.casefold() == m.casefold() for x in moments):
                     moments.append(m)
                     changed = True
+            if upd.pending is not None:
+                # 空串 = 这件事说开了，从心里放下。不清掉的话，
+                # 「没说出口的事」只增不减，几个月后她还挂着一堆过期心事。
+                text = upd.pending.strip()
+                if not text:
+                    if pending_items:
+                        pending_items = []
+                        changed = True
+                elif not any(x.casefold() == text.casefold() for x in pending_items):
+                    pending_items.append(text)
+                    changed = True
 
         if len(traits) > self.max_traits:
             traits = traits[-self.max_traits :]
@@ -460,10 +496,14 @@ class PersonMemoryStore:
         if len(moments) > self.max_moments:
             moments = moments[-self.max_moments :]
             changed = True
+        if len(pending_items) > self.max_pending:
+            pending_items = pending_items[-self.max_pending :]
+            changed = True
 
         if display_name.strip() or changed:
             profile.traits = traits
             profile.moments = moments
+            profile.pending = pending_items
             profile.notes = notes
             profile.vibe = vibe
             profile.style = style

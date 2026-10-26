@@ -5,6 +5,7 @@ import time
 import asyncio
 import random
 import re
+from datetime import datetime
 from typing import Any
 
 from nonebot import logger
@@ -23,6 +24,92 @@ _PARA_SPLIT = re.compile(r"\n{2,}")
 _LINE_SPLIT = re.compile(r"(?<=\n)")
 _SENT_SPLIT = re.compile(r"(?<=[。！？.!?\n])")
 _BUBBLE_SENT = re.compile(r"(?<=[。！？!?～~…])")
+
+
+# 合并转发的切点优先级：小标题行 > 空行 > 列表项 > 句子。
+# 按字数硬切会把「一、结论」和它的正文劈到两个节点里，读的人还得自己拼回去；
+# QQ 的聊天记录卡片又不能展开全文，切碎了就是真的丢了上下文。
+_HEADING_LINE_RE = re.compile(
+    r"^(?:[一二三四五六七八九十]+[、.．]|\d+[.)、]|[·•▪‣]\s|[-*]\s+"
+    r"|[（(][一二三四五六七八九十\d]+[)）]|【[^】]{1,20}】)"
+)
+_PARA_SPLIT_RE = re.compile(r"\n\s*\n")
+# 列表成员不触发切分：连续几条 · 本来就是同一个列表，
+# 拆成独立块再拼回去，只会在每条之间多出一行空行。
+_LIST_LINE_RE = re.compile(r"^(?:[·•▪‣]\s?|[-*]\s+|\d+[.)、]\s?)")
+
+
+def _logical_blocks(text: str) -> list[str]:
+    """把正文切成「语义完整」的块：先按空行分段，段内遇到小标题/列表项再切。"""
+    blocks: list[str] = []
+    for para in _PARA_SPLIT_RE.split(text):
+        cur: list[str] = []
+        for line in para.split("\n"):
+            stripped = line.strip()
+            # 只让「非列表」的小标题触发切分，列表项跟着上一行走
+            if cur and not _LIST_LINE_RE.match(stripped) and _HEADING_LINE_RE.match(stripped):
+                blocks.append("\n".join(cur))
+                cur = [line]
+            else:
+                cur.append(line)
+        if cur:
+            blocks.append("\n".join(cur))
+    return [b.strip("\n") for b in blocks if b.strip()]
+
+
+def _split_long_block(block: str, limit: int) -> list[str]:
+    """单块超限时按句子切；句子本身比上限还长就只能按字数硬切。"""
+    pieces: list[str] = []
+    cur = ""
+    for sent in _SENT_SPLIT.split(block):
+        if not sent:
+            continue
+        while len(sent) > limit:
+            if cur:
+                pieces.append(cur)
+                cur = ""
+            pieces.append(sent[:limit])
+            sent = sent[limit:]
+        if cur and len(cur) + len(sent) > limit:
+            pieces.append(cur)
+            cur = sent
+        else:
+            cur += sent
+    if cur:
+        pieces.append(cur)
+    return [x.strip() for x in pieces if x.strip()]
+
+
+def split_forward_nodes(
+    text: str, *, target_chars: int = 600, max_nodes: int = 8
+) -> list[str]:
+    """把长回答切成合并转发的若干节点。
+
+    每一节尽量是能单独读懂的单元（一个小标题带它的正文），而不是
+    「第 600 个字到第 1200 个字」。target_chars 是上限，不是目标长度。
+    """
+    text = (text or "").strip()
+    if not text:
+        return []
+    limit = max(200, int(target_chars))
+    nodes: list[str] = []
+    for block in _logical_blocks(text):
+        pieces = _split_long_block(block, limit) if len(block) > limit else [block]
+        for piece in pieces:
+            if nodes and len(nodes[-1]) + 2 + len(piece) <= limit:
+                nodes[-1] = nodes[-1] + "\n\n" + piece
+            else:
+                nodes.append(piece)
+    # 尾节太短就并回上一节：只剩一行「出处」独占一个节点，
+    # 点开卡片的人还得再翻一页才看见它，不如跟正文放一起。
+    if len(nodes) > 1 and len(nodes[-1]) < max(120, limit // 4):
+        tail = nodes.pop()
+        nodes[-1] = nodes[-1] + "\n\n" + tail
+    # 节点太多往后合并：十个节点翻起来比一大段还累，8 节够用了
+    if len(nodes) > max_nodes:
+        head = nodes[: max_nodes - 1]
+        nodes = head + ["\n\n".join(nodes[max_nodes - 1 :])]
+    return nodes
 
 
 def split_reply_chunks(text: str, chunk_chars: int) -> list[str]:
@@ -75,21 +162,62 @@ def _looks_like_code(text: str) -> bool:
     return hits >= 3 and hits * 2 >= len(lines)
 
 
+# 模型偶尔把内部协议标记漏给用户（实测 <<<CODE 少写闭括号，整段 Python 发进群里）。
+# 这里是发送前的最后一道闸：不管哪个调用方、哪条路径，最终文本都要过一遍。
+# 只剥「<<< + 大写标记名」这种协议形态，正常的正文不受影响。
+_RESIDUAL_BLOCK_RE = re.compile(
+    r"<<<CODE[ \t]*[^>\n]*>{0,3}[ \t]*\n?(.*?)(?:\n?[ \t]*<<<END[ \t]*>{0,3}|\Z)",
+    re.IGNORECASE | re.DOTALL,
+)
+_RESIDUAL_INLINE_RE = re.compile(r"<<<[A-Z][A-Z0-9_]{1,20}(?:[ \t][^\n>]*)?>{0,3}")
+_RESIDUAL_ORPHAN_RE = re.compile(r"^[ \t]*<<<.*$", re.MULTILINE)
+
+
+def strip_residual_markers(text: str) -> str:
+    """剥掉未解析的协议标记，避免内部指令原样外发。
+
+    顺序有讲究：先删整块（连块内代码一起删），再删行内标记，最后删孤立残行。
+    反过来的话，整块删除时块内的行已经被行内规则动过，位置就错位了。
+    """
+    out = text or ""
+    if "<<<" not in out:
+        return out
+    out = _RESIDUAL_BLOCK_RE.sub("", out)
+    out = _RESIDUAL_INLINE_RE.sub("", out)
+    out = _RESIDUAL_ORPHAN_RE.sub("", out)
+    # 删干净后常剩下两三行空行，收成一处，别让气泡里出现大段空白
+    out = re.sub(r"\n{3,}", "\n\n", out).strip()
+    return out
+
+
 def split_human_bubbles(
     text: str,
     *,
     min_chars: int = 40,
     prefer_chars: int = 120,
     max_bubbles: int = 3,
+    require_newline: bool = False,
 ) -> list[str]:
     """把闲聊短回复拆成多条 QQ 气泡（像真人连发）。
 
     太短不拆；超长交给合并转发路径，这里只处理「刚好能碎成 2～N 句」的情况。
+
+    require_newline=True 时**只按换行拆**，没有换行就原样返回。
+    为什么不按标点拆：拆泡的前提是「她本来就想分两句发」，那个意图只能由
+    换行表达。按句号硬切等于替她决定怎么断句，切出来是段落的三块而不是
+    三句话——线上被吐槽「一本正经重复废话」时，一部分就是这么来的。
     """
     text = (text or "").strip()
     if not text:
         return []
     max_bubbles = max(1, int(max_bubbles))
+    # 只允许一条就别拆：下面的「从头合并」虽然也能还原成一条，但拼接会
+    # 重排换行（\n\n 变 \n），等于悄悄改了原文格式。
+    if max_bubbles <= 1:
+        return [text] if text.strip() else []
+    # 没有换行 = 她要一口气说完，那就别动
+    if require_newline and "\n" not in text:
+        return [text]
     min_chars = max(1, int(min_chars))
     prefer_chars = max(min_chars, int(prefer_chars))
     if len(text) < min_chars or max_bubbles <= 1:
@@ -114,6 +242,12 @@ def split_human_bubbles(
     # 含代码就别拆气泡：拆点会落在代码中间，气泡分两条发出去更没法读。
     if _looks_like_code(text):
         return [text]
+
+    # 换行分出来的行不要再合并：她已经用换行说了「这是另一条消息」。
+    # 「草 / 真的假的 / 行」三条各 2~4 个字，下面的合并逻辑会按字数把它们
+    # 粘成一条，等于白拆。
+    if "\n" in text and len(raw_parts) <= max_bubbles:
+        return [p for p in raw_parts if p]
 
     # 合并过碎片段，避免一字一气泡
     merged: list[str] = []
@@ -255,14 +389,25 @@ async def _send_image_with_retry(
     image: MessageSegment,
 ) -> bool:
     hint = _segment_file_hint(image)
+    from .send_guard import get_send_guard
+
+    guard = get_send_guard()
     for attempt in range(1, 3):
+        # 熔断打开时直接放弃：图片本来就有两次重试，叠加失败重试
+        # 正是原项目踩过的「重试风暴」——在腾讯眼里这就是标准机器人。
+        allowed, reason = guard.before_send()
+        if not allowed:
+            logger.warning(f"dl_senpai: image send skipped ({reason}) file={hint!r}")
+            return False
         try:
             await bot.send(event, OBMessage(image))
+            guard.on_success()
             logger.info(
                 f"dl_senpai: reply image sent ok attempt={attempt}/2 file={hint!r}"
             )
             return True
         except Exception as exc:  # noqa: BLE001
+            guard.on_failure()
             logger.warning(
                 f"dl_senpai: reply image send failed attempt={attempt}/2 "
                 f"file={hint!r}: {exc}"
@@ -277,13 +422,54 @@ async def _send_voice_segment(
     voice: MessageSegment,
 ) -> bool:
     hint = _segment_file_hint(voice)
+    from .send_guard import get_send_guard
+
+    guard = get_send_guard()
+    allowed, reason = guard.before_send()
+    if not allowed:
+        logger.warning(f"dl_senpai: voice send skipped ({reason}) file={hint!r}")
+        return False
     try:
         await bot.send(event, OBMessage(voice))
+        guard.on_success()
         logger.info(f"dl_senpai: reply voice sent ok file={hint!r}")
         return True
     except Exception as exc:  # noqa: BLE001
+        guard.on_failure()
         logger.warning(f"dl_senpai: reply voice send failed file={hint!r}: {exc}")
         return False
+
+
+def _dry_run_enabled() -> bool:
+    """干跑模式是否开启。读不到配置就当没开（别因为配置异常把消息吞掉）。"""
+    try:
+        from .config_runtime.runtime import get_config
+
+        return bool(getattr(get_config(), "dry_run", False))
+    except Exception:  # noqa: BLE001 — 配置读不出来时宁可正常发，也不能静默吞消息
+        return False
+
+
+def _log_dry_run(
+    text: str,
+    *,
+    sticker: MessageSegment | None = None,
+    voice: MessageSegment | None = None,
+    image: MessageSegment | None = None,
+) -> None:
+    """干跑：把她「本来会发出去」的东西写成一行日志。
+
+    带字数，方便直接判断长度改得对不对——这正是要用干跑的原因。
+    """
+    media = []
+    if image is not None:
+        media.append("图片")
+    if voice is not None:
+        media.append("语音")
+    if sticker is not None:
+        media.append("表情")
+    suffix = f" media={'+'.join(media)}" if media else ""
+    logger.info(f"[干跑] 会说（{len(text)} 字）：{text}{suffix}")
 
 
 async def send_text_reply(
@@ -304,6 +490,9 @@ async def send_text_reply(
     bubble_min_chars: int = 40,
     bubble_prefer_chars: int = 120,
     bubble_total_max_chars: int = 700,
+    bubble_require_newline: bool = False,
+    forward_min_chars: int = 400,
+    forward_node_chars: int = 600,
 ) -> None:
     nickname = nickname or get_senpai_name()
     """短消息直发；超长则用合并转发（聊天记录）多段发送。
@@ -312,8 +501,16 @@ async def send_text_reply(
     图片与语音同时存在时拆成独立消息；图片发送失败会单独重试一次。
     正文带媒体发送失败时自动降级为纯文字，并尽量补发图片/语音。
     """
-    text = (text or "").strip()
+    # 先剥协议残留再判空：剥完可能就什么都不剩，那就该安静不发
+    text = strip_residual_markers((text or "").strip())
     if not text and sticker is None and voice is None and image is None:
+        return
+
+    # 干跑：链路全跑完，只有「发出去」这一步换成打日志。
+    # 挂在这里而不是更上游，是因为 runtime / legacy / 兜底文案最终都从
+    # 这一个函数出站——拦一处就全拦住了，不用改三条链路。
+    if _dry_run_enabled():
+        _log_dry_run(text, sticker=sticker, voice=voice, image=image)
         return
 
     # Phase 7A.1：统一发送边界计时（第三十六条）。
@@ -351,6 +548,9 @@ async def send_text_reply(
             bubble_min_chars=bubble_min_chars,
             bubble_prefer_chars=bubble_prefer_chars,
             bubble_total_max_chars=bubble_total_max_chars,
+            bubble_require_newline=bubble_require_newline,
+            forward_min_chars=forward_min_chars,
+            forward_node_chars=forward_node_chars,
         )
         logger.info(f"dl_senpai: reply body sent ok media={media_summary}")
         _instrument_send(
@@ -391,6 +591,9 @@ async def send_text_reply(
             bubble_min_chars=bubble_min_chars,
             bubble_prefer_chars=bubble_prefer_chars,
             bubble_total_max_chars=bubble_total_max_chars,
+            bubble_require_newline=bubble_require_newline,
+            forward_min_chars=forward_min_chars,
+            forward_node_chars=forward_node_chars,
         )
         logger.info("dl_senpai: reply text-only fallback sent ok")
         _instrument_send(text=text, success=True, fallback=True)
@@ -405,12 +608,221 @@ async def send_text_reply(
         await _send_voice_segment(bot, event, deferred_voice)
 
 
-async def _typing_pause(ms_min: int, ms_max: int) -> None:
+# 深夜打字更慢（搬自 ai-companion-kit 的 Humanizer）。
+# 理由是真人凌晨半睡半醒，回得比白天慢一截；固定延迟反而显得「秒回」。
+_NIGHT_HOURS = (2, 7)
+_NIGHT_FACTOR = 1.6
+# 条间停顿里偶尔来一次明显更长的：像走神、像被别的事打断。
+# 每条都均匀停顿反而机械——真人发消息的节奏是不均匀的。
+_LONG_GAP_CHANCE = 0.25
+_LONG_GAP_EXTRA_MS = (1500, 4000)
+
+
+def _humanize_pause_ms(
+    ms_min: int,
+    ms_max: int,
+    *,
+    humanize_extra: bool,
+    chars: int = 0,
+    ms_per_char: int = 0,
+    hard_max: int = 0,
+) -> int:
+    """算出这一条该停多久。纯函数，方便单测钉住节奏规则。
+
+    chars/ms_per_char 给定时按字数算（真人手打约 110ms/字），否则用固定区间。
+    为什么要按字数：固定区间下，回 3 个字和回 30 个字等一样久——
+    这本身就是机器味，真人短句几乎是秒回的。
+    """
     lo = max(0, int(ms_min))
     hi = max(lo, int(ms_max))
-    delay_ms = random.randint(lo, hi) if hi > 0 else 0
+
+    if chars > 0 and ms_per_char > 0:
+        delay_ms = chars * int(ms_per_char)
+        delay_ms = max(lo, delay_ms)
+        if hard_max > 0:
+            delay_ms = min(int(hard_max), delay_ms)
+    else:
+        delay_ms = random.randint(lo, hi) if hi > 0 else 0
+
+    if not humanize_extra or delay_ms <= 0:
+        return delay_ms
+
+    hour = datetime.now().hour
+    start, end = _NIGHT_HOURS
+    if start <= hour < end:
+        delay_ms = int(delay_ms * _NIGHT_FACTOR)
+
+    if random.random() < _LONG_GAP_CHANCE:
+        extra_lo, extra_hi = _LONG_GAP_EXTRA_MS
+        delay_ms += random.randint(extra_lo, extra_hi)
+    return delay_ms
+
+
+async def _typing_pause(
+    ms_min: int,
+    ms_max: int,
+    *,
+    humanize_extra: bool = False,
+    chars: int = 0,
+    ms_per_char: int = 0,
+    hard_max: int = 0,
+) -> None:
+    delay_ms = _humanize_pause_ms(
+        ms_min,
+        ms_max,
+        humanize_extra=humanize_extra,
+        chars=chars,
+        ms_per_char=ms_per_char,
+        hard_max=hard_max,
+    )
+    # 抖动放在这里而不是 _humanize_pause_ms 里：那个是纯函数，
+    # 现有单测按确定值钉节奏规则，掺随机数会让它们变成薛定谔的测试。
+    #
+    # 为什么需要抖动：按字数线性算出来的间隔太规整，每条都差不多，
+    # 一眼就是机器。真人手打有快有慢，同一句话两次能差一半。
+    if delay_ms > 0:
+        try:
+            from .config import get_config
+
+            ratio = float(getattr(get_config(), "typing_jitter_ratio", 0.0) or 0.0)
+        except Exception:  # noqa: BLE001
+            ratio = 0.0
+        if ratio > 0:
+            delay_ms = int(delay_ms * random.uniform(1.0 - ratio, 1.0 + ratio))
+            delay_ms = max(30, delay_ms)
     if delay_ms > 0:
         await asyncio.sleep(delay_ms / 1000.0)
+
+
+def _typing_profile() -> tuple[int, int]:
+    """从配置取 (每字毫秒, 单条封顶毫秒)。取不到就退回固定区间语义。"""
+    try:
+        from .config import get_config
+
+        cfg = get_config()
+        return (
+            int(getattr(cfg, "typing_ms_per_char", 0) or 0),
+            int(getattr(cfg, "typing_ms_max", 0) or 0),
+        )
+    except Exception:  # noqa: BLE001
+        return 0, 0
+
+
+async def _human_pause(
+    bot: Bot,
+    event: MessageEvent,
+    text: str,
+    *,
+    ms_min: int,
+    ms_max: int,
+    humanize_extra: bool = False,
+) -> None:
+    """「正在输入」+ 按字数等待 + 关状态。
+
+    三件事绑在一起是因为它们必须成对出现：开了状态却忘了关，
+    对方会一直看到「正在输入」，比不显示更假。
+    """
+    from .typing_status import get_typing_reporter
+
+    reporter = get_typing_reporter()
+    started = False
+    try:
+        started = await reporter.start(bot, event, text)
+    except Exception:  # noqa: BLE001 — 上报失败绝不能影响发送
+        started = False
+
+    ms_per_char, hard_max = _typing_profile()
+    try:
+        await _typing_pause(
+            ms_min,
+            ms_max,
+            humanize_extra=humanize_extra,
+            chars=len(text or ""),
+            ms_per_char=ms_per_char,
+            hard_max=hard_max,
+        )
+    finally:
+        if started:
+            try:
+                await reporter.stop(bot, event)
+            except Exception:  # noqa: BLE001
+                pass
+
+
+async def _guarded_send(bot: Bot, event: MessageEvent, message: Any) -> bool:
+    """带闸门的单条发送。
+
+    闸门（熔断 / 每分钟上限）在 send 之前判断：拒绝时**连尝试都不发起**，
+    这正是防风控的关键——原项目就是败在「失败了还一直重试」上。
+
+    返回 False 表示没发出去（被闸门拦了或发送失败）。这里不抛异常：
+    调用方多处在气泡循环里，抛出去会把后面的气泡一起打断。
+    """
+    from .send_guard import get_send_guard
+
+    guard = get_send_guard()
+    allowed, reason = guard.before_send()
+    if not allowed:
+        logger.warning(f"dl_senpai: send blocked ({reason})")
+        # 拦下来的话要记账：她这一轮生成的内容没有到对方手上。
+        # 不记的话她会以为自己说过了——原版最惨的一次是通道卡了 23 分钟，
+        # 她在那边正常聊天，一条都没发出去，修好后只能说「你刚才那些话丢了」。
+        _record_send_failure(reason, event)
+        return False
+    try:
+        await bot.send(event, message)
+    except Exception as exc:  # noqa: BLE001
+        guard.on_failure()
+        logger.warning(f"dl_senpai: send failed: {exc}")
+        _record_send_failure(f"{type(exc).__name__}: {exc}", event)
+        return False
+    guard.on_success()
+    _record_outgoing(message, event)
+    return True
+
+
+def _session_key_of(event: Any) -> str:
+    """会话键，只用于给状态文件分类；拿不到就空串。"""
+    try:
+        group_id = getattr(event, "group_id", None)
+        if group_id:
+            return f"group:{group_id}"
+        user_id = getattr(getattr(event, "user_id", None), "__str__", lambda: "")()
+        return f"private:{user_id}" if user_id else ""
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _message_text_of(message: Any) -> str:
+    """从 OneBot 消息里抠出纯文本，供「开场白去重」用。"""
+    parts: list[str] = []
+    for seg in message if isinstance(message, list) else []:
+        try:
+            if getattr(seg, "type", "") == "text":
+                parts.append(str((seg.data or {}).get("text") or ""))
+        except Exception:  # noqa: BLE001
+            continue
+    return "".join(parts).strip()
+
+
+def _record_send_failure(reason: str, event: Any) -> None:
+    try:
+        from .context_extras import note_send_failure
+
+        note_send_failure(reason, session_id=_session_key_of(event))
+    except Exception as exc:  # noqa: BLE001 — 记账失败不能影响发送路径
+        logger.debug(f"dl_senpai send failure note skipped: {exc}")
+
+
+def _record_outgoing(message: Any, event: Any) -> None:
+    try:
+        from .context_extras import note_outgoing
+
+        text = _message_text_of(message)
+        if text:
+            note_outgoing(text, session_id=_session_key_of(event))
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(f"dl_senpai opener note skipped: {exc}")
 
 
 async def _send_text_reply_once(
@@ -431,27 +843,26 @@ async def _send_text_reply_once(
     bubble_min_chars: int = 40,
     bubble_prefer_chars: int = 120,
     bubble_total_max_chars: int = 700,
+    bubble_require_newline: bool = False,
+    forward_min_chars: int = 400,
+    forward_node_chars: int = 600,
 ) -> None:
     threshold = max(1, reply_max_chars)
 
-    # 拟人碎句：仅短于合并转发阈值的正文
-    if (
-        humanize_send
-        and text
-        and len(text) <= threshold
-    ):
-        bubbles = split_human_bubbles(
-            text,
-            min_chars=bubble_min_chars,
-            prefer_chars=bubble_prefer_chars,
-            max_bubbles=bubble_max,
-        )
-        # 几个气泡的合计字数过多时，连发同样刷屏：改用合并转发卡片。
-        # 节点直接用拆好的气泡，保留原本的碎句节奏，不重新按字数切。
-        total_chars = sum(len(b) for b in bubbles)
-        if len(bubbles) >= 2 and total_chars > bubble_total_max_chars:
+    # 长文先走合并转发（聊天记录卡片）。
+    # 放在拟人碎句之前判断：500~1500 字原本会被拆成一串气泡连发，群里直接刷屏；
+    # 单条塞下去又长到没人愿意读。卡片折叠成一条，点开是按小标题分好的节。
+    forward_min = max(0, int(forward_min_chars))
+    if text and forward_min and len(text) > forward_min:
+        nodes_text = split_forward_nodes(text, target_chars=forward_node_chars)
+        # 400~600 这个区间按 600 切只会得到一节，那样卡片点开就一条，
+        # 跟普通消息没区别。这里按字数对半再切一次，保证至少分两段。
+        if len(nodes_text) == 1:
+            half = max(200, min(forward_node_chars, len(text) // 2 + 20))
+            nodes_text = split_forward_nodes(text, target_chars=half)
+        if nodes_text:
             nodes = build_forward_nodes(
-                bubbles,
+                nodes_text,
                 user_id=int(bot.self_id),
                 nickname=nickname,
                 sticker=sticker,
@@ -462,18 +873,60 @@ async def _send_text_reply_once(
                 if voice is not None:
                     await bot.send(event, OBMessage(voice))
                 logger.info(
-                    f"dl_senpai: {len(bubbles)} bubble(s) merged into forward card "
-                    f"(total {total_chars} chars)"
+                    f"dl_senpai: forward reply {len(text)} chars -> "
+                    f"{len(nodes_text)} node(s) "
+                    f"(min={forward_min}, node_max={forward_node_chars})"
                 )
                 return
             except Exception as exc:  # noqa: BLE001
-                # 卡片发不出去就退回逐条气泡，不能把回复弄丢
-                logger.warning(f"dl_senpai: bubble forward failed, fallback to bubbles: {exc}")
+                # 卡片发不出去就逐条发，不能把回复弄丢
+                logger.warning(f"dl_senpai: forward reply failed, fallback sequential: {exc}")
+                for i, chunk in enumerate(nodes_text):
+                    piece = OBMessage(chunk)
+                    if sticker is not None and i == len(nodes_text) - 1:
+                        piece = piece + OBMessage(sticker)
+                    await _guarded_send(bot, event, piece)
+                if image is not None:
+                    await bot.send(event, OBMessage(image))
+                if voice is not None:
+                    await bot.send(event, OBMessage(voice))
+                return
+
+    # 拟人碎句：仅短于合并转发阈值的正文
+    if (
+        humanize_send
+        and text
+        and len(text) <= threshold
+    ):
+        total_chars = len(text)
+        # 合计字数超阈值就整条单发，不再拆，也不转卡片。
+        # 为什么不再转卡片（2026-10-25 改）：一条 200 字的正经答疑被塞进
+        # 「聊天记录」卡片，群里看是突兀的；而它本来也不适合拆成 3 条。
+        # 拆分只服务短句闲聊，长内容保持原样最不打扰。
+        bubbles = (
+            [text]
+            if total_chars > bubble_total_max_chars
+            else split_human_bubbles(
+                text,
+                min_chars=bubble_min_chars,
+                prefer_chars=bubble_prefer_chars,
+                max_bubbles=bubble_max,
+                require_newline=bubble_require_newline,
+            )
+        )
         if len(bubbles) >= 2:
             await _typing_pause(typing_delay_ms_min // 2, typing_delay_ms_min)
+            sent = 0
             for i, chunk in enumerate(bubbles):
-                if i > 0:
-                    await _typing_pause(typing_delay_ms_min, typing_delay_ms_max)
+                # 真·正在输入 + 按字数等待；首条也走这里（她得「打」出来）
+                await _human_pause(
+                    bot,
+                    event,
+                    chunk,
+                    ms_min=typing_delay_ms_min,
+                    ms_max=typing_delay_ms_max,
+                    humanize_extra=i > 0,
+                )
                 piece = OBMessage(chunk)
                 last = i == len(bubbles) - 1
                 if last and image is not None:
@@ -482,13 +935,18 @@ async def _send_text_reply_once(
                     piece = piece + OBMessage(sticker)
                 if last and voice is not None:
                     piece = piece + OBMessage(voice)
-                await bot.send(event, piece)
-            logger.info(f"dl_senpai: humanize sent {len(bubbles)} bubble(s)")
+                if await _guarded_send(bot, event, piece):
+                    sent += 1
+            logger.info(f"dl_senpai: humanize sent {sent}/{len(bubbles)} bubble(s)")
             return
 
     if not text or len(text) <= threshold:
         if humanize_send and text:
-            await _typing_pause(typing_delay_ms_min // 2, typing_delay_ms_min)
+            await _human_pause(
+                bot, event, text,
+                ms_min=typing_delay_ms_min,
+                ms_max=typing_delay_ms_max,
+            )
         msg = OBMessage(text) if text else OBMessage()
         if image is not None:
             msg = msg + OBMessage(image)
@@ -498,7 +956,7 @@ async def _send_text_reply_once(
             msg = msg + OBMessage(voice)
         if not msg:
             return
-        await bot.send(event, msg)
+        await _guarded_send(bot, event, msg)
         return
 
     chunks = split_reply_chunks(text, reply_chunk_chars)
@@ -510,7 +968,7 @@ async def _send_text_reply_once(
             msg = msg + OBMessage(sticker)
         if voice is not None:
             msg = msg + OBMessage(voice)
-        await bot.send(event, msg)
+        await _guarded_send(bot, event, msg)
         return
 
     nodes = build_forward_nodes(
@@ -531,7 +989,7 @@ async def _send_text_reply_once(
             piece = OBMessage(chunk)
             if sticker is not None and i == len(chunks) - 1:
                 piece = piece + OBMessage(sticker)
-            await bot.send(event, piece)
+            await _guarded_send(bot, event, piece)
         if voice is not None:
             await bot.send(event, OBMessage(voice))
 

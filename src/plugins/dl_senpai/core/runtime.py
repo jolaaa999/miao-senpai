@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import random
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -30,6 +31,7 @@ from .services import (
     SERVICE_CONFIG,
     SERVICE_EVENT_BUS,
     SERVICE_ROUTER,
+    SERVICE_EXTENSIONS,
     SERVICE_SESSIONS,
     SERVICE_TOOLS,
     ServiceRegistry,
@@ -56,6 +58,9 @@ class Runtime:
     agent: Any = None
     # Phase 5：Agent 执行入口（模式 + fallback 边界），懒构建
     agent_entry: Any = None
+    # 扩展登记表（core/extensions.py）。装载/摘除声明式扩展的唯一入口，
+    # MCP 那批工具就是通过它注册进来的。None 表示 Runtime 还没 build。
+    extensions: Any = None
 
     _built: bool = False
 
@@ -66,6 +71,12 @@ class Runtime:
 
         # Router 需要 bus 来发 route.matched / route.skipped 事件
         self.router._bus = self.bus
+
+        # 扩展登记表：绑定 Runtime 自身。放在最前面建，
+        # 这样 build 过程中与之后装载的扩展走的是同一个入口。
+        from .extensions import ExtensionRegistry
+
+        self.extensions = ExtensionRegistry(self)
 
         # PluginRuntime 拿到全部注册表，才能在 disable 时按 owner 清理
         self.plugins = PluginRuntime(
@@ -97,6 +108,8 @@ class Runtime:
         self.services.register(SERVICE_ROUTER, self.router, owner="core")
         self.services.register(SERVICE_EVENT_BUS, self.bus, owner="core")
         self.services.register(SERVICE_SESSIONS, self.sessions, owner="core")
+        if self.extensions is not None:
+            self.services.register(SERVICE_EXTENSIONS, self.extensions, owner="core")
 
         self._built = True
         log_event(
@@ -116,8 +129,10 @@ class Runtime:
             from ..agent.runtime import AgentRuntime
             from ..agent.tools.builtin import register_production_tools
             from ..agent.tools.creator_tools import register_creator_tools
-            from ..agent.tools.high_risk import register_high_risk_tools
+            from ..agent.tools.high_risk import register_high_risk_tools, register_extra_layers
             from ..agent.tools.memory_tool import register_memory_tool
+            from ..agent.tools.diary_tool import register_diary_tool
+            from ..agent.tools.note_tool import register_note_tool
             from ..agent.tools.registry import get_tool_registry
             from ..knowledge_setup import register_knowledge_tool
 
@@ -131,9 +146,17 @@ class Runtime:
             # 长期记忆检索同样单独注册：可见性由 memory 开关注导，
             # 与那 8 个内置工具的数量/executor 契约解耦。
             register_memory_tool(self.tools)
+            # 记心事：心绪手札的写入口，由她自己决定记不记（数据/注入见 inner_state）。
+            # 同样单独注册，不进那 8 个内置工具的数量契约。
+            register_note_tool(self.tools)
+            # 日记工具：遗忘的执行端。没有它，「快到期了」的提醒她无法回应。
+            register_diary_tool(self.tools)
             # 高风险工具（文件/命令/代码）同样独立注册。注册不等于可用：
             # permissions.HIGH_RISK_TOOLS 会把它们对非管理员整个隐藏。
             register_high_risk_tools(self.tools)
+            # 低风险但默认关/需要开关的几层（电脑、相册、读链接）。
+            # 与上面那层分开：那层是管理员专属，这层按各自的 enable 决定是否注册。
+            register_extra_layers(self.tools)
             # 生成层（Word/PPT）：对**所有群友**可见。它只接受结构化文本，
             # 参数里没有路径也没有命令，与管理员专属的高危层是两套东西。
             register_creator_tools(self.tools)
@@ -153,6 +176,22 @@ class Runtime:
                 level="warning",
                 error=f"{type(exc).__name__}: {exc}",
             )
+
+    def register_extension(self, extension: Any) -> Any:
+        """装载一个声明式扩展（Command / Tool / Route / Observer 一次登记）。
+
+        见 core/extensions.py。owner 统一取 extension.id，
+        因此 `extensions.remove(id)` 能一次性摘干净。
+        """
+        if self.extensions is None:
+            raise RuntimeError("Runtime 尚未 build，不能装载扩展")
+        return self.extensions.apply(extension)
+
+    def extension_summary(self) -> list[dict[str, Any]]:
+        """已装载扩展的扁平描述（诊断/控制台用）。"""
+        if self.extensions is None:
+            return []
+        return self.extensions.describe()
 
     def _register_builtin_plugins(self) -> None:
         """把内置能力登记为 Plugin，建立 owner 归属。
@@ -181,6 +220,7 @@ class Runtime:
         """
         from ..handlers import (
             observe_notice_leave,
+            observe_notice_recall,
             observe_notice_welcome,
             observe_recent_chat,
             observe_stickers,
@@ -219,6 +259,45 @@ class Runtime:
             matcher=_is_group_decrease,
             priority=100,
             owner="builtin_observers",
+        )
+        # 撤回通知：别人的撤回只标记流水；她自己被撤回时按冷却接一句。
+        # 优先级放在 100 之后：welcome/leave 是必须做的，撤回复原属于"锦上添花"。
+        self.router.observe(
+            "recall_notice",
+            observe_notice_recall,
+            matcher=_is_recall_notice,
+            priority=110,
+            owner="builtin_observers",
+        )
+
+    async def _merge_window(self, ctx: Any) -> str | None:
+        """攒批等待。返回合并后的文本、None（本条不用回）或 ""（不需要改）。
+
+        None 和 "" 刻意分开：
+            None = 后面还有消息，我是中间那条，交出去别管；
+            ""   = 我是最后一条，但没有东西要合并，按原文继续。
+        """
+        from ..batching import get_batcher
+        from ..config_runtime.runtime import get_config
+
+        cfg = get_config()
+        if not bool(getattr(cfg, "batch_enable", True)):
+            return ""
+
+        window_ms = (
+            int(getattr(cfg, "batch_window_private_ms", 1500))
+            if getattr(ctx, "is_private", False)
+            else int(getattr(cfg, "batch_window_group_ms", 2500))
+        )
+        if window_ms <= 0:
+            return ""
+
+        batcher = get_batcher(int(getattr(cfg, "batch_max_items", 6)))
+        return await batcher.wait_and_merge(
+            getattr(ctx, "session_id", "") or "",
+            getattr(ctx, "plain_text", "") or "",
+            getattr(ctx, "actor", "") or "",
+            window_ms=window_ms,
         )
 
     def _register_builtin_routes(self) -> None:
@@ -271,6 +350,29 @@ class Runtime:
             self.agent_trigger.log_decision(decision, ctx)
             if not decision.should_run:
                 return RouteResult.skip(reason=decision.reason or "no_trigger")
+
+            # 消息合并窗口：连着发的几条攒成一次再回。
+            # 放在触发判定**之后**：先确认她本来就该醒，再去等；
+            # 否则每条无关消息都要白等一个窗口，把整条链路拖慢。
+            merged = await self._merge_window(ctx)
+            if merged is None:
+                # 后面还有人接着发，交给最后那条去回，本条直接退出
+                return RouteResult.skip(reason="batched")
+            if merged:
+                # 直接改 plain_text：记忆、召回、记录都读这一个字段，
+                # 改成合并文本后各条链路自动一致，不必再传一遍参数。
+                ctx.extra["batched_from"] = ctx.plain_text
+                ctx.plain_text = merged
+
+            # 有时候看见了就是不接——真人不会每条必回。
+            #
+            # 只作用于**非强制**触发（插嘴、概率醒）：@ 和私聊是明确在叫她，
+            # 装作没看见就是坏了，不是像人。
+            # 也只在群里生效：私聊不回等于把对话框晾着，观感更差。
+            if not decision.forced and self._should_stay_silent(ctx):
+                from .router import RouteResult as _RR
+
+                return _RR.skip(reason="human_silence")
 
             # 走模块属性而非提前 import 的函数名：
             # 这样测试与运维可以 patch `legacy_bridge.handle_agent_message`
@@ -328,10 +430,86 @@ class Runtime:
         表情采集等旁路行为也已经完成。这是"旁路观察者不会被
         短路屏蔽"的结构性保证。
         """
+        # 0) 重复事件去重
+        # 必须排在观察者**之前**：观察者会往「最近聊天流水」里写，
+        # 重放的重复消息写两次，她上下文里同一句话就会出现两遍。
+        if self._is_duplicate(ctx):
+            from .router import RouteResult
+
+            return RouteResult.skip(reason="duplicate_message")
+
         # 1) 旁路观察者：永远执行
         await self.router.dispatch_observers(ctx)
         # 2) 主路由：Command → Plugin → Agent
         return await self.router.dispatch(ctx)
+
+    def _should_stay_silent(self, ctx: Any) -> bool:
+        """这次装没看见。
+
+        概率由 DL_SENPAI_SILENCE_PROB_GROUP 控制，默认 0.1。
+        只对群里「随口一句」生效：正经提问（含求教词、带问号、消息较长）
+        不参与，因为她不回就等于帮不上忙。
+        """
+        if getattr(ctx, "message_type", "") != "group":
+            return False
+        try:
+            from ..config_runtime.runtime import get_config
+
+            cfg = get_config()
+            prob = float(getattr(cfg, "silence_prob_group", 0.0) or 0.0)
+        except Exception:  # noqa: BLE001
+            return False
+        if prob <= 0:
+            return False
+
+        # 群里问具体问题的，不回比回得短更糟
+        try:
+            from ..tone import is_casual_prompt
+
+            text = str(getattr(ctx, "plain_text", "") or "")
+            if "?" in text or "？" in text:
+                return False
+            if not is_casual_prompt(
+                text,
+                max_chars=int(getattr(cfg, "casual_prompt_max_chars", 25) or 25),
+            ):
+                return False
+        except Exception:  # noqa: BLE001
+            return False
+
+        if random.random() >= prob:
+            return False
+        log_event("agent.silence", reason="human_silence", probability=prob)
+        return True
+
+    def _is_duplicate(self, ctx: Any) -> bool:
+        """同一条消息重复投递时返回 True。
+
+        只对普通消息生效：通知类事件（入群/撤回）的 id 语义不同，
+        而且重复执行代价很小，不值得冒误判丢事件的风险。
+        """
+        if getattr(ctx, "message_type", "") not in {"group", "private"}:
+            return False
+        from ..dedupe import get_deduper
+        from ..config_runtime.runtime import get_config
+
+        cfg = get_config()
+        if not bool(getattr(cfg, "dedupe_enable", True)):
+            return False
+
+        deduper = get_deduper(
+            window_sec=float(getattr(cfg, "dedupe_window_sec", 300)),
+            max_items=int(getattr(cfg, "dedupe_max_items", 512)),
+        )
+        duplicated = deduper.is_duplicate(ctx)
+        if duplicated:
+            log_event(
+                "message.duplicate",
+                level="warning",
+                session_id=getattr(ctx, "session_id", "") or None,
+                message_id=getattr(ctx, "message_id", "") or None,
+            )
+        return duplicated
 
 
 async def _maybe_await(value: Any) -> Any:
@@ -354,6 +532,12 @@ def _is_group_increase(ctx: Any) -> bool:
 
 def _is_group_decrease(ctx: Any) -> bool:
     return getattr(ctx, "notice_type", "") == "notice.group_decrease"
+
+def _is_recall_notice(ctx: Any) -> bool:
+    """观察者 matcher：仅群/好友撤回通知。"""
+    from ..gateway.context import NOTICE_FRIEND_RECALL, NOTICE_GROUP_RECALL
+
+    return getattr(ctx, "notice_type", "") in (NOTICE_GROUP_RECALL, NOTICE_FRIEND_RECALL)
 
 
 def _config_provider() -> Any:

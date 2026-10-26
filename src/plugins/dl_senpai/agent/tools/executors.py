@@ -55,10 +55,14 @@ async def execute_search(context: Any, call: ToolCall) -> ToolResult:
     这是唯一一个"结果要回填给模型"的工具（continuation=RETURN_TO_MODEL），
     因此 `output` 必须是模型可读的检索摘要。
     """
-    from ...web_search import searcher_from_config
+    from ...web_search import prepare_tool_queries, searcher_from_config
 
     cfg = context.config
-    queries = list(call.arguments.get("queries") or [])
+    user_text = str(getattr(context, "plain_text", "") or "").strip()
+    # 模型常把问题压成一两个词（「签到」「弓」），单搜必然跑偏 —— 实测
+    # 「你也可以找 签到」被搜成歌名。过短的检索词在这里并回用户原话，
+    # 写全的检索词原样放行，不擅自改写。
+    queries = prepare_tool_queries(list(call.arguments.get("queries") or []), user_text)
     if not queries:
         return ToolResult(
             tool_name="search", tool_call_id=call.id, success=False,
@@ -68,9 +72,7 @@ async def execute_search(context: Any, call: ToolCall) -> ToolResult:
     started = time.perf_counter()
     # 时效补搜要用**用户原话**判定（"最新/补丁/赛季"这些词在用户消息里，
     # 不在模型写出的检索词里）。拿不到就退回模型自己的检索词。
-    freshness_intent = (
-        str(getattr(context, "plain_text", "") or "").strip() or queries[0]
-    )
+    freshness_intent = user_text or queries[0]
     try:
         searcher = searcher_from_config(cfg)
         brief = await searcher.search_many(
@@ -132,8 +134,20 @@ async def execute_impression(context: Any, call: ToolCall) -> ToolResult:
     add = list(args.get("add") or [])
     remove = list(args.get("remove") or [])
     notes = args.get("notes")
+    # 这 5 个是「判断性格」的载体（vibe 气质/性格、style 说话习惯、
+    # relation 关系感、moment 难忘瞬间、pending 未说出口的心事）。
+    # 之前只读 add/remove/notes，模型即使在 tool_calls 里填了也直接丢弃，
+    # 于是人物画像里性格字段恒为空。缺失/空串统一归一成 None，
+    # 让下游 apply_updates 保持「None=不动、''=清空」的既有语义。
+    vibe = args.get("vibe")
+    style = args.get("style")
+    relation = args.get("relation")
+    moment = args.get("moment")
+    pending = args.get("pending")
 
-    if not add and not remove and not notes:
+    if not any(
+        (add, remove, notes, vibe, style, relation, moment, pending)
+    ):
         return ToolResult(
             tool_name="impression", tool_call_id=call.id, success=False,
             error="没有可写入的内容", error_type="empty_update",
@@ -149,7 +163,18 @@ async def execute_impression(context: Any, call: ToolCall) -> ToolResult:
         facade = MemoryFacade(cfg)
         facade.record_person_updates(
             MemoryRef.for_user(context.user_id, group_id=context.group_id),
-            [ImpressionUpdate(add=add, remove=remove, notes=notes)],
+            [
+                ImpressionUpdate(
+                    add=add,
+                    remove=remove,
+                    notes=notes,
+                    vibe=vibe,
+                    style=style,
+                    relation=relation,
+                    moment=moment,
+                    pending=pending,
+                )
+            ],
             context.actor,
             cfg,
         )
@@ -163,7 +188,18 @@ async def execute_impression(context: Any, call: ToolCall) -> ToolResult:
     return ToolResult(
         tool_name="impression", tool_call_id=call.id, success=True,
         output="",
-        data={"value": {"add": add, "remove": remove, "notes": notes}},
+        data={
+            "value": {
+                "add": add,
+                "remove": remove,
+                "notes": notes,
+                "vibe": vibe,
+                "style": style,
+                "relation": relation,
+                "moment": moment,
+                "pending": pending,
+            }
+        },
         duration_ms=(time.perf_counter() - started) * 1000,
     )
 
@@ -295,6 +331,9 @@ async def execute_draw(context: Any, call: ToolCall) -> ToolResult:
             archive_source_user=context.actor,
             archive_source_user_id=context.user_id,
             archive_scene=context.extra.get("draw_scene"),
+            # 本轮用户发的图透传给生图：他说「按这张画」时，那张图会真的
+            # 交给图生图接口，而不是只变成一句文字描述
+            reference_images=context.extra.get("image_urls") or [],
         )
     except Exception as exc:  # noqa: BLE001
         log_event("draw.build_failed", level="warning", error=str(exc)[:200])

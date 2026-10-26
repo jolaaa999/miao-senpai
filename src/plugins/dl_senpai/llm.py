@@ -13,7 +13,7 @@ from openai import APIError, APIStatusError, AsyncOpenAI, AuthenticationError, R
 
 from .config import PluginConfig, get_config
 from .observability.context import current_trace
-from .observability.logging import log_llm_usage
+from .observability.logging import log_event, log_llm_usage
 from .observability.metrics import metrics
 from .observability.retry import DEFAULT_RETRY_POLICY, RetryPolicy
 
@@ -40,6 +40,7 @@ from .grounding import (
 )
 from .person_memory import ImpressionUpdate, strip_impression_markers
 from .web_search import (
+    augment_queries_with_intent,
     find_trend_search_queries,
     grounding_prefetch,
     searcher_from_config,
@@ -259,6 +260,32 @@ def _prefer_stream(model: str) -> bool:
     """
     name = (model or "").lower()
     return any(x in name for x in _PREFER_STREAM_MODELS)
+
+
+@dataclass
+class _TurnPrep:
+    """`_prepare_turn` 的产出：这一轮实际生效的开关 + 已拼好的 user_payload。
+
+    打包成一个对象而不是返回 12 元组：元组一旦被谁插一个字段，
+    所有解包点会静默错位；而这里报错是"属性不存在"，一眼能看出问题。
+
+    为什么带上 searched / search_brief_text / search_detail_level：
+    它们既是预取的产出，也会在后面"多轮补搜"里被继续改写，
+    所以 chat() 拿到后立即解包成本地变量（见聊天主流程注释）。
+    """
+
+    search_enable: bool
+    draw_enable: bool
+    browser_enable: bool
+    person_memory_enable: bool
+    fewshot_enable: bool
+    write_person_memory: bool
+    user_payload: str
+    searched: bool
+    search_focus: str
+    strict_grounding: bool
+    search_brief_text: str
+    search_detail_level: str
 
 
 @dataclass
@@ -492,11 +519,325 @@ class SenpaiLLM:
         # 会被降级成一条普通历史消息，真正生效的反而是在这里重新拼的那份
         # （而网关调它时所有简报都没传，全是空串）。
         system_prompt_override: str = "",
+        status_note: str = "",
         # 原生 function calling 的工具 schema（OpenAI 形状）。
         # 传空 = 整条链路退回 marker 协议，请求体与改造前完全一致。
         tools: list[dict[str, Any]] | None = None,
     ) -> ChatResult:
         has_images = bool(image_urls)
+        # 开关解析 + 预取（联网 / 知识库 / 链接）全部搬进 `_prepare_turn`。
+        # 这一段决定了"这一轮她能用什么工具、提示里带什么材料"，
+        # 和后面的"怎么调用模型"是两个关注点，混在 625 行里时改一个必然担心另一个。
+        prep = await self._prepare_turn(
+            user_text=user_text,
+            sender_name=sender_name,
+            interrupt=interrupt,
+            card_enable=card_enable,
+            mute_enable=mute_enable,
+            card_candidates_prompt=card_candidates_prompt,
+            plain_user_text=plain_user_text,
+            search_enable=search_enable,
+            draw_enable=draw_enable,
+            browser_enable=browser_enable,
+            person_memory_enable=person_memory_enable,
+            fewshot_enable=fewshot_enable,
+            trend_titles=trend_titles,
+        )
+        # 就地解包成局部变量，而不是把下游全改成 prep.xxx：
+        # 下游还有多处会改写 searched / search_brief_text，
+        # 让它们继续操作局部变量，这次拆分才是**零行为变化**的。
+        search_enable = prep.search_enable
+        draw_enable = prep.draw_enable
+        browser_enable = prep.browser_enable
+        person_memory_enable = prep.person_memory_enable
+        fewshot_enable = prep.fewshot_enable
+        write_person_memory = prep.write_person_memory
+        user_payload = prep.user_payload
+        searched = prep.searched
+        search_focus = prep.search_focus
+        strict_grounding = prep.strict_grounding
+        search_brief_text = prep.search_brief_text
+        search_detail_level = prep.search_detail_level
+
+        messages: list[dict[str, Any]] = [
+            {
+                "role": "system",
+                # 有现成的就用现成的：runtime 侧 PromptBuilder 的输出比这里
+                # 重新拼的更完整（含记忆简报与注册表驱动的工具说明）。
+                "content": system_prompt_override or build_system_prompt(
+                    interrupt=interrupt,
+                    has_images=has_images,
+                    card_enable=card_enable,
+                    mute_enable=mute_enable,
+                    trends_brief=trends_brief,
+                    affection_brief=affection_brief,
+                    person_memory_brief=person_memory_brief,
+                    # 功能开着就注入「如何用印象」；插嘴时额外禁止写入
+                    person_memory_enable=bool(person_memory_enable),
+                    search_enable=bool(search_enable),
+                    draw_enable=bool(draw_enable),
+                    browser_enable=bool(browser_enable),
+                    private_chat=bool(private_chat),
+                    fewshot_enable=bool(fewshot_enable),
+                    inner_state_brief=inner_state_brief,
+                    group_style_brief=group_style_brief,
+                    memory_recall_brief=memory_recall_brief,
+                ),
+            },
+            *history,
+            {
+                "role": "user",
+                "content": build_user_content(
+                    user_payload,
+                    image_urls if self.config.vision_enable else None,
+                ),
+            },
+        ]
+        # 状态栏以最后一条 user 消息追加（与 AgentRuntime 一致）：
+        # 同一轮里位置越靠后越管用，写进 system 中段基本压不住。
+        if status_note:
+            messages.append({"role": "user", "content": status_note})
+        local_infer = _is_local_infer_url(self.config.active_base_url())
+        if local_infer:
+            # 本地微调：砍历史、短风格、关检索；并去掉历史里的复读 assistant
+            sys_msg = messages[0]
+            rest = _strip_echo_assistants(messages[1:])
+            rest = _trim_history_for_local(rest, _LOCAL_HISTORY_MESSAGES)
+            messages = _normalize_local_chat_messages([sys_msg, *rest])
+            if messages and messages[0].get("role") == "system":
+                messages[0] = {
+                    **messages[0],
+                    "content": _compact_local_system_prompt(),
+                }
+            search_enable = False
+            fewshot_enable = False
+            logger.info(
+                f"dl_senpai local infer trim msgs={len(messages)} "
+                f"max_tokens<={_LOCAL_MAX_TOKENS}"
+            )
+        max_tokens = (
+            self.config.interrupt_max_tokens if interrupt else self.config.max_tokens
+        )
+        if local_infer:
+            max_tokens = min(int(max_tokens), _LOCAL_MAX_TOKENS)
+        if self.config.provider() == "ollama" or local_infer:
+            timeout = 240.0 if has_images else _LOCAL_TIMEOUT
+        else:
+            timeout = 90.0 if has_images else 60.0
+
+        max_rounds = max(0, int(self.config.search_max_rounds)) if search_enable else 0
+        content = ""
+        # 原生工具调用只取**最后一轮**：检索结果回填后还会再问一次模型，
+        # 那一轮的 tool_calls 才是最终要执行的。
+        native_tool_calls: list[Any] = []
+        recent_keys = _recent_assistant_keys(messages) if local_infer else set()
+        for round_idx in range(max_rounds + 1):
+            completion = await self._complete_once(
+                messages,
+                max_tokens=max_tokens,
+                timeout=timeout,
+                tools=tools,
+            )
+            content = completion.text
+            native_tool_calls = list(completion.tool_calls)
+            if local_infer and content:
+                key = _norm_reply_key(content)
+                leaked = (
+                    "成员候选" in content
+                    or "（系统）" in content
+                    or "(系统)" in content
+                    or content.strip().startswith("【成员候选】")
+                )
+                if leaked or (key and key in recent_keys):
+                    logger.warning(
+                        f"dl_senpai local bad/echo reply blocked: {content!r}"
+                    )
+                    # 不要再塞「（系统）…」进 messages，小模型会原样发出去
+                    if messages and messages[0].get("role") == "system":
+                        messages = list(messages)
+                        messages[0] = {
+                            **messages[0],
+                            "content": (
+                                str(messages[0].get("content") or "")
+                                + "\n刚才那句作废，换一句新的短口语回复，禁止复读、禁止输出内部说明。"
+                            ),
+                        }
+                    completion = await self._complete_once(
+                        messages,
+                        max_tokens=max_tokens,
+                        timeout=timeout,
+                        tools=tools,
+                    )
+                    content = completion.text
+                    native_tool_calls = list(completion.tool_calls)
+                    key2 = _norm_reply_key(content)
+                    still_bad = (
+                        "成员候选" in content
+                        or "（系统）" in content
+                        or "(系统)" in content
+                        or (key2 and key2 in recent_keys)
+                    )
+                    if still_bad:
+                        raise LLMError(
+                            polish_reply("嗯……学姐卡壳了，你再说一遍好不好？")
+                        )
+            if not search_enable or round_idx >= max_rounds:
+                break
+            # Phase 6A：检索判定也走共享解析层（不再直接调 parse_search_request）。
+            # 这里只需要"有没有 SEARCH 调用、查询词是什么"，
+            # 由 MarkerToolAdapter 统一给出，保证与最终解析同一套正则。
+            queries = _detect_search_queries(content)
+            if not queries:
+                break
+            # 模型写 SEARCH 时常把整句压成关键词，补一条原话兜住语义
+            queries = augment_queries_with_intent(queries[:2], search_focus or "")
+            logger.info(
+                f"dl_senpai search round={round_idx + 1} queries={queries!r}"
+            )
+            searcher = searcher_from_config(self.config)
+            try:
+                brief = await searcher.search_many(
+                    queries,
+                    intent_query=search_focus or queries[0],
+                    max_chars=max(400, int(self.config.search_prompt_max_chars)),
+                    freshness_intent=search_focus or queries[0],
+                )
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"dl_senpai search failed: {e}")
+                brief = "【联网检索结果】\n（检索暂时不可用）"
+            max_chars = max(400, int(self.config.search_prompt_max_chars))
+            if len(brief) > max_chars:
+                brief = brief[: max_chars - 1].rstrip() + "…"
+            searched = True
+            search_brief_text = (
+                f"{search_brief_text}\n\n{brief}".strip()
+                if search_brief_text
+                else brief
+            )
+            search_detail_level = assess_search_detail_level(search_brief_text)
+            messages.append({"role": "assistant", "content": content})
+            messages.append(
+                {
+                    "role": "user",
+                    "content": (
+                        f"{brief}\n\n"
+                        "上面是实时联网检索结果。开口前先做两件事："
+                        "一是核对它是不是**回答了对方问的那件事**（只是沾边不算）；"
+                        "二是看**日期和版本号** —— 涉及最新/版本/赛季/补丁/更新 的问题，"
+                        "若结果没有日期或写的是旧赛季旧版本，**必须换词再搜一次**再下结论。"
+                        "换词要加年份/版本号或换成「补丁说明/更新公告/官网」角度，别原样重问。"
+                        "确认对得上、时效也没问题再回答；确实没有就说没查到、别编。"
+                    ),
+                }
+            )
+
+        if (
+            search_enable
+            and strict_grounding
+            and not interrupt
+            and content
+            and not _detect_search_queries(content)
+        ):
+            allowed_context = f"{search_brief_text}\n{search_focus}"
+            # 最多重写 _GROUNDING_MAX_RETRIES 次，每次重写后**再查一遍**。
+            # 旧实现只重写一次且不复查：模型第二遍换个说法接着编，照样直接发出去
+            # —— 没有复查就等于没有闸门。
+            for attempt in range(_GROUNDING_MAX_RETRIES + 1):
+                retry, ungrounded = should_grounding_retry(
+                    content,
+                    allowed_context=allowed_context,
+                    strict=True,
+                    detail_level=search_detail_level,
+                )
+                if not retry:
+                    break
+                if attempt >= _GROUNDING_MAX_RETRIES:
+                    # 改到上限仍不达标，说明它手里确实没有依据。再问只会得到
+                    # 换个说法的编造，所以用确定性文案收场 —— 宁可少说。
+                    logger.warning(
+                        f"dl_senpai grounding fallback ungrounded={ungrounded!r} "
+                        f"detail={search_detail_level}"
+                    )
+                    content = build_grounding_fallback_reply(ungrounded)
+                    native_tool_calls = []
+                    break
+                logger.warning(
+                    f"dl_senpai grounding retry attempt={attempt + 1} "
+                    f"ungrounded={ungrounded!r} detail={search_detail_level}"
+                )
+                messages.append({"role": "assistant", "content": content})
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": build_grounding_retry_user_message(ungrounded),
+                    }
+                )
+                try:
+                    completion = await self._complete_once(
+                        messages,
+                        max_tokens=max_tokens,
+                        timeout=timeout,
+                        tools=tools,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    # 旧实现这里没有 try：重写那次失败会把异常直接抛出去，
+                    # 连上一版答案都发不出去。宁可留着旧答案。
+                    logger.warning(f"dl_senpai grounding retry failed: {exc}")
+                    break
+                content = completion.text
+                native_tool_calls = list(completion.tool_calls)
+
+        # 出站后处理（安慰腔 / 复盘腔 / 反 AI 味 / 截断 / 拆泡）。
+        # 抽成方法不是"整理代码"：这五道工序的顺序有依赖，且每道都带自己的开关，
+        # 散在 625 行的 chat() 里既没法单独测、也没法单独改。
+        # 抽出来之后 tests/test_llm_reply_polish.py 才能钉住它的产出。
+        content = self._polish_reply(content, user_text=user_text, private_chat=private_chat)
+
+        return self._finalize_result(
+            content,
+            sender_name=sender_name,
+            native_calls=native_tool_calls,
+            card_enable=card_enable,
+            mute_enable=mute_enable,
+            searched=searched,
+            draw_enable=bool(draw_enable),
+            browser_enable=bool(browser_enable),
+            person_memory_enable=bool(write_person_memory),
+        )
+
+
+
+    async def _prepare_turn(
+        self,
+        *,
+        user_text: str,
+        sender_name: str,
+        interrupt: bool,
+        card_enable: bool,
+        mute_enable: bool,
+        card_candidates_prompt: str,
+        plain_user_text: str,
+        search_enable: bool | None,
+        draw_enable: bool | None,
+        browser_enable: bool | None,
+        person_memory_enable: bool | None,
+        fewshot_enable: bool | None,
+        trend_titles: list[str] | None,
+    ) -> "_TurnPrep":
+        """这一轮**能用什么**、**提示里放什么材料**：把 chat() 的前半段独立出来。
+
+        三件事按顺序做：
+            1. 解析能力开关（含插嘴模式下逐项禁用、本地小模型直接关掉联网）
+            2. 把用户原话组装成 user_payload（发送者前缀 / 候选卡片 / 时间提示）
+            3. 预取材料并拼进 user_payload（联网检索 / 知识库 / 链接直读）
+
+        为什么值得单独一层：这里是**唯一**决定"她这一轮手里有什么牌"的地方。
+        以前它和"怎么调用模型""怎么重试"搅在一起，
+        出现"为什么这条没联网"时只能顺序读 600 行；现在读这一个方法就够。
+
+        注意：开关一律"先看显式入参、再看配置"，因为上层（agent 工具循环）
+        会按单轮需要显式传 True/False 覆盖全局配置。
+        """
         if search_enable is None:
             search_enable = bool(self.config.search_enable)
             if interrupt and not self.config.search_allow_on_interrupt:
@@ -624,240 +965,280 @@ class SenpaiLLM:
         if browse_task_hint:
             user_payload = f"{user_payload}\n\n{browse_task_hint}"
 
-        messages: list[dict[str, Any]] = [
-            {
-                "role": "system",
-                # 有现成的就用现成的：runtime 侧 PromptBuilder 的输出比这里
-                # 重新拼的更完整（含记忆简报与注册表驱动的工具说明）。
-                "content": system_prompt_override or build_system_prompt(
-                    interrupt=interrupt,
-                    has_images=has_images,
-                    card_enable=card_enable,
-                    mute_enable=mute_enable,
-                    trends_brief=trends_brief,
-                    affection_brief=affection_brief,
-                    person_memory_brief=person_memory_brief,
-                    # 功能开着就注入「如何用印象」；插嘴时额外禁止写入
-                    person_memory_enable=bool(person_memory_enable),
-                    search_enable=bool(search_enable),
-                    draw_enable=bool(draw_enable),
-                    browser_enable=bool(browser_enable),
-                    private_chat=bool(private_chat),
-                    fewshot_enable=bool(fewshot_enable),
-                    inner_state_brief=inner_state_brief,
-                    group_style_brief=group_style_brief,
-                    memory_recall_brief=memory_recall_brief,
-                ),
-            },
-            *history,
-            {
-                "role": "user",
-                "content": build_user_content(
-                    user_payload,
-                    image_urls if self.config.vision_enable else None,
-                ),
-            },
-        ]
-        local_infer = _is_local_infer_url(self.config.active_base_url())
-        if local_infer:
-            # 本地微调：砍历史、短风格、关检索；并去掉历史里的复读 assistant
-            sys_msg = messages[0]
-            rest = _strip_echo_assistants(messages[1:])
-            rest = _trim_history_for_local(rest, _LOCAL_HISTORY_MESSAGES)
-            messages = _normalize_local_chat_messages([sys_msg, *rest])
-            if messages and messages[0].get("role") == "system":
-                messages[0] = {
-                    **messages[0],
-                    "content": _compact_local_system_prompt(),
-                }
-            search_enable = False
-            fewshot_enable = False
-            logger.info(
-                f"dl_senpai local infer trim msgs={len(messages)} "
-                f"max_tokens<={_LOCAL_MAX_TOKENS}"
-            )
-        max_tokens = (
-            self.config.interrupt_max_tokens if interrupt else self.config.max_tokens
-        )
-        if local_infer:
-            max_tokens = min(int(max_tokens), _LOCAL_MAX_TOKENS)
-        if self.config.provider() == "ollama" or local_infer:
-            timeout = 240.0 if has_images else _LOCAL_TIMEOUT
-        else:
-            timeout = 90.0 if has_images else 60.0
-
-        max_rounds = max(0, int(self.config.search_max_rounds)) if search_enable else 0
-        content = ""
-        # 原生工具调用只取**最后一轮**：检索结果回填后还会再问一次模型，
-        # 那一轮的 tool_calls 才是最终要执行的。
-        native_tool_calls: list[Any] = []
-        recent_keys = _recent_assistant_keys(messages) if local_infer else set()
-        for round_idx in range(max_rounds + 1):
-            completion = await self._complete_once(
-                messages,
-                max_tokens=max_tokens,
-                timeout=timeout,
-                tools=tools,
-            )
-            content = completion.text
-            native_tool_calls = list(completion.tool_calls)
-            if local_infer and content:
-                key = _norm_reply_key(content)
-                leaked = (
-                    "成员候选" in content
-                    or "（系统）" in content
-                    or "(系统)" in content
-                    or content.strip().startswith("【成员候选】")
-                )
-                if leaked or (key and key in recent_keys):
-                    logger.warning(
-                        f"dl_senpai local bad/echo reply blocked: {content!r}"
-                    )
-                    # 不要再塞「（系统）…」进 messages，小模型会原样发出去
-                    if messages and messages[0].get("role") == "system":
-                        messages = list(messages)
-                        messages[0] = {
-                            **messages[0],
-                            "content": (
-                                str(messages[0].get("content") or "")
-                                + "\n刚才那句作废，换一句新的短口语回复，禁止复读、禁止输出内部说明。"
-                            ),
-                        }
-                    completion = await self._complete_once(
-                        messages,
-                        max_tokens=max_tokens,
-                        timeout=timeout,
-                        tools=tools,
-                    )
-                    content = completion.text
-                    native_tool_calls = list(completion.tool_calls)
-                    key2 = _norm_reply_key(content)
-                    still_bad = (
-                        "成员候选" in content
-                        or "（系统）" in content
-                        or "(系统)" in content
-                        or (key2 and key2 in recent_keys)
-                    )
-                    if still_bad:
-                        raise LLMError(
-                            polish_reply("嗯……学姐卡壳了，你再说一遍好不好？")
-                        )
-            if not search_enable or round_idx >= max_rounds:
-                break
-            # Phase 6A：检索判定也走共享解析层（不再直接调 parse_search_request）。
-            # 这里只需要"有没有 SEARCH 调用、查询词是什么"，
-            # 由 MarkerToolAdapter 统一给出，保证与最终解析同一套正则。
-            queries = _detect_search_queries(content)
-            if not queries:
-                break
-            queries = queries[:2]
-            logger.info(
-                f"dl_senpai search round={round_idx + 1} queries={queries!r}"
-            )
-            searcher = searcher_from_config(self.config)
-            try:
-                brief = await searcher.search_many(
-                    queries,
-                    intent_query=search_focus or queries[0],
-                    max_chars=max(400, int(self.config.search_prompt_max_chars)),
-                    freshness_intent=search_focus or queries[0],
-                )
-            except Exception as e:  # noqa: BLE001
-                logger.warning(f"dl_senpai search failed: {e}")
-                brief = "【联网检索结果】\n（检索暂时不可用）"
-            max_chars = max(400, int(self.config.search_prompt_max_chars))
-            if len(brief) > max_chars:
-                brief = brief[: max_chars - 1].rstrip() + "…"
-            searched = True
-            search_brief_text = (
-                f"{search_brief_text}\n\n{brief}".strip()
-                if search_brief_text
-                else brief
-            )
-            search_detail_level = assess_search_detail_level(search_brief_text)
-            messages.append({"role": "assistant", "content": content})
-            messages.append(
-                {
-                    "role": "user",
-                    "content": (
-                        f"{brief}\n\n"
-                        "上面是实时联网检索结果。开口前先做两件事："
-                        "一是核对它是不是**回答了对方问的那件事**（只是沾边不算）；"
-                        "二是看**日期和版本号** —— 涉及最新/版本/赛季/补丁/更新 的问题，"
-                        "若结果没有日期或写的是旧赛季旧版本，**必须换词再搜一次**再下结论。"
-                        "换词要加年份/版本号或换成「补丁说明/更新公告/官网」角度，别原样重问。"
-                        "确认对得上、时效也没问题再回答；确实没有就说没查到、别编。"
-                    ),
-                }
-            )
-
-        if (
-            search_enable
-            and strict_grounding
-            and not interrupt
-            and content
-            and not _detect_search_queries(content)
+        # 主动读链接：对方贴了 URL 就先读一遍再让她开口。
+        # 为什么不等她想起调 <<<READ>>>：群里最常见的是「甩个链接 + 这啥」，
+        # 没正文时模型只能顺着 URL 里的英文单词猜——猜错比说不出更糟。
+        # 失败也会注入一句「读不到」，这样她说的是「打不开」而不是编内容。
+        if bool(getattr(self.config, "link_read_enable", False)) and bool(
+            getattr(self.config, "link_read_auto", False)
         ):
-            allowed_context = f"{search_brief_text}\n{search_focus}"
-            # 最多重写 _GROUNDING_MAX_RETRIES 次，每次重写后**再查一遍**。
-            # 旧实现只重写一次且不复查：模型第二遍换个说法接着编，照样直接发出去
-            # —— 没有复查就等于没有闸门。
-            for attempt in range(_GROUNDING_MAX_RETRIES + 1):
-                retry, ungrounded = should_grounding_retry(
-                    content,
-                    allowed_context=allowed_context,
-                    strict=True,
-                    detail_level=search_detail_level,
-                )
-                if not retry:
-                    break
-                if attempt >= _GROUNDING_MAX_RETRIES:
-                    # 改到上限仍不达标，说明它手里确实没有依据。再问只会得到
-                    # 换个说法的编造，所以用确定性文案收场 —— 宁可少说。
-                    logger.warning(
-                        f"dl_senpai grounding fallback ungrounded={ungrounded!r} "
-                        f"detail={search_detail_level}"
-                    )
-                    content = build_grounding_fallback_reply(ungrounded)
-                    native_tool_calls = []
-                    break
-                logger.warning(
-                    f"dl_senpai grounding retry attempt={attempt + 1} "
-                    f"ungrounded={ungrounded!r} detail={search_detail_level}"
-                )
-                messages.append({"role": "assistant", "content": content})
-                messages.append(
-                    {
-                        "role": "user",
-                        "content": build_grounding_retry_user_message(ungrounded),
-                    }
-                )
-                try:
-                    completion = await self._complete_once(
-                        messages,
-                        max_tokens=max_tokens,
-                        timeout=timeout,
-                        tools=tools,
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    # 旧实现这里没有 try：重写那次失败会把异常直接抛出去，
-                    # 连上一版答案都发不出去。宁可留着旧答案。
-                    logger.warning(f"dl_senpai grounding retry failed: {exc}")
-                    break
-                content = completion.text
-                native_tool_calls = list(completion.tool_calls)
+            try:
+                from .link_reader import auto_read_brief
 
-        return self._finalize_result(
-            content,
-            sender_name=sender_name,
-            native_calls=native_tool_calls,
-            card_enable=card_enable,
-            mute_enable=mute_enable,
-            searched=searched,
+                link_brief = await auto_read_brief(search_focus, self.config)
+                if link_brief:
+                    user_payload = f"{user_payload}\n\n{link_brief}"
+            except Exception as exc:  # noqa: BLE001 — 读不到链接不能影响正常回复
+                logger.info(f"dl_senpai link prefetch skipped: {type(exc).__name__}: {exc}")
+
+        # 技能层：命中才注入（没命中一个字符都不加）。
+        # 放在最后一步：它要看的"用户原话"是 search_focus，
+        # 而技能正文与其他材料一样属于"这一轮的临时材料"，拼进 user_payload。
+        # 默认关闭，失败静默（build_skill_brief 内部吞异常并记日志）。
+        if bool(getattr(self.config, "skill_enable", False)):
+            from .skills import build_skill_brief
+
+            skill_brief_text = build_skill_brief(search_focus, self.config)
+            if skill_brief_text:
+                user_payload = f"{user_payload}\n\n{skill_brief_text}"
+
+        return _TurnPrep(
+            search_enable=bool(search_enable),
             draw_enable=bool(draw_enable),
             browser_enable=bool(browser_enable),
-            person_memory_enable=bool(write_person_memory),
+            person_memory_enable=bool(person_memory_enable),
+            fewshot_enable=bool(fewshot_enable),
+            write_person_memory=bool(write_person_memory),
+            user_payload=user_payload,
+            searched=searched,
+            search_focus=search_focus,
+            strict_grounding=strict_grounding,
+            search_brief_text=search_brief_text,
+            search_detail_level=search_detail_level,
         )
+
+
+    def _polish_reply(
+        self,
+        content: str,
+        *,
+        user_text: str,
+        private_chat: bool,
+    ) -> str:
+        """出站前的确定性后处理：把模型原文变成「要发的那句话」。
+
+        为什么用规则而不是再问一次模型：这一层要修的三件事
+        （安慰腔、助手腔、小作文）恰好都是模型压不住的东西——
+        提示词写死字数没用，让它自评要么输出空、要么反过来点评你。
+        规则做的好处是效果可回归、可度量、可回滚。
+
+        五道工序**顺序不能换**（每条都有实测原因）：
+            1. 安慰腔剥离：只剪逗号级小句，整句砍会连有用的话一起扔
+            2. 复盘腔收敛：必须在反 AI 味**之前**，否则整段复盘会被逐句删成碎句
+            3. 反 AI 味：必须在截断**之前**，否则截断会把助手腔句子切成半句、更难删
+            4. 按句截断 / 拆泡：字数是模型唯一压不住的东西，只能出站按句切
+            5. 像不像人：只记录不修改，供以后按数据调提示词
+
+        每道工序各自 try/except 吞异常：后处理失败最坏是"这条不够像人"，
+        抛出异常就是"这条发不出去"——两害相权取其轻。
+        """
+        # 安慰腔：只记录，不后置改写。
+        #
+        # 三条后置修正的路都试过，都不成立，写在这儿省得下一个人再试一遍：
+        # 1) 让模型判「这句在安慰吗」：max_tokens<=128 正文为空（推理先把额度吃光），
+        #    给到 256 又不理「只回答是或否」，改成长篇点评——每次要 250+ token
+        #    加 2~5 秒延迟，占消息三成，不值。
+        # 2) 让模型改写这句回复：同样要么空、要么输出「可以回得更具体一点…温柔版：」
+        #    这种点评，压根不是要发的话。
+        # 3) 给它学姐人格让它重说一句：照样「辛苦了、身体要紧、摸摸」加建议清单。
+        #
+        # 根因不在提示词位置，在这个模型对「短、别安慰」这类约束的服从度本身就低。
+        # 所以这里退回「记录」：线上真实比例能数出来，改哪层再拿数据决定，
+        # 而不是继续加机器去赌。
+        try:
+            from .humanize import (
+                ai_flavor_score,
+                collapse_multiline,
+                collapse_self_review,
+                humanize_text,
+                keep_first_enumeration,
+                strip_opening_echo,
+            )
+            from .tone import (
+                classify_tone,
+                has_comfort_tone,
+                is_casual_prompt,
+                strip_comfort_clauses,
+                shape_bubbles,
+    trim_to_sentence_budget,
+            )
+
+            strip_enable = bool(
+                getattr(self.config, "comfort_strip_enable", True)
+            )
+            if (
+                strip_enable
+                and classify_tone(user_text) == "vent"
+                and has_comfort_tone(content)
+            ):
+                # 出站前把安慰的那个小句剪掉。不靠模型听话，靠确定性处理——
+                # 让它判、让它改、带人格重说三条路都试过，输出的都是不能发的东西。
+                # 这里只删逗号级小句，整句砍会把有用的话一起扔了。
+                before = content
+                content = strip_comfort_clauses(content)
+                log_event(
+                    "llm.comfort_stripped",
+                    before_len=len(before),
+                    after_len=len(content),
+                )
+        except Exception:  # noqa: BLE001 — 过滤失败绝不能挡住回复
+            pass
+
+        # 复盘腔 / 点评自己：先把整段自我诊断收成一句（见 humanize.collapse_self_review）。
+        #
+        # 为什么排在反 AI 味之前：那段「说实话，我刚才的回答确实偏了，抱歉。翻回去看……」
+        # 结构上是由多个正常句拼成的，逐句删 AI 腔只会删成碎句；
+        # 只有在**整条**层面判「这是复盘报告」，才能一次收干净。
+        try:
+            if bool(getattr(self.config, "self_review_collapse_enable", True)):
+                before = content
+                content = collapse_self_review(content, context=user_text)
+                if content != before:
+                    log_event(
+                        "llm.self_review_collapsed",
+                        before_len=len(before),
+                        after_len=len(content),
+                    )
+        except Exception:  # noqa: BLE001 — 收缩失败绝不能挡住回复
+            pass
+
+        # 反 AI 味：把「一眼像助手」的固定说法剪掉。
+        # 来源是 sakurawwwxh/qq-agent-plus 的 humanize.js（分严重/轻微两档）。
+        # 放在截断**之前**：先删该删的句子，再按预算累加；
+        # 反过来的话截断会把一条完整的助手腔句子切成半句，更难删干净。
+        try:
+            if bool(getattr(self.config, "humanize_enable", True)):
+                before = content
+                cleaned, tells = humanize_text(
+                    content,
+                    soft=bool(getattr(self.config, "humanize_soft_enable", True)),
+                    # 把本轮用户原话带进去：她先被问「Redis 缓存为什么没生效」时，
+                    # 「不是缓存的问题，是连接池」是纠错，不是翻案腔，不能删。
+                    context=user_text,
+                    # 口语替换（因此→所以、是否→是不是）只对随口一句生效：
+                    # 答疑长回复里那些是正常书面语，换掉反而含糊。
+                    casual=bool(
+                        getattr(self.config, "casual_speak_swaps_enable", True)
+                    )
+                    and is_casual_prompt(
+                        user_text,
+                        max_chars=int(
+                            getattr(self.config, "casual_prompt_max_chars", 25) or 25
+                        ),
+                    ),
+                )
+                # 删空了要退回原句：宁可留一句 AI 腔，也不能发一条空消息
+                if cleaned and cleaned != before:
+                    content = cleaned
+                    log_event(
+                        "llm.humanized",
+                        before_len=len(before),
+                        after_len=len(cleaned),
+                        labels=",".join(sorted({t["label"] for t in tells})),
+                    )
+        except Exception:  # noqa: BLE001 — 清洗失败绝不能挡住回复
+            pass
+
+        # 随口一句却回了小作文：按整句累加到预算为止。
+        #
+        # 为什么走确定性截断而不是再让模型改：字数是这个模型唯一压不住的东西。
+        # 人设里的「不超过 60 字」没用，提示词末尾没用，本轮直接写「别超过 30 字」
+        # 也没用——实测该 164 字还是 164 字。既然嘴管不住，就出站时按句截。
+        # 只在句末标点后切，绝不吐半句话。
+        try:
+            # 私聊单独一个预算：私聊本该多说两句，用群聊的 60 会压成客服腔
+            trim_chars = int(
+                getattr(
+                    self.config,
+                    "private_trim_chars" if private_chat else "casual_trim_chars",
+                    150 if private_chat else 60,
+                )
+                or 0
+            )
+            # 真倾诉那一条要放宽：她这时候本来就该多接一句。
+            # 用同一个预算会把安慰剪掉——实测倾诉组的安慰率从 33% 掉到 11%。
+            if classify_tone(user_text) == "distress":
+                trim_chars *= 2
+            if trim_chars > 0 and is_casual_prompt(
+                user_text,
+                max_chars=int(
+                    getattr(self.config, "casual_prompt_max_chars", 25) or 25
+                ),
+            ):
+                # 先压平清单再算长度：不然「分类清单」会被当成一句话截断，
+                # 出来是「看你想吃哪类，省事：番茄鸡蛋面」这种半截菜单。
+                if bool(getattr(self.config, "humanize_enable", True)):
+                    # 先砍「把你的话复述一遍」的开场：
+                    # 「作业写到两点」→「凌晨两点还在写作业，基本是在硬撑」，
+                    # 前半句是复述，真人直接接后半句
+                    echoed = strip_opening_echo(content, user_text)
+                    if echoed != content:
+                        content = echoed
+                        log_event("llm.echo_stripped", after_len=len(content))
+                    # 开拆泡时不压平换行：她的换行就是「分两条发」的意图。
+                    # 压平了出站就拆不出来，只能塞成一条（那就又回到机器人形态）。
+                    bubble_max = int(getattr(self.config, "bubble_max", 1) or 1)
+                    if bubble_max < 2:
+                        collapsed = collapse_multiline(content)
+                        if collapsed and collapsed != content:
+                            content = collapsed
+                            log_event("llm.lines_collapsed", after_len=len(content))
+                    # 再只留第一项：一张菜单压平成一行还是菜单。
+                    # 注意必须在 collapse **之后**：原始回复是
+                    # 「看情况选\n- 想省事：…\n- 想清淡：…」，标签前面挂着换行和列表符号，
+                    # 按逗号切出来第一项是「看情况选\n- 想省事：…」，匹配不上标签，
+                    # 于是整条原样放过——这个顺序我一开始写反了。
+                    narrowed = keep_first_enumeration(content)
+                    if narrowed != content:
+                        content = narrowed
+                        log_event("llm.enum_narrowed", after_len=len(content))
+                before_len = len(content)
+                bubble_max = int(getattr(self.config, "bubble_max", 1) or 1)
+                if bubble_max >= 2:
+                    # 拆泡路线：不压成一句，改成 2~N 句短话（用换行分隔），
+                    # 由出站按行拆成多条消息发出去。字数预算不变。
+                    content = shape_bubbles(
+                        content, max_bubbles=bubble_max, max_chars=trim_chars
+                    )
+                    # 两种结果都要打点：只记「长度变了」那种，就数不出
+                    # 拆泡比例（模型本来就写一行短句时长度不变，等于漏计分母），
+                    # 而这轮改动的效果判断只能靠这个比例。
+                    bubbles = content.count("\n") + 1
+                    log_event(
+                        "llm.reply_shaped" if bubbles >= 2 else "llm.reply_single",
+                        before_len=before_len,
+                        after_len=len(content),
+                        bubbles=bubbles,
+                    )
+                else:
+                    content = trim_to_sentence_budget(content, trim_chars)
+                    if len(content) != before_len:
+                        log_event(
+                            "llm.reply_trimmed",
+                            before_len=before_len,
+                            after_len=len(content),
+                        )
+        except Exception:  # noqa: BLE001 — 截断失败就更不能挡回复
+            pass
+
+        # 「像不像人」指标：只记录，不改写。
+        # 改提示词有没有用，看这条日志的 score 分布，不靠眼睛。
+        try:
+            if bool(getattr(self.config, "ai_flavor_log_enable", True)):
+                score, labels = ai_flavor_score(content, context=user_text)
+                if score >= 2:
+                    log_event(
+                        "llm.ai_flavor",
+                        level="warning",
+                        score=score,
+                        labels=",".join(labels),
+                        chars=len(content),
+                    )
+        except Exception:  # noqa: BLE001 — 观测失败绝不能挡住回复
+            pass
+
+        return content
+
 
     async def _complete_once(
         self,
@@ -956,7 +1337,11 @@ class SenpaiLLM:
                     f"(status={_status_code(e)}, attempt={attempt + 1}/{self._retry.max_attempts}): {e}"
                 )
                 if _is_transient(e) and self._retry.should_retry_transient(attempt):
-                    delay = self._retry.delay_for_transient(attempt)
+                    # 抖动加在**实际等待**上：多个群同时撞上中转 502 时，
+                    # 按同一串退避值重试等于同一秒再打一遍上游。
+                    delay = self._retry.jitter_for(
+                        self._retry.delay_for_transient(attempt)
+                    )
                     logger.warning(f"dl_senpai LLM retry in {delay:.1f}s")
                     await self._retry.sleep(delay)
                     continue
@@ -968,7 +1353,9 @@ class SenpaiLLM:
                     f"(attempt={attempt + 1}/{self._retry.max_attempts}): {type(e).__name__}: {e}"
                 )
                 if self._retry.should_retry_unexpected(attempt):
-                    delay = self._retry.delay_for_unexpected(attempt)
+                    delay = self._retry.jitter_for(
+                        self._retry.delay_for_unexpected(attempt)
+                    )
                     await self._retry.sleep(delay)
                     continue
                 raise LLMError(
@@ -1110,9 +1497,11 @@ class SenpaiLLM:
         from .agent.legacy_adapter import LegacyChatResultAdapter
         from .agent.tools.builtin import register_production_tools
         from .agent.tools.creator_tools import register_creator_tools
-        from .agent.tools.high_risk import register_high_risk_tools
+        from .agent.tools.high_risk import register_high_risk_tools, register_extra_layers
         from .agent.tools.marker_adapter import MarkerToolAdapter
         from .agent.tools.memory_tool import register_memory_tool
+        from .agent.tools.diary_tool import register_diary_tool
+        from .agent.tools.note_tool import register_note_tool
         from .agent.tools.registry import get_tool_registry
         from .knowledge_setup import register_knowledge_tool
 
@@ -1127,7 +1516,12 @@ class SenpaiLLM:
         # 所以注册它不会改变「未配置知识库时」的提示词内容。
         register_knowledge_tool(registry)
         register_memory_tool(registry)
+        # 记心事：把心绪手札的写入权交给她自己（数据与注入见 inner_state）
+        register_note_tool(registry)
+        # 日记工具：让她能回应「快到期了」那条提醒（留 / 升档 / 搁着 / 划掉）
+        register_diary_tool(registry)
         register_high_risk_tools(registry)
+        register_extra_layers(registry)
         # 生成层（Word/PPT）对所有群友可见，单独注册见 creator_tools 的说明。
         register_creator_tools(registry)
         adapter = MarkerToolAdapter(registry)
@@ -1187,9 +1581,18 @@ class SenpaiLLM:
         # —— 那是 Phase 6A 之前的第二套解析入口。
 
         # -- 2) 文本清理 --
+        # 工具轮（生图 / 截图）不补正文兜底：媒体才是这一轮要发的东西。
+        # 线上原样是「在呢～」+图，一天出现过十几次。
+        _visual_tools = {"draw", "browse", "screenshot"}
+        _has_visual = any(
+            str(getattr(call, "name", "")) in _visual_tools for call in all_calls
+        )
         polished = polish_reply(
             truncate_reply(text, self.config.reply_hard_max_chars),
             speaker=sender_name,
+            # 兜底文案按「跟谁在聊」分桶，避免 A 群的沉默影响到 B 群
+            session_key=sender_name,
+            allow_fallback=not _has_visual,
         )
 
         # -- 3) 形状转换 --
@@ -1275,10 +1678,30 @@ def _instrument_model_call(
         pass
 
 
+# 句末记号：中文句号/问叹号/省略号/换行都算「这句话说完了」
+_SENTENCE_ENDS = "。！？…!?\n"
+
+
 def truncate_reply(text: str, max_chars: int) -> str:
+    """超长时截断，但**只在句子边界上切**。
+
+    为什么不直接切在 max_chars：切在字中间会变成
+    「我今天去了武汉科技大学，然后我们…」，半句话比长回复更伤观感。
+    所以先往回找最近的句末记号；实在找不到（整段没有标点）才硬切。
+
+    max_chars <= 0 = 不截断。默认就是这么配的：日常回复根本到不了这个量级，
+    这道闸只防模型跑飞把整段话灌进群里。
+    """
     text = text.strip()
     if max_chars <= 0 or len(text) <= max_chars:
         return text
+
+    window = text[:max_chars]
+    # rfind 取最后一个句末记号：rfind 找不到返回 -1，+1 后正好是 0，
+    # 与「没有可用边界」合并判断
+    boundary = max(window.rfind(ch) for ch in _SENTENCE_ENDS) + 1
+    if boundary > 0:
+        return window[:boundary].rstrip()
     cut = text[: max_chars - 1].rstrip()
     return cut + "…"
 
@@ -1297,9 +1720,11 @@ def _detect_search_queries(content: str) -> list[str]:
     try:
         from .agent.tools.builtin import register_production_tools
         from .agent.tools.creator_tools import register_creator_tools
-        from .agent.tools.high_risk import register_high_risk_tools
+        from .agent.tools.high_risk import register_high_risk_tools, register_extra_layers
         from .agent.tools.marker_adapter import MarkerToolAdapter
         from .agent.tools.memory_tool import register_memory_tool
+        from .agent.tools.diary_tool import register_diary_tool
+        from .agent.tools.note_tool import register_note_tool
         from .agent.tools.registry import get_tool_registry
         from .knowledge_setup import register_knowledge_tool
 
@@ -1308,7 +1733,12 @@ def _detect_search_queries(content: str) -> list[str]:
             register_production_tools(registry)
         register_knowledge_tool(registry)
         register_memory_tool(registry)
+        # 记心事：把心绪手札的写入权交给她自己（数据与注入见 inner_state）
+        register_note_tool(registry)
+        # 日记工具：与上面同理，注册表可能是这一条路径先填的
+        register_diary_tool(registry)
         register_high_risk_tools(registry)
+        register_extra_layers(registry)
         register_creator_tools(registry)
         parsed = MarkerToolAdapter(registry).parse_response(content or "")
         for call in parsed.calls:

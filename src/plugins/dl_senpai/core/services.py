@@ -127,6 +127,8 @@ SERVICE_METRICS = "metrics"
 # Phase 4
 SERVICE_TOOLS = "tools"
 SERVICE_AGENT = "agent"
+# 扩展登记表：声明式装载/摘除（MCP 等外部能力来源走这里）
+SERVICE_EXTENSIONS = "extensions"
 
 
 __all__ = [
@@ -143,4 +145,5 @@ __all__ = [
     "SERVICE_METRICS",
     "SERVICE_TOOLS",
     "SERVICE_AGENT",
+    "SERVICE_EXTENSIONS",
 ]

@@ -136,8 +136,54 @@ def get_runtime() -> ConfigRuntime:
     return _runtime
 
 
+_shadow_warned = False
+
+
+def _warn_dotenv_shadowing() -> None:
+    """两个 dotenv 里有同名键时告警一次。
+
+    为什么值得专门写：加载顺序是 (.env, .env.dev)，后读的 .env.dev **覆盖**前面。
+    于是「我在 .env 里改了这项，怎么没生效」会有一次找很久的排查——
+    实际值来自 .env.dev。这一条今天就踩了两次。
+    不改加载顺序（.env.dev 作为本地覆盖是合理设计），只是把它说出来。
+    """
+    global _shadow_warned
+    if _shadow_warned:
+        return
+    _shadow_warned = True
+    try:
+        from pathlib import Path
+
+        from ..observability.logging import log_event
+
+        def _keys(path: Path) -> set[str]:
+            if not path.is_file():
+                return set()
+            out: set[str] = set()
+            for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                out.add(line.split("=", 1)[0].strip())
+            return out
+
+        base = Path(".env")
+        dev = Path(".env.dev")
+        shadowed = sorted(_keys(base) & _keys(dev))
+        if shadowed:
+            log_event(
+                "config.dotenv_shadowed",
+                count=len(shadowed),
+                keys=",".join(shadowed[:12]),
+                hint=".env.dev 覆盖 .env",
+            )
+    except Exception:  # noqa: BLE001 — 告警失败绝不能影响取配置
+        pass
+
+
 def get_config() -> Any:
     """取缓存配置（现有代码的主入口）。"""
+    _warn_dotenv_shadowing()
     return _runtime.get()
 
 

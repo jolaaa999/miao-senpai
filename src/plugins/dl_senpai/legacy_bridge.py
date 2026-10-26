@@ -19,6 +19,7 @@ AgentRuntime 自己不允许创建绕过 executor 的消息级 task。
 
 from __future__ import annotations
 
+import re
 import time
 from typing import Any
 
@@ -244,19 +245,77 @@ def _assemble_memory(
     # 单独一段而不是塞进 history——那些消息不是对话轮次，混进去会让
     # user/assistant 交替结构错乱。
     try:
-        _fill_recent_chat_brief(cfg, ctx, session_id, query, extra)
+        _fill_recent_chat_brief(
+            cfg, ctx, session_id, query, extra, history=list(snapshot.history)
+        )
     except Exception:  # noqa: BLE001 — 背景读不出来最多是聊得没上下文
+        pass
+
+    # 跨场合对话流：她在别处接过的话。
+    # 为什么和上面那段并存：RecentChat 记的是**本会话发生过的消息**，
+    # 这一段记的是**她在别的场合实际接过的轮次**。同一个人换个地方，
+    # 前者完全帮不上忙——这正是「换个群就不认识你」的根因。
+    try:
+        if bool(getattr(cfg, "cross_chat_enable", True)):
+            from .cross_chat import build_cross_brief
+
+            brief = build_cross_brief(
+                current_where=session_id,
+                n=int(getattr(cfg, "cross_chat_recent_n", 8) or 8),
+                max_chars=int(getattr(cfg, "cross_chat_max_chars", 800) or 800),
+                directory=getattr(cfg, "cross_chat_dir", None),
+            )
+            if brief:
+                extra["cross_chat_brief"] = brief
+                log_event("agent.cross_chat", chars=len(brief))
+    except Exception:  # noqa: BLE001 — 这段是锦上添花，失败不挡对话
+        pass
+
+    # 她自己的日记：跟「今天群里聊过什么」并列的另一段背景，
+    # 让她记得「我昨天写过什么」，不至于天天从同一个角度开口。
+    try:
+        _fill_diary_brief(cfg, extra, inner_key)
+    except Exception:  # noqa: BLE001 — 日记读不出来最多是少一段回味
+        pass
+
+    # 长度纪律：必须最后注入（PromptBuilder 也把它拼在末尾）。
+    # 人设中段的规则压不住输出长度，这条得贴着本轮消息放。
+    try:
+        _fill_brevity_hint(cfg, extra)
+    except Exception:  # noqa: BLE001 — 少了这段最多是话变长，不影响对话
+        pass
+
+    # 本轮语气判断：排在长度纪律**之后**，也就是整个提示词的最后一段。
+    # 它比长度纪律更需要贴着本轮消息——判的是「这一句要不要安慰」。
+    try:
+        extra["_ctx"] = ctx
+        _fill_tone_hint(cfg, query, extra, history=list(snapshot.history))
+    except Exception:  # noqa: BLE001 — 判不出来按普通处理，不能挡住回复
         pass
     return list(snapshot.history), snapshot.recalled
 
 
+def _norm_dedup(text: Any) -> str:
+    """去重用的归一化：只留字符，抹掉空白与换行差异。"""
+    return re.sub(r"\s+", "", str(text or ""))
+
+
 def _fill_recent_chat_brief(
-    cfg: Any, ctx: Any, session_id: str, query: str, extra: dict[str, Any]
+    cfg: Any,
+    ctx: Any,
+    session_id: str,
+    query: str,
+    extra: dict[str, Any],
+    history: list[dict[str, Any]] | None = None,
 ) -> None:
     """把当天流水渲染进 extra["recent_chat_brief"]。
 
     排除当前这条触发消息：它马上就要以本轮 user 输入的身份出现，
     留在背景里会让模型看到两遍同一句话。
+
+    还要排除**已经在 history 里的消息**。两者时间范围大面积重叠
+    （history 24 条 ≈ 最近十几分钟，流水也是），同一段对话在提示词里
+    出现两遍的直接后果就是复述——线上被人指出「一本正经地重复废话」。
     """
     if not bool(getattr(cfg, "recent_chat_enable", True)):
         return
@@ -266,6 +325,25 @@ def _fill_recent_chat_brief(
     entries = store.entries(session_id)
     if not entries:
         return
+
+    # 与 history 去重：命中的说明模型已经以 messages 形式看到了
+    if history:
+        seen = [
+            _norm_dedup(m.get("content"))
+            for m in history
+            if isinstance(m, dict) and _norm_dedup(m.get("content"))
+        ]
+        kept = []
+        for entry in entries:
+            norm = _norm_dedup(getattr(entry, "text", ""))
+            if norm and len(norm) >= 4 and any(
+                norm == h or (len(h) > 6 and (norm in h or h in norm)) for h in seen
+            ):
+                continue
+            kept.append(entry)
+        entries = kept
+        if not entries:
+            return
 
     raw_event = getattr(ctx, "raw_event", None)
     current_id = str(getattr(raw_event, "message_id", "") or "")
@@ -280,6 +358,127 @@ def _fill_recent_chat_brief(
     )
     if brief:
         extra["recent_chat_brief"] = brief
+
+
+def _fill_brevity_hint(cfg: Any, extra: dict[str, Any]) -> None:
+    """把长度纪律写进 extra["brevity_hint"]。
+
+    默认开：她原来会把「群里问一句」答成三段落，这是最常见的抱怨。
+    想关掉就设 DL_SENPAI_REPLY_BREVITY_ENABLE=false。
+    """
+    if not bool(getattr(cfg, "reply_brevity_enable", True)):
+        return
+    from .brevity import build_brevity_hint
+
+    hint = build_brevity_hint(True)
+    if hint:
+        extra["brevity_hint"] = hint
+
+
+def _fill_tone_hint(
+    cfg: Any, query: str, extra: dict[str, Any], *, history: list[Any] | None = None
+) -> None:
+    """判断本轮是「吐槽」还是「真倾诉」，把结论写进 extra["tone_hint"]。
+
+    为什么要判定而不是写死规则：人设里那条「日常吐槽不是情绪求助」连
+    「今天好累」都点名了，实测照样进安慰模式——通用规则对这一轮不够具体。
+    判定结论是**这一轮**的指令，位置又贴在提示词最末，压得住。
+
+    判定失败一律当作 normal：语气提示缺失最多是回复平淡一句，
+    绝不能因为它读崩了让整轮回复出不来。
+    """
+    if not bool(getattr(cfg, "tone_classify_enable", True)):
+        return
+    from .tone import (
+        build_casual_hint,
+        build_tone_hint,
+        classify_tone,
+        is_casual_prompt,
+        tone_label,
+    )
+
+    recent: list[str] = []
+    for item in list(history or [])[-6:]:
+        text = ""
+        if isinstance(item, dict):
+            text = str(item.get("content") or "")
+        else:
+            text = str(item)
+        if text:
+            recent.append(text)
+
+    verdict = classify_tone(query, recent=recent)
+    # 打日志是为了让「还犯不犯」能数出来，而不是靠截图去碰
+    log_event(
+        "llm.tone",
+        session_id=getattr(extra.get("_ctx"), "session_id", None) or None,
+        verdict=verdict,
+        label=tone_label(verdict),
+    )
+    parts: list[str] = []
+    hint = build_tone_hint(verdict)
+    if hint:
+        parts.append(hint)
+    # 梗密度：每轮一贴的分档提示。
+    # 为什么不靠人设里那句「可以轻度接梗」——那种写法等于没有约束，
+    # 实测要么一轮堆几个梗，要么正经答疑里也硬塞一个。
+    try:
+        from .meme import build_meme_hint, resolve_level
+
+        level = resolve_level(
+            getattr(cfg, "meme_level", "auto"),
+            verdict=verdict,
+            casual=is_casual_prompt(query),
+            user_text=query,
+        )
+        meme = build_meme_hint(level)
+        if meme:
+            parts.append(meme)
+        log_event("llm.meme", level=level)
+    except Exception:  # noqa: BLE001 — 梗密度算不出来就别贴，绝不挡回复
+        pass
+    # 随口一句的，再给一条本轮字数。放在语气判断之后 = 整个提示词的最后
+    try:
+        if is_casual_prompt(query):
+            casual = build_casual_hint(
+                int(getattr(cfg, "casual_reply_hint_chars", 30) or 0)
+            )
+            if casual:
+                parts.append(casual)
+    except Exception:  # noqa: BLE001
+        pass
+    if parts:
+        extra["tone_hint"] = "\n".join(parts)
+
+
+def _fill_diary_brief(cfg: Any, extra: dict[str, Any], inner_key: str = "") -> None:
+    """把最近几篇日记渲染进 extra["diary_brief"]。
+
+    只喂最近 N 条（默认 3）：日记是用来「接得上自己」的，不是第二本记忆。
+    读不出来就什么都不写——空串会让 PromptBuilder 的 sections 诊断失真，
+    所以这里跟 recent_chat 一样，非空才写。
+    """
+    if not bool(getattr(cfg, "diary_enable", False)):
+        return
+    from .diary import build_diary_brief, get_diary_store
+
+    store = get_diary_store(getattr(cfg, "diary_dir", None))
+    # 心情决定先想起哪条日记（mood_filter）；读不到心情就按时间顺序
+    mood_word = ""
+    if inner_key:
+        try:
+            from .inner_state import current_word, get_inner_state_store
+
+            mood_word = current_word(
+                get_inner_state_store(getattr(cfg, "inner_state_dir", "")).load(inner_key)
+            )
+        except Exception:  # noqa: BLE001
+            mood_word = ""
+    brief = build_diary_brief(
+        store, n=int(getattr(cfg, "diary_context_n", 3)), mood_word=mood_word
+    )
+    if brief:
+        extra["diary_brief"] = brief
 
 
 async def _resolve_image_urls(ctx: Any, reply_message: Any = None) -> list[str]:
@@ -447,6 +646,14 @@ def _build_status_bar(ctx: Any, extra: dict[str, Any]) -> str:
     except Exception:  # noqa: BLE001
         pass
     parts.append("场景：私聊" if getattr(ctx, "is_private", False) else "场景：群聊")
+
+    # 当前说话人必须由代码显式声明：正文里已经不再拼「昵称：」前缀，
+    # 模型只能靠这里知道对面是谁。昵称是用户可控的任意文本（带标点、
+    # 带冒号都很常见），写进正文会被当成发言内容——「失语.」那次事故
+    # 就是这么把昵称解释成了词条。放进状态栏后它只是元数据。
+    actor = str(getattr(ctx, "actor", "") or "").strip()
+    if actor:
+        parts.append(f"正在跟你说话的人：{actor}（这是对方的昵称）")
     if extra.get("image_urls"):
         parts.append("本轮带图：是")
     # 文件同理：这是确定性事实，写进状态栏后模型不必再猜有没有附件
@@ -460,6 +667,14 @@ def _build_status_bar(ctx: Any, extra: dict[str, Any]) -> str:
             parts.append("本条是对某条消息的回复：是")
     except Exception:  # noqa: BLE001
         pass
+    # 最后一条 user 消息比 system 中段有效得多（同一轮里位置越靠后越管用，
+    # 之前挪语气提示时量过：安慰率 22% → 55%）。
+    # 这条针对的是最顽固的一个毛病：她把自己当成写手，回「可以这样回：…」
+    # 「共情型：…」——models 把「昵称：这句话」当成一段待处理的聊天记录，
+    # 加上 system 里满篇「怎么写」的规范，自然就滑进了交稿模式。
+    # 人设里也写了，但人设是几千字里的中段，压不住。
+    if not getattr(ctx, "is_private", False):
+        parts.append("你就在这个群里，直接说自己的反应（不要写「可以这样回」「共情型」这类提示）")
     body = "\n".join(f"- {p}" for p in parts)
     return f"<agent_status>\n{body}\n</agent_status>"
 
@@ -502,6 +717,26 @@ def _record_turn(agent_context: Any, user_text: str, assistant_text: str) -> Non
             error=f"{type(exc).__name__}: {exc}",
         )
 
+    # 同一轮再记一份到跨场合流水。
+    # 为什么单独记：ChatMemory 按会话存，换个地方就不认得这个人；
+    # 这一层按时间存，让她在私聊里知道群里刚发生过什么。
+    # 必须等发送成功后才写，理由与上面一样。
+    try:
+        cfg = getattr(agent_context, "config", None)
+        if bool(getattr(cfg, "cross_chat_enable", True)):
+            from .cross_chat import get_cross_store
+
+            ctx_obj = getattr(agent_context, "message_context", None)
+            who = str(getattr(ctx_obj, "actor", "") or "") if ctx_obj else ""
+            get_cross_store(getattr(cfg, "cross_chat_dir", None)).record(
+                where=session_id,
+                who=who,
+                text=user_text,
+                reply=assistant_text,
+                max_entries=int(getattr(cfg, "cross_chat_max_entries", 600) or 600),
+            )
+    except Exception:  # noqa: BLE001 — 记流水失败绝不能影响回复
+        pass
 
 async def _extract_memory_cards(agent_context: Any, history: list[dict[str, str]]) -> None:
     """批量跑一次长期记忆提取，把候选事实写进卡片库。
@@ -665,8 +900,8 @@ def build_agent_context(
 
     记忆与引用为什么在这里装配：AgentRuntime 只负责「怎么问模型」，
     既不碰存储、也不认识 OneBot 事件；而这两件事都需要 config、session
-    和原始 event，桥接层恰好三样都有。用的也是 legacy_orchestrator 那套
-    现成 MemoryFacade 接口，不另起一套逻辑。
+    和原始 event，桥接层恰好三样都有。用的也是重构时定下的那套
+    MemoryFacade 接口，不另起一套逻辑。
 
     Args:
         reply_message: 已由 resolve_reply_message 解析好的被引用消息。
@@ -742,6 +977,17 @@ def build_agent_context(
     if image_urls:
         extra["image_urls"] = list(image_urls)
 
+    # 意图文本：recovery（漏写 marker 时的兜底重试）靠这个键判断「用户是否
+    # 明确要求了某能力」。runtime 路径此前从未写入，_try_recovery 读到空串就
+    # 直接返回 None，等于 CARD/MUTE/DRAW/BROWSE 四套补救全部失效。legacy 路径
+    # 由 legacy_context.py 塞的是同一个键，这里补齐以保持两条链行为一致。
+    try:
+        from .reply_quote import user_intent_text
+
+        extra["intent_text"] = user_intent_text(plain_text, user_text)
+    except Exception:  # noqa: BLE001 — 补救键缺失绝不能阻断正常回复
+        pass
+
     # 会话历史 + 召回 + 好感度 / 内心状态 / 群风格 / 人物印象，一次装配。
     # runtime 此前完全没接这块，导致模型每次对着一条孤立消息作答、
     # 新对话从不落盘、四个 brief 恒为空串。
@@ -765,7 +1011,13 @@ def build_agent_context(
         and getattr(trigger.kind, "value", "")
         or getattr(trigger, "reason", "")
         or "",
-        config=extra.get("config"),
+        # 只取 extra["config"] 是不够的：生产路径里没有任何地方往 extra 塞 config
+        # （只有 core/shadow.py 的比对路径会塞），于是 AgentContext.config 恒为
+        # None → _visible_draw / _visible_browse 在 cfg is None 时直接判不可见，
+        # 模型提示词里根本没有【生图能力】这一段，表现就是「学姐不知道自己能生
+        # 图」；而商店缩略图走 shop.py 直连绘图 API，不经过模型，所以商店照样
+        # 有图。这里回退到全局配置，把这条链路接回来。
+        config=extra.get("config") or _resolve_config(ctx),
         interrupt=not bool(getattr(trigger, "forced", False)),
         private_chat=bool(getattr(ctx, "is_private", False)),
         trace_id=trace_id,
@@ -849,7 +1101,8 @@ def _reply_send_options() -> dict[str, Any]:
 async def _apply_chat_affection(agent_context: Any, result: Any) -> None:
     """给「被点名的一次正常对话」加好感，并把升级脚注拼进**待发**正文。
 
-    逐条对齐 legacy_orchestrator.finalize_response 的语义：只在被点名（mention）、
+    逐条对齐旧编排 finalize_response 的语义（旧编排已于 2026-10 删除，
+    这里保留它的行为）：只在被点名（mention）、
     没被打断时加；复用同一个 finalize_affection_gain 做脚注与群头衔同步，
     always_show=False 也和它一致（只有真升级才提示）。
 
@@ -917,7 +1170,7 @@ async def _deliver_runtime_reply(agent_context: Any, outcome: Any) -> None:
     from .agent.response import ResponsePipeline
 
     # 好感度：这条写入在 runtime 模式下从来没人调用（唯一调用者在跑不起来的
-    # legacy_orchestrator 里），affection/ 从 9 月起就冻住，而每一轮 prompt 还在
+    # 旧编排里，该文件已于 2026-10 删除），affection/ 曾从 9 月起就冻住，而每轮还在
     # 读它。必须自己 try：写入失败若冒到下面那个 except，会被当成「发送失败」
     # 把这一轮回复整条吞掉。
     try:
@@ -972,8 +1225,8 @@ async def _deliver_runtime_reply(agent_context: Any, outcome: Any) -> None:
 
     # 内心状态结算。和 _record_turn 一样，必须等确认发出去了才做，否则
     # 「没送出去的回复」也会扣她精力。
-    # 为什么写在这里：这个写入者原先唯一的调用者在跑不起来的
-    # legacy_orchestrator 里，导致状态从 9 月起就冻住，而每一轮还在把它
+    # 为什么写在这里：这个写入者原先唯一的调用者在跑不起来的旧编排里
+    # （已于 2026-10 删除），导致状态曾从 9 月起就冻住，而每一轮还在把它
     # 读进 prompt——开关开着，喂的却是一个月前的情绪。
     try:
         from .config import get_config
@@ -1185,6 +1438,8 @@ async def handle_agent_message(ctx: Any, *, trigger: Any = None) -> bool:
                     entry.safe_error_text(agent_context),
                     reply_max_chars=cfg.reply_max_chars,
                     reply_chunk_chars=cfg.reply_chunk_chars,
+                    forward_min_chars=cfg.forward_min_chars,
+                    forward_node_chars=cfg.forward_node_chars,
                 )
             except Exception:  # noqa: BLE001 — 兜底发送失败也不再重试
                 log_event(

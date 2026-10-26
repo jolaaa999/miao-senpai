@@ -66,6 +66,12 @@ class UserAffection:
     display_name: str = ""
     value: int = 0
     tier_title: str = ""
+    # 主观认知（2026-10-25 加）：她自己写的一两句，讲「这人在她心里是什么人、
+    # 现在算什么关系」。为什么不只用分数：分数不会让她说话变软，
+    # 只会在提示词里多一行「还差 8 点升级」——她会照着这行写出客服式的客气。
+    # 这段文字只在**她觉得关系变了**的时候改，一个月不动也正常。
+    view: str = ""
+    view_at: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -77,6 +83,8 @@ class UserAffection:
             display_name=str(data.get("display_name") or ""),
             value=max(0, int(data.get("value") or 0)),
             tier_title=str(data.get("tier_title") or ""),
+            view=str(data.get("view") or "").strip(),
+            view_at=float(data.get("view_at") or 0.0),
         )
 
 
@@ -159,17 +167,25 @@ def format_affection_line(value: int) -> str:
     return f"好感 {value} · 「{name}」· 距「{nxt[1]}」还差 {need}"
 
 
-def build_affection_brief(*, name: str, value: int) -> str:
+def build_affection_brief(
+    *, name: str, value: int, view: str = "", view_at: float = 0.0
+) -> str:
+    """她跟这个人现在算什么关系。
+
+    2026-10-25 改：不再注入分数和「还差几点升级」。
+    那个数字进提示词只会被当成任务指标——她会开始为了加分说话（热心收尾、
+    每条都关心一句），那正是「一本正经的客服感」的来源。
+    现在只给两样：她自己写的主观认知（一句话），和关系档位的口气提示。
+    """
     _threshold, tier_name, hint = tier_for_value(value)
-    nxt = next_tier_for_value(value)
-    progress = format_affection_line(value)
-    lines = [
-        f"【与当前说话者的好感度】{name}：{progress}",
-        f"关系档位「{tier_name}」——{hint}",
-    ]
-    if nxt is not None:
-        lines.append(f"再涨 {nxt[0] - value} 点升到「{nxt[1]}」。")
-    lines.append("语气随档位调整，但仍保持学姐的软萌口吻，别突然变客服。")
+    lines: list[str] = []
+    text = (view or "").strip()
+    if text:
+        lines.append(f"【你对他现在的看法】（你自己写的，哪天觉得变了就改）{name}：{text}")
+    else:
+        lines.append(f"【你和他现在算什么关系】{name}：{tier_name}")
+    lines.append(f"（{hint}）")
+    lines.append("语气随关系走，但仍保持学姐的软萌口吻，别突然变客服。")
     return "\n".join(lines)
 
 
@@ -265,6 +281,25 @@ class AffectionStore:
             amount,
             display_name=display_name,
         )
+
+    def set_view(
+        self, group_id: int | str, user_id: int | str, view: str, *, now: float | None = None
+    ) -> UserAffection:
+        """改写她对某个人的主观认知。一两句话，最多 150 字。
+
+        什么时候调：她自己觉得关系变了的时候（结算时问一句「你觉得变了就改」），
+        或者主人直接让她改。不按周期刷新——按月不动是正常的。
+        """
+        import time as _time
+
+        users = self.load_group(group_id)
+        key = str(user_id)
+        user = users.get(key) or UserAffection(user_id=key)
+        user.view = str(view or "").strip()[:150]
+        user.view_at = now if now is not None else _time.time()
+        users[key] = user
+        self.save_group(group_id, users)
+        return user
 
     def leaderboard(self, group_id: int | str, *, limit: int = 10) -> list[UserAffection]:
         users = list(self.load_group(group_id).values())

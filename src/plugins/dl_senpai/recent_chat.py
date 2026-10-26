@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import json
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from threading import Lock
 from typing import Any
@@ -140,6 +140,32 @@ class RecentChatStore:
             return list(items)
 
     # -- 写 --
+
+    def mark_recalled(
+        self, session_id: str, message_id: str, *, marker: str = "（已撤回）"
+    ) -> bool:
+        """把某条流水标成「已撤回」；命中返回 True。
+
+        为什么标注而不是删除：她需要知道「那句话不作数了」，但删掉会让上下文出现断层
+        （前一句的回应突然失去所指）。留一行标记，模型能自己理解成"对方收回了那句话"。
+        """
+        if not session_id or not message_id:
+            return False
+        with self._lock:
+            items = self._cache.get(session_id)
+            if items is None:
+                items = self._load(session_id)
+                self._cache[session_id] = items
+            # ChatEntry 是 frozen 的（内存里的历史不允许被就地改写），
+            # 所以这里用 replace 造一条新的塞回列表，而不是给 text 赋值。
+            for idx, entry in enumerate(items):
+                if entry.message_id != message_id:
+                    continue
+                if marker not in entry.text:
+                    items[idx] = replace(entry, text=entry.text.rstrip() + marker)
+                    self._dirty.add(session_id)
+                return True
+            return False
 
     def append(
         self,

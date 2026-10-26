@@ -142,6 +142,8 @@ async def reply(
         image=image,
         reply_max_chars=config.reply_max_chars,
         reply_chunk_chars=config.reply_chunk_chars,
+        forward_min_chars=config.forward_min_chars,
+        forward_node_chars=config.forward_node_chars,
         nickname=get_senpai_name(),
         humanize_send=bool(config.humanize_send),
         typing_delay_ms_min=config.typing_delay_ms_min,

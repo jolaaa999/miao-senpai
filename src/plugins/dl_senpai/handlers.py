@@ -208,7 +208,16 @@ def _get_memory(config: PluginConfig | None = None) -> ChatMemory:
     global _memory
     cfg = config or get_config()
     if _memory is None:
-        _memory = ChatMemory(cfg.memory_dir, max_history=cfg.max_history)
+        # 三个参数各管一件事：max_history = 读给模型几轮；
+        # history_max_chars = 读给模型的字符预算；
+        # persist_max = 磁盘文件最多留几条。
+        # 之前只传了第一个，磁盘文件因此无限增长（实测某私聊 343 条）。
+        _memory = ChatMemory(
+            cfg.memory_dir,
+            max_history=getattr(cfg, "max_history", 0),
+            max_chars=getattr(cfg, "history_max_chars", 0),
+            persist_max=getattr(cfg, "memory_persist_max_messages", 0),
+        )
     return _memory
 
 
@@ -315,6 +324,8 @@ async def _reply(
         image=image,
         reply_max_chars=config.reply_max_chars,
         reply_chunk_chars=config.reply_chunk_chars,
+        forward_min_chars=config.forward_min_chars,
+        forward_node_chars=config.forward_node_chars,
         nickname=get_senpai_name(),
         humanize_send=bool(config.humanize_send),
         typing_delay_ms_min=config.typing_delay_ms_min,
@@ -323,6 +334,7 @@ async def _reply(
         bubble_min_chars=config.bubble_min_chars,
         bubble_prefer_chars=config.bubble_prefer_chars,
         bubble_total_max_chars=config.bubble_total_max_chars,
+        bubble_require_newline=bool(config.bubble_require_newline),
     )
 
 
@@ -877,24 +889,26 @@ async def _handle_chat_inner(
     force_mention: bool,
     config: PluginConfig,
 ) -> None:
-    """**Forwarding wrapper**（Phase 6.5 第八节）。
+    """**旧编排入口，已删除实现**（2026-10 审计决定）。
 
-    真实实现已搬到 `agent/legacy_orchestrator.py` 的
-    `LegacyOrchestrator.run()`。本函数只做 argument 适配。
+    这里曾经转发到 `agent/legacy_orchestrator.py::LegacyOrchestrator.run()`。
+    那个文件从 Phase 6.6 起重构未完成（`LegacyRunState` 没接上，run() 必抛），
+    审计确认它既不可运行、也没有任何生产调用方真正需要它，
+    因此整体删除（连同 `legacy_state.py` / `legacy_context.py`）。
 
-    保留它的原因：兼容层与测试都按这个名字引用
-    （例如 test_phase55_acceptance 的 monkeypatch）。
+    为什么保留这个名字与签名、而不是一起删掉：
+      - `legacy_bridge._legacy_handler_factory` 仍把它当 legacy_handler 注入；
+      - `AgentEntry._run_legacy` 捕获这里的异常后**降级到 runtime**。
+    如果让它消失，legacy 模式会变成"没有 handler"，反而失去降级路径。
+    保留成"明确抛错"是更安全的那一半。
 
     禁止在这里重新加入：
         prompt 组装 / LLM 调用 / intent 判定 / tool 逻辑 / memory 逻辑
+    需要回滚时请直接切 RUNTIME —— 旧路径已判定为不可维护。
     """
-    from .agent.legacy_orchestrator import LegacyOrchestrator
-
-    await LegacyOrchestrator().run(
-        bot,
-        event,
-        force_mention=force_mention,
-        config=config,
+    raise RuntimeError(
+        "legacy_path_removed: 旧编排实现已删除；"
+        "DL_SENPAI_AGENT_MODE=legacy 会自动降级到 runtime。"
     )
 
 
@@ -932,10 +946,11 @@ async def _dispatch_via_router(bot: Bot, event: MessageEvent) -> None:
     这是 Phase 3 唯一的调度入口。`block=False` 是刻意的：即使 Router 判定
     "这条消息不需要回复"，也不应该阻止其他插件（如果有）看到它。
     """
-    from .gateway import from_onebot_event
+    from .gateway.onebot_adapter import from_onebot_event_with_asr
     from .core.runtime import get_runtime
 
-    ctx = from_onebot_event(event, bot)
+    # 用带 ASR 的版本：语音条会先转成文字再进 Router（没开 ASR 时行为不变）
+    ctx = await from_onebot_event_with_asr(event, bot)
     if ctx is None:
         return
     try:
@@ -1138,6 +1153,19 @@ async def observe_notice_leave(ctx) -> None:
 
     if isinstance(event, GroupDecreaseNoticeEvent):
         await handle_group_decrease(bot, event)
+
+async def observe_notice_recall(ctx) -> None:
+    """撤回通知观察者：别人的撤回标流水，她自己的被撤回才按冷却接一句。
+
+    判断与冷却都在 `recall_notice.handle_recall` 里（策略不写在观察者里，
+    这里只做事件转发，保持与 welcome/leave 两个观察者同样的写法）。
+    """
+    from .recall_notice import handle_recall
+
+    try:
+        await handle_recall(ctx)
+    except Exception:  # noqa: BLE001 — 撤回处理失败不能影响别的观察者
+        logger.exception("dl_senpai recall observer failed")
 
 
 # -- 命令 guard：把原来的 Rule 条件搬到这里 -------------------------------

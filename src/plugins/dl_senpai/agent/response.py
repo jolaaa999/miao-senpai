@@ -46,6 +46,38 @@ class ResponseOutcome:
         }
 
 
+def _first(items: list[Any]) -> Any:
+    """取第一项，空列表返回 None。"""
+    return items[0] if items else None
+
+
+def _media_from_tools(result: Any, tool_name: str) -> list[Any]:
+    """从工具结果里取出媒体段（`ToolResult.data["value"]`）。
+
+    为什么必须从工具结果取：RUNTIME 模式下 executor 只负责**产出**媒体段
+    （draw / sticker / voice 都是 `data={"value": segment}`），没有任何代码
+    把它写回 `context.extra`。而 `build_plan` 原先只读 extra —— extra 是
+    legacy orchestrator 的写入口，而 legacy 路径早已不可运行。结果就是：
+    draw 生成的图片、表情包、语音条全部静默丢弃，日志里 success=True，
+    用户却只收到一句纯文字。
+    """
+    found: list[Any] = []
+    for item in getattr(result, "tool_results", None) or []:
+        if getattr(item, "tool_name", "") != tool_name:
+            continue
+        if not getattr(item, "success", False):
+            continue
+        value = (getattr(item, "data", None) or {}).get("value")
+        if value is None:
+            continue
+        # browse 一次可能产出多张截图（list）；draw / sticker / voice 是单个段
+        if isinstance(value, (list, tuple)):
+            found.extend(v for v in value if v is not None)
+        else:
+            found.append(value)
+    return found
+
+
 @dataclass
 class ResponsePlan:
     """发送计划（由 AgentResult 推导，便于 dry_run 与测试断言）。"""
@@ -54,13 +86,16 @@ class ResponsePlan:
     sticker: Any = None
     voice: Any = None
     image: Any = None
+    # 其余图片（browse 的多张截图）。send_text_reply 只接收一张 image，
+    # 所以除第一张之外的按独立图片消息补发。
+    extra_images: list[Any] = field(default_factory=list)
 
     @property
     def media(self) -> list[str]:
         out: list[str] = []
         if self.sticker is not None:
             out.append("sticker")
-        if self.image is not None:
+        if self.image is not None or self.extra_images:
             out.append("image")
         if self.voice is not None:
             out.append("voice")
@@ -94,14 +129,36 @@ class ResponsePipeline:
             from ..style import polish_reply
 
             polisher = polish_reply
+        # 把说话人昵称一起传下去：style 的「伪造转录」判据要靠它认出台头。
+        # 不传的话这一层永远退化成「按短名重复」的兜底，昵称带点（如「失语.」）
+        # 时识别不到台头。注入的 polisher 可能只收一个参数，所以退化时重试一次。
+        speaker = getattr(context, "actor", "") or ""
         try:
-            plan.text = polisher(plan.text)
+            try:
+                plan.text = polisher(plan.text, speaker=speaker)
+            except TypeError:
+                plan.text = polisher(plan.text)
         except Exception:  # noqa: BLE001 — 润色失败时保留原文
             pass
 
-        plan.sticker = context.extra.get("sticker_segment")
-        plan.voice = context.extra.get("voice_segment")
-        plan.image = context.extra.get("image_segment")
+        # extra 优先：显式写入者（legacy 兼容分支 / 测试）语义保持不变；
+        # 取不到再回落到工具结果 —— 只有这样 RUNTIME 模式才真带得出媒体。
+        plan.sticker = context.extra.get("sticker_segment") or _first(
+            _media_from_tools(result, "sticker")
+        )
+        plan.voice = context.extra.get("voice_segment") or _first(
+            _media_from_tools(result, "voice")
+        )
+        extra_image = context.extra.get("image_segment")
+        if extra_image is not None:
+            plan.image = extra_image
+        else:
+            # 生图优先于浏览截图：用户要的是那张画，截图只是旁证
+            images = _media_from_tools(result, "draw") + _media_from_tools(
+                result, "browse"
+            )
+            plan.image = _first(images)
+            plan.extra_images = images[1:]
         return plan
 
     # -- 发送 --
@@ -151,6 +208,11 @@ class ResponsePipeline:
                 error=f"{type(exc).__name__}: {exc}",
             )
 
+        # 其余图片单独补发：send_text_reply 只接受一张 image，
+        # 多张只能自己再发。补发失败只记日志，不影响已经发出去的正文。
+        if plan.extra_images:
+            await self._send_extra_images(bot, event, plan.extra_images)
+
         metrics.incr("reply.sent")
         outcome = ResponseOutcome(sent=True, text=plan.text, media=plan.media)
         log_event(
@@ -159,6 +221,32 @@ class ResponsePipeline:
             **outcome.as_log_fields(),
         )
         return outcome
+
+    async def _send_extra_images(
+        self, bot: Any, event: Any, images: list[Any]
+    ) -> None:
+        """补发额外图片（browse 的多张截图）。
+
+        为什么复用 reply_send._send_image_with_retry：那里已经有发送熔断
+        与两次重试，是生产验证过的图片通道；另写一套只会多出一条绕过
+        熔断的路径。
+        """
+        from ..reply_send import _send_image_with_retry
+
+        for image in images:
+            try:
+                ok = await _send_image_with_retry(bot, event, image)
+            except Exception as exc:  # noqa: BLE001 — 补发失败不影响正文
+                log_event(
+                    "reply.extra_image_failed",
+                    level="warning",
+                    error=f"{type(exc).__name__}: {exc}",
+                )
+                continue
+            if not ok:
+                log_event(
+                    "reply.extra_image_failed", level="warning", error="send_failed"
+                )
 
     async def deliver(
         self,

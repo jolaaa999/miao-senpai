@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import random
+import time
+
 import re
 
 _FAKE_EMOJI_RE = re.compile(
@@ -362,7 +365,17 @@ _PLAN_HINT_RE = re.compile(
 # 名字里允许 . 和 ·：真实昵称有「失语.」这种，原字符集把点排除在外，
 # 于是「失语.：你是猫娘吗」十几轮伪造对话一条都没被截断（2026-10-15 线上，
 # 那条回复 554 字里大半是伪造转录）。
-_SPEAKER_PREFIX_RE = re.compile(r"([\u4e00-\u9fa5A-Za-z0-9_\-\.·]{1,8})\s*[：:]")
+# 候选名最长 4 字：真实昵称基本在这个量级，而 8 字会把「让我多回一次失语」
+# 整段吞成一个候选名（它只出现一次，于是真正的重复名反而检不出来）。
+_SPEAKER_PREFIX_RE = re.compile(r"([\u4e00-\u9fa5A-Za-z0-9_\-\.·]{1,4})\s*[：:]")
+
+# 紧跟在开引号/开括号后面的「名字：」是在**引用对方原话**，不是编写台词。
+# 2026-10-25 线上事故：对方昵称是「失语.」，而 prompt 里用户消息本来就按
+# 「昵称：内容」渲染，她只要引用一次原话（形如「比如「失语.：什么意思」」），
+# 旧规则就从那里砍到结尾 —— 三条回复分别只剩 108 字、179 字和「在呢～」。
+_QUOTE_OPEN_CHARS = "「『“‘\"'【(（《<＜"
+# URL 协议头（http:// 这类）：冒号后紧跟 //，不是说话人前缀
+_URL_SCHEME_TAIL = "//"
 
 # 正常回答里会用「X：」的高频词，不能当说话人。
 # 误判的代价是把整段回复从中间截断，所以宁可多列一些。
@@ -389,49 +402,187 @@ def strip_thinking_prefix(text: str) -> str:
     return text
 
 
-def strip_fake_transcript(text: str, *, speaker: str = "") -> str:
-    """截断模型伪造的多人对话，保留截断点之前的正常内容。
+def _bare_hits(text: str, name: str) -> list[int]:
+    """找出某个名字的「裸」出现位置（引用里的不算、URL 协议头不算）。
 
-    两级判据：
-      1. 出现「对方昵称：」——最强信号，学姐自己的回复里不该有对方名字加冒号；
-      2. 兜底——同一个短名前缀重复出现 >=2 次（正常回复不会这样）。
-    纯数字前缀跳过，否则「10:30」「1:」这类会被误判成说话人。
+    所谓裸，就是**紧跟在开引号/开括号后**的那种不算 —— 那是在引用对方原话，
+    不是替人编台词。2026-10-25 的误截就是栽在这里：对方昵称「失语.」，她引用
+    一句「失语.：什么意思」，旧规则当成了伪造转录，从引号里一路砍到结尾。
     """
-    if not text:
-        return text
-    name = (speaker or "").strip()
-    if name:
-        m = re.search(re.escape(name) + r"\s*[：:]", text)
-        if m:
-            return text[: m.start()].rstrip()
-    counts: dict[str, int] = {}
-    first: dict[str, int] = {}
+    if not name:
+        return []
+    hits: list[int] = []
+    for m in re.finditer(re.escape(name) + r"\s*[：:]", text):
+        if text[m.end(): m.end() + 2] == _URL_SCHEME_TAIL:
+            continue
+        if m.start() > 0 and text[m.start() - 1] in _QUOTE_OPEN_CHARS:
+            continue
+        hits.append(m.start())
+    return hits
+
+
+def _generic_hits(text: str) -> dict[str, list[int]]:
+    """拿不到昵称时的兜底：统计「短名：」的出现位置，按名字分组。"""
+    buckets: dict[str, list[int]] = {}
     for m in _SPEAKER_PREFIX_RE.finditer(text):
         cand = m.group(1)
         if cand.isdigit() or cand in _SPEAKER_STOPWORDS:
             continue
-        counts[cand] = counts.get(cand, 0) + 1
-        first.setdefault(cand, m.start())
-    repeated = [n for n, c in counts.items() if c >= 2]
-    if repeated:
-        return text[: min(first[n] for n in repeated)].rstrip()
+        if text[m.end(): m.end() + 2] == _URL_SCHEME_TAIL:
+            continue
+        if m.start() > 0 and text[m.start() - 1] in _QUOTE_OPEN_CHARS:
+            continue
+        buckets.setdefault(cand, []).append(m.start())
+    return buckets
+
+
+def _same_speaker(cand: str, speaker: str) -> bool:
+    """两个名字是否算同一个（容忍昵称尾部的点/间隔号）。"""
+    trim = ".·。，, "
+    return bool(cand) and bool(speaker) and cand.strip(trim) == speaker.strip(trim)
+
+
+def strip_fake_transcript(text: str, *, speaker: str = "") -> str:
+    """截断模型伪造的多人对话，保留截断点之前的正常内容。
+
+    判据（2026-10-25 重写）：
+      1. **同一个名字出现 >=2 次**（且不在引号内）——正常回复不会这样，
+         这是 2026-10-13 / 10-15 两次伪造转录事故的形态；
+      2. 只出现一次却顶在正文最前面 ⇒ 那是模型给对方写了个台头，
+         摘掉前缀即可，**不要**把整条回复砍掉。
+
+    为什么去掉「见到对方昵称一次就砍」：prompt 本身按「昵称：内容」渲染用户
+    消息，回复里引用原话再正常不过。旧规则把引用当成伪造转录，会把整条回复
+    砍成半句、甚至砍成空串（线上表现就是只剩一句「在呢～」）。
+
+    已知昵称（speaker）优先：它最准，不受「前面几个汉字也算候选名」干扰。
+    拿不到昵称时才退回「同一个短名重复出现」的通用判据。
+    """
+    if not text:
+        return text
+
+    name = (speaker or "").strip()
+    hits = _bare_hits(text, name) if name else []
+    if not hits:
+        buckets = _generic_hits(text)
+        repeated = [pos for poses in buckets.values() if len(poses) >= 2 for pos in poses]
+        if repeated:
+            return text[: min(repeated)].rstrip()
+        # 只有一处的台头：只在「确实是对方的名字」时才摘，避免误删「引言：」这类
+        first = [(c, ps[0]) for c, ps in buckets.items() if ps[0] == 0]
+        if first and _same_speaker(first[0][0], name):
+            m = _SPEAKER_PREFIX_RE.match(text)
+            if m is not None and text[m.end():].strip():
+                return text[m.end():].lstrip(" \t")
+        return text
+
+    if len(hits) >= 2:
+        return text[: hits[0]].rstrip()
+
+    # 单次且贴在最前面：只摘前缀，砍成空串会退化成「在呢～」
+    if hits[0] == 0:
+        m = re.match(re.escape(name) + r"\s*[：:]", text)
+        rest = text[m.end():].lstrip(" \t") if m else ""
+        if rest:
+            return rest
     return text
 
 
-def polish_reply(text: str, *, speaker: str = "") -> str:
+# -- 工具标记残片：解析失败的 marker 不许进正文，更不许进记忆 --
+#
+# 2026-10-15 线上事故：模型写成 <<<CODE ... <<<END>>> 而不是原生调用，那段
+# Python 被拆成 3 个气泡**原样发给了用户**，又被写成 assistant 历史。之后
+# 每一轮她都把上一轮当成「那道题还没答完」，于是一直补答旧问题 —— 用户侧
+# 看到的就是「答非所问、话很混乱」。
+_CODE_LEAK_RE = re.compile(
+    r"<<<\s*CODE\b[\s\S]*?(?:<<<\s*END\b[^\n]*|\Z)", re.IGNORECASE
+)
+# 兜底：任何没被工具消费掉的 <<<MARKER 残片（含缺闭合、行尾截断）
+_GENERIC_MARKER_LEAK_RE = re.compile(
+    r"<<<\s*[A-Z][A-Z_]{1,15}\b[\s\S]*?(?:>>>|>>|＞＞＞|＞＞|】】|】>|】|$)",
+    re.IGNORECASE | re.MULTILINE,
+)
+_END_RESIDUE_RE = re.compile(r"<<<\s*END\b[^\n]*", re.IGNORECASE)
+
+
+def strip_marker_residue(text: str) -> str:
+    """剥掉残留的工具标记。
+
+    抽成公开函数是有意的：polish_reply 是发送前的必经之路，而
+    ChatMemory.load_all 在**读历史**时也要用同一套规则 —— 否则历史里那条
+    标记残渣会被反复喂回 prompt，模型一路补答那个旧问题。
+    """
+    if not text or "<<<" not in text:
+        return text
+    text = _CODE_LEAK_RE.sub("", text)
+    text = _GENERIC_MARKER_LEAK_RE.sub("", text)
+    text = _END_RESIDUE_RE.sub("", text)
+    return text
+
+
+# -- 空串兜底：别再吐同一个「在呢～」 --
+#
+# 2026-10-25 线上数据：一天 99 条发送里 32 条是「在呢～」，其中 12 条还配着图。
+# 来源是工具调用轮（生图/截图/记忆）模型没有正文，被这里兜底成一句固定话；
+# 同一个群里连着出现过六条一模一样的。
+#
+# 真人不会对着自己发的图说「在呢～」。所以改成两句规则：
+#   1. 兜底不再固定一句，从短反应里挑，且避开上一次用过的；
+#   2. 同一会话冷却期内再触发就**直接不说话**——宁可不发，也不发第二次。
+_FALLBACK_LINES: tuple[str, ...] = ("嗯？", "在。", "咋了", "你说", "啊？")
+_FALLBACK_COOLDOWN_SEC = 180.0
+_fallback_last: dict[str, tuple[float, str]] = {}
+
+
+def _empty_fallback(
+    session_key: str = "", speaker: str = "", allow: bool = True
+) -> str:
+    """正文被清空时的兜底。冷却期内、或本轮本来就有媒体时返回空串。
+
+    allow=False 用在工具轮（生图 / 截图）：那时正文本来就该是空的，
+    媒体才是这一轮要发的东西，补一句「嗯？」只是噪音。
+    """
+    if not allow:
+        return ""
+    key = str(session_key or "") or f"speaker:{speaker}"
+    now = time.monotonic()
+    last = _fallback_last.get(key)
+    if last and now - last[0] < _FALLBACK_COOLDOWN_SEC:
+        return ""
+    pool = [line for line in _FALLBACK_LINES if not last or line != last[1]]
+    line = random.choice(pool or list(_FALLBACK_LINES))
+    _fallback_last[key] = (now, line)
+    return line
+
+
+def reset_fallback_state() -> None:
+    """测试用：清掉兜底冷却记录。"""
+    _fallback_last.clear()
+
+
+def polish_reply(
+    text: str,
+    *,
+    speaker: str = "",
+    session_key: str = "",
+    allow_fallback: bool = True,
+) -> str:
     """轻量润色：去掉假表情占位、泄漏指令、倾诉腔与「发不了消息」胡说；空回复兜底。"""
     text = (text or "").strip()
     if not text:
-        return "在呢～"
+        return _empty_fallback(session_key, speaker, allow_fallback)
     # 先处理结构性污染（思考前言 / 伪造对话）再做逐条正则清理：
     # 这两类污染会把 marker 和假台词混在一起，先切干净后面才好认。
     text = strip_thinking_prefix(text)
     text = strip_fake_transcript(text, speaker=speaker)
-    if not text:
-        return "在呢～"
     # 代码块 / ASCII 图先抽出来，整条流水线跑完再原样放回。
     # 后面的规则是给闲聊话术写的，落在代码上会真破坏内容（见 _stash_code_blocks）。
     text, _code_blocks = _stash_code_blocks(text)
+    # 标记残片在**抽出代码块之后**清：她真的贴一段含 <<< 的示例代码时，
+    # 那些字符是内容而不是控制标记，不该被剥掉（占位符 N 不受影响）。
+    text = strip_marker_residue(text)
+    if not text:
+        return _empty_fallback(session_key, speaker)
     text = _STICKER_MARKER_RE.sub("", text)
     text = _VOICE_MARKER_RE.sub("", text)
     text = _CARD_LEAK_RE.sub("", text)
@@ -484,7 +635,7 @@ def polish_reply(text: str, *, speaker: str = "") -> str:
     text = "\n".join(lines).strip()
     # 放回代码块要放在最后一步：任何后续清理都不该再碰它
     text = _restore_code_blocks(text, _code_blocks)
-    return text or "在呢～"
+    return text or _empty_fallback(session_key, speaker)
 
 
 # 兼容旧调用名

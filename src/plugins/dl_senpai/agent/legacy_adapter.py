@@ -11,7 +11,7 @@ Phase 6A 第二节。**这个 adapter 绝不重新解析 marker** ——
         ↓
     ChatResult（旧 SenpaiLLM.chat 的返回类型）
 
-为什么要这层：`handlers._handle_chat_inner`（现由 LegacyOrchestrator 承接）
+为什么要这层：`handlers._handle_chat_inner`（旧编排，已于 2026-10 删除）
 依赖 `ChatResult` 的 8 个字段（card_actions / mute_actions / draw_force ...）。
 直接改成 list[ToolCall] 会牵动大量下游代码。
 

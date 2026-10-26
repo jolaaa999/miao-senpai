@@ -28,6 +28,8 @@ mcp = [
 ]
 search = [
     "ddgs>=9.0.0",
+    # 正文抽取：正则分不清导航栏与正文，抓回来的段落会污染 prompt
+    "trafilatura>=2.0.0",
 ]
 browser = [
     "playwright>=1.40.0",

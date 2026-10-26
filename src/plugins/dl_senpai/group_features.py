@@ -46,7 +46,6 @@ FEATURES: tuple[tuple[str, str], ...] = (
     ("inner_state", "内心状态"),
     ("vision", "识图"),
     ("trends", "热点趋势"),
-    ("friend_add", "自动加好友"),
 )
 FEATURE_KEYS = frozenset(k for k, _ in FEATURES)
 

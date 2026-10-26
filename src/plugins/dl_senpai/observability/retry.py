@@ -16,6 +16,7 @@ Phase 1 审计发现：`llm.py::_complete_once()` 对瞬时错误固定 sleep 60
 from __future__ import annotations
 
 import asyncio
+import random
 from dataclasses import dataclass
 
 
@@ -31,6 +32,7 @@ class RetryPolicy:
         unexpected_max_delay: 指数退避上限。
         retry_transient: 瞬时错误是否重试。
         retry_unexpected: 非预期异常是否重试。
+        jitter_ratio: 抖动幅度（0.2 = ±20%）。见 `jitter_for` 的说明。
     """
 
     max_attempts: int = 4
@@ -40,6 +42,9 @@ class RetryPolicy:
     unexpected_max_delay: float = 4.0
     retry_transient: bool = True
     retry_unexpected: bool = True
+    # 默认 0：保持 delay_for_* 的确定性，现有测试与快照都不受影响。
+    # 生产用的 DEFAULT_RETRY_POLICY 单独打开（见文件末尾）。
+    jitter_ratio: float = 0.0
 
     def delay_for_transient(self, attempt: int) -> float:
         """瞬时错误等待时间：指数退避 2s, 4s, 8s（封顶 10s）。
@@ -56,6 +61,22 @@ class RetryPolicy:
     def delay_for_unexpected(self, attempt: int) -> float:
         """非预期异常的指数退避：0.5s, 1s, 2s, 4s（封顶）。"""
         return min(self.unexpected_max_delay, self.unexpected_base_delay * (2**attempt))
+
+    def jitter_for(self, delay: float) -> float:
+        """给退避实际等待加随机抖动，返回区间 [delay*(1-r), delay*(1+r)]。
+
+        为什么需要：多个群同时遇到中转 502 时，它们会按同一串退避值
+        （2s/4s/8s）**同一时刻**再打一遍上游，等于自己制造二次冲击。
+        错开 ±20% 之后重试峰被打散，总等待几乎不变。
+
+        为什么不在 delay_for_* 里直接加：那两个方法是纯函数，测试和
+        快照都在断言精确值（2/4/8/10）。抖动放在使用点（llm 的重试
+        循环）更清晰，也方便单独关掉。
+        """
+        ratio = max(0.0, min(1.0, float(self.jitter_ratio)))
+        if delay <= 0 or ratio <= 0:
+            return delay
+        return delay * random.uniform(1.0 - ratio, 1.0 + ratio)
 
     def should_retry_transient(self, attempt: int) -> bool:
         if not self.retry_transient:
@@ -94,8 +115,9 @@ class NoWaitRetryPolicy(RetryPolicy):
         )
 
 
-# 生产默认：4 次尝试，瞬时错误指数退避（2s/4s/8s，封顶 10s）
-DEFAULT_RETRY_POLICY = RetryPolicy()
+# 生产默认：4 次尝试，瞬时错误指数退避（2s/4s/8s，封顶 10s），实际等待再叠 ±20% 抖动。
+# 测试仍可用 RetryPolicy()（jitter_ratio 默认 0）拿到确定性数值。
+DEFAULT_RETRY_POLICY = RetryPolicy(jitter_ratio=0.2)
 
 
 __all__ = ["RetryPolicy", "NoWaitRetryPolicy", "DEFAULT_RETRY_POLICY"]

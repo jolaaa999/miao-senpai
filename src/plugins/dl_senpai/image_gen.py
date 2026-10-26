@@ -27,9 +27,15 @@ _DRAW_MARKER_FALLBACK_RE = re.compile(
     r"<<<DRAW[\s\S]*?(?:>>>|>>|＞＞＞|】】|】>|】|＞＞|$)",
     re.IGNORECASE,
 )
+# 第二支原本要求「生成/做/来」+ 量词 + 名词**紧邻**，于是「生成一张橘猫图片」
+# 这种把主体插在量词和名词之间的说法匹配不上——恰恰是最自然的问法，漏判之后
+# 兜底重试（recovery）也不会触发，等于白丢一轮。改法：带量词时允许中间夹一段
+# 极短的主体（≤6 个非标点字符）；不带量词时仍要求名词紧跟，以免把「做这个任务
+# 要查图」之类的闲聊误判成生图请求。
 _DRAW_INTENT_RE = re.compile(
     r"(画|绘)(一?[张个幅只])?(图|画|插画|海报|头像|壁纸|封面)?"
-    r"|(生成|做|来)(一?[张个幅])?(图|画|插画|海报|头像|壁纸|封面)"
+    r"|(生成|做|来)(?:一?[张个幅])[^\s，。！？、,.!?]{0,6}(图|画|插画|海报|头像|壁纸|封面)"
+    r"|(生成|做|来)(图|画|插画|海报|头像|壁纸|封面)"
     r"|生图|画图|作画|出图|文生图",
     re.IGNORECASE,
 )
@@ -474,17 +480,19 @@ def _is_transient(exc: BaseException) -> bool:
     return code in _TRANSIENT_STATUS if code is not None else False
 
 
-def _cache_key(config: PluginConfig, prompt: str) -> str:
+def _cache_key(config: PluginConfig, prompt: str, extra: str = "") -> str:
+    # extra 放参考图指纹：同一句提示词换了参考图，必须算出不同的键，
+    # 否则会直接命中上一次（没参考图）的缓存图，看起来像「改图没生效」。
     return (
         f"{config.draw_api_key_resolved()[:8]}|"
         f"{config.draw_base_url_resolved()}|"
         f"{config.draw_model_resolved()}|"
-        f"{config.draw_size}|{config.draw_quality}|{prompt}"
+        f"{config.draw_size}|{config.draw_quality}|{extra}|{prompt}"
     )
 
 
-def _cache_path(config: PluginConfig, prompt: str) -> Path:
-    digest = hashlib.sha256(_cache_key(config, prompt).encode()).hexdigest()[:20]
+def _cache_path(config: PluginConfig, prompt: str, extra: str = "") -> Path:
+    digest = hashlib.sha256(_cache_key(config, prompt, extra).encode()).hexdigest()[:20]
     root = Path(config.draw_dir)
     root.mkdir(parents=True, exist_ok=True)
     return root / f"{digest}.png"
@@ -525,16 +533,107 @@ async def _save_b64_image(b64_data: str, target: Path) -> bool:
         return False
 
 
+_REFERENCE_INTENT_RE = re.compile(
+    r"(按|照|依|用|参考|根据|基于|以)[^。！？\n]{0,8}(这张|这个|这|上面那张|上图|原图|参考图)"
+    r"|[这此]张(?:图|图片|照片|插画|立绘)|参考图|原图"
+    r"|保持[^。！？\n]{0,6}构图"
+)
+
+
+def _sniff_image_ext(raw: bytes) -> str:
+    """按文件头判断真实格式。
+
+    为什么不用固定 .png：QQ 的图多数是 jpeg/webp，却常被标成 png 的 data URL。
+    images.edit 会按文件名推断 MIME，名实不符时上游直接拒掉。
+    """
+    if raw.startswith(b"\xff\xd8\xff"):
+        return ".jpg"
+    if raw.startswith(b"\x89PNG"):
+        return ".png"
+    if raw[:4] == b"RIFF" and raw[8:12] == b"WEBP":
+        return ".webp"
+    return ".png"
+
+
+async def _load_reference_image(
+    sources: list[str],
+    *,
+    timeout: float,
+) -> tuple[str, bytes] | None:
+    """取本轮用户发的第一张可用图片，返回 (文件名, 原始字节)。
+
+    为什么只放内存：参考图是一次性的，落盘还要管清理和并发覆盖，没必要。
+    任何一张取不到都跳过，全失败返回 None——参考图只是增强，不能因为它
+    取不到就把整次生图拖垮（调用方会退化成纯文生图）。
+    """
+    for src in sources or []:
+        text = str(src or "").strip()
+        if not text:
+            continue
+        raw = b""
+        try:
+            if text.startswith("data:"):
+                _, _, b64 = text.partition(",")
+                if not b64:
+                    continue
+                raw = base64.b64decode(b64)
+            elif text.startswith(("http://", "https://")):
+                async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+                    resp = await client.get(text)
+                    resp.raise_for_status()
+                    raw = resp.content
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                f"dl_senpai draw reference fetch failed err={type(exc).__name__}: {exc}"
+            )
+            continue
+        if not raw:
+            continue
+        # 4MB 以上多半不是「参考图」而是误传的大图，硬塞给编辑接口只会超时
+        if len(raw) > 4 * 1024 * 1024:
+            logger.warning(f"dl_senpai draw reference too large bytes={len(raw)}")
+            continue
+        return (f"reference{_sniff_image_ext(raw)}", raw)
+    return None
+
+
+async def _persist_response_item(
+    resp: object,
+    tmp: Path,
+    *,
+    timeout: float,
+) -> bool:
+    """把一次模型响应里的图片写到 tmp，成功返回 True。"""
+    data = getattr(resp, "data", None) or []
+    item = data[0] if data else None
+    if item is None:
+        raise RuntimeError("empty image response")
+    if getattr(item, "b64_json", None):
+        return await _save_b64_image(str(item.b64_json), tmp)
+    if getattr(item, "url", None):
+        return await _download_image(str(item.url), tmp, timeout=timeout)
+    return False
+
+
 async def generate_image_file(
     prompt: str,
     config: PluginConfig | None = None,
+    *,
+    reference: tuple[str, bytes] | None = None,
 ) -> Path | None:
+    """出图。给了 reference 就先走图生图（images.edit），失败退化成纯文生图。
+
+    为什么失败要退化而不是直接报错：图生图是上游按「分组」开通的能力，
+    没开通时返回 403（线上实测过）。参考图属于增强项，不能因为它不可用
+    就让用户一张图都拿不到。
+    """
     cfg = config or get_config()
     prompt = (prompt or "").strip()
     if not prompt or not cfg.draw_configured():
         return None
 
-    target = _cache_path(cfg, prompt)
+    ref_fp = hashlib.sha256(reference[1]).hexdigest()[:16] if reference else ""
+    target = _cache_path(cfg, prompt, extra=ref_fp)
     if target.is_file() and target.stat().st_size > 0:
         return target
 
@@ -544,6 +643,39 @@ async def generate_image_file(
     quality = cfg.draw_quality.strip()
     timeout = max(30.0, float(cfg.draw_timeout))
     tmp = target.with_suffix(".tmp.png")
+
+    # 先试图生图：一次就够，不跟文生图挤在同一个重试循环里，否则日志分不清
+    # 到底是哪条路失败
+    if reference is not None:
+        try:
+            # size 必须显式传：不传时上游会自己挑尺寸（实测 1254x1254），
+            # 和文生图那条路的画幅对不上，同一句提示词出来的构图会跳
+            resp = await client.images.edit(
+                model=model, image=reference, prompt=prompt, n=1, size=size,
+            )
+            if await _persist_response_item(resp, tmp, timeout=timeout):
+                tmp.replace(target)
+                logger.info(
+                    f"dl_senpai draw ok (reference) model={model} "
+                    f"prompt_len={len(prompt)} bytes={target.stat().st_size}"
+                )
+                return target
+            logger.warning("dl_senpai draw reference returned empty payload")
+        except (APIStatusError, APIError) as exc:
+            logger.warning(
+                f"dl_senpai draw edit unavailable status={_status_code(exc)} "
+                f"fallback=generate err={str(exc)[:160]}"
+            )
+            # 退回无参考图的缓存位，避免把文生图结果写进「参考图」的缓存键
+            target = _cache_path(cfg, prompt)
+            tmp = target.with_suffix(".tmp.png")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                f"dl_senpai draw edit failed fallback=generate "
+                f"err={type(exc).__name__}: {str(exc)[:160]}"
+            )
+            target = _cache_path(cfg, prompt)
+            tmp = target.with_suffix(".tmp.png")
 
     last_error: Exception | None = None
     for attempt in range(3):
@@ -560,17 +692,7 @@ async def generate_image_file(
             elif size:
                 kwargs["size"] = size
             resp = await client.images.generate(**kwargs)
-            item = resp.data[0] if resp.data else None
-            if item is None:
-                raise RuntimeError("empty image response")
-
-            saved = False
-            if getattr(item, "b64_json", None):
-                saved = await _save_b64_image(str(item.b64_json), tmp)
-            elif getattr(item, "url", None):
-                saved = await _download_image(str(item.url), tmp, timeout=timeout)
-
-            if not saved:
+            if not await _persist_response_item(resp, tmp, timeout=timeout):
                 raise RuntimeError("image payload empty")
 
             tmp.replace(target)
@@ -617,6 +739,7 @@ async def build_image_segment(
     archive_source_user: str = "",
     archive_source_user_id: str = "",
     archive_scene: str = "",
+    reference_images: list[str] | None = None,
 ) -> MessageSegment | None:
     cfg = config or get_config()
     if not cfg.draw_enable or interrupt:
@@ -631,8 +754,66 @@ async def build_image_segment(
         )
     if not prompt:
         return None
+    # 只在本轮确实带图、且对方的话里明确指向那张图时才当参考图用。
+    # 不加这层判断的话，顺手发张图再聊别的也会被误当成「按图改」。
+    reference: tuple[str, bytes] | None = None
+    if reference_images and _REFERENCE_INTENT_RE.search(user_request or ""):
+        reference = await _load_reference_image(
+            list(reference_images),
+            timeout=max(30.0, float(cfg.draw_timeout)),
+        )
+        if reference is not None:
+            logger.info(f"dl_senpai draw reference attached bytes={len(reference[1])}")
+
+    # 角色卡先取出来：增强环节也要用它纠正草稿里的错误设定
+    # （实测聊天模型会凭记忆把凯尔希写成「精灵耳、紫瞳」，只靠末尾压一句
+    #  官方设定不够——扩写会把错误描述留在同一段提示词里，前后打架）
+    from .draw_cards import augment_prompt, match_character_card
+
+    card = match_character_card(prompt, user_request)
+
+    # 提示词增强：本中转的生图模型不做任何改写（实测 revised_prompt 原样返回），
+    # 一句短描述直接进模型，等于让模型自己去猜构图和画风，这里把这一层补上。
+    if cfg.draw_enhance:
+        from .draw_enhance import enhance_prompt
+
+        prompt = await enhance_prompt(
+            cfg,
+            prompt=prompt,
+            user_request=user_request,
+            reference=reference,
+            card_spec=card.spec if card is not None else "",
+        )
+
+    # 官方设定仍然要压在最前面（截断之前拼，否则被截掉就等于没加）：
+    # 增强只是「尽量按设定改写」，不是保证，最后这一道才是硬约束
+    prompt = _truncate_prompt(
+        augment_prompt(prompt, user_request), cfg.draw_max_prompt_chars
+    )
     logger.info(f"dl_senpai draw final prompt={prompt[:180]!r}")
-    path = await generate_image_file(prompt, cfg)
+
+    path = await generate_image_file(prompt, cfg, reference=reference)
+
+    # 出图自检：不合格就带着**具体问题**重画。
+    # 为什么必须带问题：不告诉它错在哪，同一个模型会用同样的方式再错一遍。
+    if path is not None and cfg.draw_verify and cfg.draw_max_retry > 0:
+        from .draw_enhance import judge_image
+
+        requirements = ((card.spec if card is not None else "") + "\n用户要求：" + (user_request or "")).strip()
+        ok, issue = await judge_image(cfg, path, requirements=requirements)
+        attempts = 0
+        while not ok and attempts < cfg.draw_max_retry:
+            attempts += 1
+            retry_prompt = _truncate_prompt(
+                f"{prompt}\n\n上一次生成的问题（这次必须修正）：{issue}",
+                cfg.draw_max_prompt_chars,
+            )
+            logger.info(f"dl_senpai draw retry {attempts} issue={issue[:80]!r}")
+            retry_path = await generate_image_file(retry_prompt, cfg, reference=reference)
+            if retry_path is None:
+                break
+            path, prompt = retry_path, retry_prompt
+            ok, issue = await judge_image(cfg, path, requirements=requirements)
     if path is None:
         return None
     send_path = path

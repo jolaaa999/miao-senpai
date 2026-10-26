@@ -257,9 +257,18 @@ class AgentTriggerPolicy:
                 has_images=has_images,
                 image_boost=config.image_interrupt_boost,
                 interrupt_prob_scale=interrupt_scale,
+                # 主人说话跳过冷却和骰子。listening 不给 forced：
+                # 他没 @ 她，只是「叫她一定听得见」，不是「必须回答」。
+                is_owner=config.is_owner(getattr(ctx, "user_id", "")),
                 rng=rng,
                 now=now,
             )
+            # 非 @ 的情况下 decide_trigger 只会因 owner 返回 mention，
+            # 落到这里说明是主人：按 mention 处理（走完整工具、加好感）。
+            if decision.kind == "mention":
+                return AgentDecision(
+                    AgentTrigger.MENTION, reason=decision.reason, forced=False
+                )
             if decision.kind == "interrupt":
                 return AgentDecision(
                     AgentTrigger.INTERRUPT,
@@ -286,6 +295,7 @@ class AgentTriggerPolicy:
         has_images: bool = False,
         image_boost: float = 0.0,
         interrupt_prob_scale: float = 1.0,
+        is_owner: bool = False,
         rng: random.Random | None = None,
         now: float | None = None,
     ) -> Any:
@@ -308,6 +318,9 @@ class AgentTriggerPolicy:
             has_images=has_images,
             image_boost=image_boost,
             interrupt_prob_scale=interrupt_prob_scale,
+            # 必须一起透传：不给的话 shadow 比对里「主人」永远按普通人算，
+            # 新旧结果会一直对不上，反而把真问题淹掉。
+            is_owner=is_owner,
             rng=rng,
             now=now,
         )

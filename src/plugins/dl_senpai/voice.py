@@ -45,6 +45,25 @@ _EMOJI_RE = re.compile(
 )
 _URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)
 
+# GPT-SoVITS v2/v2Pro 认可的 text_lang 取值。写错（比如 "jp"）api_v2 会直接 400，
+# 语音功能就静默失效了，所以锁值先在这一层过滤一遍。
+_TTS_SUPPORTED_LANGS = frozenset({
+    "auto",
+    "auto_yue",
+    "en",
+    "zh",
+    "ja",
+    "yue",
+    "ko",
+    "all_zh",
+    "all_ja",
+    "all_yue",
+    "all_ko",
+})
+
+# 「只会说日语」的锁值可能写成 ja 或 all_ja，两者都是「全句按日语读」。
+_JA_LOCK_VALUES = frozenset({"ja", "all_ja"})
+
 
 def _ref_audio_duration_sec(path: Path) -> float | None:
     try:
@@ -98,7 +117,85 @@ def extract_voice_quote_from_user(text: str) -> str:
     return (match.group(1) or match.group(2) or "").strip()
 
 
+def lang_lock(cfg: PluginConfig) -> str:
+    """返回生效的语音语言锁（规范化语言码），未锁或值非法时返回空串。
+
+    非法值当没锁：宁可按原来的自动判断，也不要让一个拼错的键把语音整条废掉。
+    """
+    raw = str(getattr(cfg, "voice_lang_lock", "") or "").strip().lower()
+    return raw if raw in _TTS_SUPPORTED_LANGS else ""
+
+
+def _is_japanese_text(text: str, *, min_kana: int = 3) -> bool:
+    """够不够「日文」：至少出现 min_kana 个假名。全汉字的日文句子（罕见）会被判否，
+    这是有意的保守策略——宁可多翻一次，也不要把中文汉字当成日文念出去。"""
+    return len(_JA_KANA_RE.findall(text or "")) >= min_kana
+
+
+_JA_TRANSLATE_SYSTEM = (
+    "你是中日翻译引擎，不是聊天助手，不要回答内容本身。"
+    "任务：把用户给的中文句子翻成自然的口语日语（动漫女高中生口吻），保留原来的情绪"
+    "（撒娇、得意、安慰、吐槽等）和大致长度。"
+    "输出规则：只输出日语译文本身，不能出现任何中文句子、解释、引号或罗马字。"
+)
+
+# 模型偶尔会「聊天式」地回中文（实测 deepseek-v4.1-flash 会），所以失败要纠正重试一次：
+# 第二次把上面的中文输出当负例贴回去，比单纯重复一遍有效。
+_JA_RETRY_HINT = (
+    "你上一次输出的还是中文，不合格。这次只准输出日语（可以夹少量日文汉字），"
+    "像「おやすみ、今日もお疲れさま。ゆっくり休んでね」这样。要翻译的原文：{text}"
+)
+
+
+async def to_japanese(text: str, cfg: PluginConfig) -> str | None:
+    """把要念的句子换成日语；失败或结果不像日语时返回 None。
+
+    为什么非得先换语言：GPT-SoVITS 的 ja 前端只会按日语音素读，直接喂中文汉字出来的
+    是汉字音读/乱读，不是「她在说日语」。所以锁定日语时，念的内容必须真的先变成日语。
+    失败一律 None —— 调用方据此跳过这条语音，绝不退化成中文语音。
+    """
+    from .llm import get_llm  # 延迟导入：llm 模块重，且避免模块级循环依赖
+
+    try:
+        llm = get_llm(cfg)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"dl_senpai voice: llm unavailable for translate err={exc}")
+        return None
+
+    last = ""
+    for attempt in range(2):
+        prompt = text if attempt == 0 else _JA_RETRY_HINT.format(text=text)
+        try:
+            resp = await llm.client.chat.completions.create(
+                model=cfg.active_model(),
+                messages=[
+                    {"role": "system", "content": _JA_TRANSLATE_SYSTEM},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.3,
+                max_tokens=300,
+                timeout=20,
+            )
+            out = (resp.choices[0].message.content or "").strip()
+        except Exception as exc:  # noqa: BLE001 — 翻译失败不该拦掉整条回复
+            logger.warning(
+                f"dl_senpai voice: japanese translate failed err={type(exc).__name__}: {exc}"
+            )
+            return None
+        out = re.sub(r"^[\"'「『]+|[\"'」』]+$", "", out).strip()
+        if _is_japanese_text(out):
+            return out
+        last = out[:80]
+    logger.warning(
+        f"dl_senpai voice: translated text is not japanese, skip voice sample={last!r}"
+    )
+    return None
+
 def resolve_gptsovits_text_lang(spoken: str, user_request: str, cfg: PluginConfig) -> str:
+    lock = lang_lock(cfg)
+    if lock:
+        # 锁定时连「用户当场要求说英语」也不破例：这把锁表达的是她「只会说这门语言」。
+        return lock
     request = (user_request or "").strip()
     if _VOICE_JA_HINT_RE.search(request):
         return "ja"
@@ -271,7 +368,9 @@ async def synthesize_voice_file(
         path = await _synthesize_gptsovits_file(text, cfg, target, text_lang=lang)
         if path is not None:
             return path
-        if cfg.gptsovits_fallback_edge:
+        # 锁定语言时不回退 edge：那套音色（zh-CN-XiaoyiNeural）念出来的既不是她的声线，
+        # 也不会是日语 —— 破锁比「这条没语音」更糟。
+        if cfg.gptsovits_fallback_edge and not lang_lock(cfg):
             logger.info("dl_senpai gptsovits failed, fallback to edge-tts")
             edge_target = target.with_suffix(".mp3")
             return await _synthesize_edge_file(text, cfg, edge_target)
@@ -303,6 +402,15 @@ async def build_voice_segment(
     text_lang = None
     if cfg.resolved_voice_tts_provider() == "gptsovits":
         text_lang = resolve_gptsovits_text_lang(spoken, user_request, cfg)
+    # 锁定日语时先把要念的内容换成日语（模型偶尔仍会写中文）；换不出来就这条不发，
+    # 绝不发中文语音——「只会说日语」是设定，不是建议。
+    if lang_lock(cfg) in _JA_LOCK_VALUES and not _is_japanese_text(spoken):
+        translated = await to_japanese(spoken, cfg)
+        if not translated:
+            return None
+        spoken = text_for_voice(translated, max_chars=cfg.voice_max_chars) or translated
+        if cfg.resolved_voice_tts_provider() == "gptsovits":
+            text_lang = "ja"
     path = await synthesize_voice_file(spoken, cfg, text_lang=text_lang)
     if path is None:
         return None

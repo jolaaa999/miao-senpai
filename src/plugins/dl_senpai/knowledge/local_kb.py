@@ -221,6 +221,43 @@ def _hay_of(chunk: dict) -> str:
     ).casefold()
 
 
+# 小节标题里的编号前缀：1. / 1.2 / 三、 / （二） 之类，比对标题字面命中时要先剥掉，
+# 否则「3. 图书馆馆长」永远等不到用户在话里写「3.」
+_TITLE_NUM_PREFIX_RE = re.compile(
+    r"^(?:[0-9]+(?:\.[0-9]+)*[.、)）]?\s*"
+    r"|[一二三四五六七八九十]+[、.)）]\s*"
+    r"|[（(][0-9一二三四五六七八九十]+[）)]\s*)"
+)
+
+
+def _squash(text: str) -> str:
+    """去掉所有空白，只留可比较的字符。"""
+    return re.sub(r"\s+", "", text or "")
+
+
+def _literal_title_hits(chunks: list[dict], query: str) -> list[dict]:
+    """查询里**字面**出现了某一节的标题或文件名时，把这些片段捞出来。
+
+    为什么需要：领域闸门（require_named_domain）只认「查询点名了库里某个领域」，
+    可是「我们学校图书馆馆长」这种话问的是**库里某一节的具体内容**，
+    领域词一个都不带 —— 于是整库被判无关，答案明明在库里却检索不到。
+    标题字面命中是最硬的证据（用户自己把标题写出来了），比任何打分都可信，
+    所以单独放行，不受领域闸门约束。
+    """
+    q = _squash(query)
+    if len(q) < 2:
+        return []
+    hits: list[dict] = []
+    for chunk in chunks:
+        for raw in (chunk.get("section") or "", Path(chunk.get("file") or "").stem):
+            title = _squash(_TITLE_NUM_PREFIX_RE.sub("", (raw or "").strip()))
+            # 太短的标题（一个字）等于没信息，命中它只会放行一堆无关段落
+            if len(title) >= 2 and title in q:
+                hits.append(chunk)
+                break
+    return hits
+
+
 def _scan(root: Path) -> tuple[list[dict], dict[str, int]]:
     """扫描整个知识库，返回 (chunk 列表, 词频统计 df)。
 
@@ -513,6 +550,8 @@ class LocalMarkdownRetriever:
         # 于是武科大那批长文件全部涌上来，真正该命中的永劫无间条目被挤掉。
         # 主题词被排除出**计分**是对的（它区分不了段与段），
         # 但它完全可以用来**限定检索范围** —— 那正是它最擅长的。
+        # 字面命中标题的片段：不参与领域判定，任何情况下都要留在候选里
+        literal_hits = _literal_title_hits(all_chunks, text)
         _core_set = set(t for t in (core_terms or []) if t)
         named_domains: set[str] = set()
         for chunk in all_chunks:
@@ -520,9 +559,13 @@ class LocalMarkdownRetriever:
             if dom and (_topic_terms(dom) & _core_set):
                 named_domains.add(dom)
         if named_domains:
-            all_chunks = [
+            kept = [
                 c for c in all_chunks if (c.get("domain") or "") in named_domains
             ]
+            # 领域过滤会连字面命中的片段一起筛掉（它可能属于别的领域），
+            # 这些是用户亲手写出标题的内容，必须补回来
+            kept_ids = {id(c) for c in kept}
+            all_chunks = kept + [c for c in literal_hits if id(c) not in kept_ids]
             # 领域变了，长度基准也要跟着重算，否则惩罚会按旧的均值算
             _lens = [c.get("_term_count") or 0 for c in all_chunks]
             avg_len = (sum(_lens) / len(_lens)) if _lens else 0.0
@@ -537,13 +580,19 @@ class LocalMarkdownRetriever:
         # 无关内容会撞上「按月」「标准」「学过」这类稀有碎片，分数和 df 都拦不住
         # （实测无关与相关的分布完全重叠）；而领域是这条库唯一稳的语义边界。
         if self._require_named_domain and not named_domains:
-            return KnowledgeResult(
-                chunks=[], provider=self._name, duration_ms=_elapsed(), ok=True,
-                metadata={
-                    "scanned": len(all_chunks), "gate": "no_named_domain",
-                    "note": "查询没点名任何已知领域，判为与本库无关",
-                },
-            )
+            if not literal_hits:
+                return KnowledgeResult(
+                    chunks=[], provider=self._name, duration_ms=_elapsed(), ok=True,
+                    metadata={
+                        "scanned": len(all_chunks), "gate": "no_named_domain",
+                        "note": "查询没点名任何已知领域，判为与本库无关",
+                    },
+                )
+            # 没点名领域，但查询里字面写出了某一节的标题：按命中那几节作答，
+            # 而不是把整库判死（「我们学校图书馆馆长」就属于这种）
+            all_chunks = list(literal_hits)
+            _lens = [c.get("_term_count") or 0 for c in all_chunks]
+            avg_len = (sum(_lens) / len(_lens)) if _lens else 0.0
 
         scored: list[tuple[float, dict]] = []
         for chunk in all_chunks:

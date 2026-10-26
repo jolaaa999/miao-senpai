@@ -9,6 +9,7 @@ from nonebot.adapters.onebot.v11 import Bot
 from nonebot.plugin import PluginMetadata
 
 from .config import get_config
+from .observability.logging import log_event
 
 __plugin_meta__ = PluginMetadata(
     name="dl_senpai",
@@ -28,7 +29,6 @@ __plugin_meta__ = PluginMetadata(
 # 延迟导入 handlers，避免仅测子模块时强依赖驱动器
 from . import handlers as _handlers  # noqa: E402, F401
 from . import social_accept as _social_accept  # noqa: E402, F401
-from . import friend_candidates as _friend_candidates  # noqa: E402, F401
 
 try:
     driver = get_driver()
@@ -63,13 +63,60 @@ if driver is not None:
             f"browser={'on' if cfg.browser_enable else 'off'} "
             f"accept_friend={'on' if cfg.auto_accept_friend else 'off'} "
             f"accept_invite={'on' if cfg.auto_accept_group else 'off'} "
-            f"friend_add={'on' if cfg.friend_add_enable else 'off'} "
             f"person_memory={'on' if cfg.person_memory_enable else 'off'} "
             f"verify={'on' if cfg.verify_enable else 'off'} "
-            f"checkin={'on' if cfg.checkin_enable else 'off'}"
+            f"checkin={'on' if cfg.checkin_enable else 'off'} "
+            # 干跑是最容易忘关的开关，放最前面且写明「不会真发」
+            f"dry_run={'ON!不会真发消息' if cfg.dry_run else 'off'} "
+            f"breaker={'on' if cfg.send_breaker_enable else 'off'}"
+            f"({cfg.send_rate_per_minute}/min,{cfg.send_rate_per_hour}/h) "
+            f"typing_status={'on' if cfg.typing_status_enable else 'off'} "
+            f"diary={'on' if cfg.diary_enable else 'off'} "
+            f"backfill={'on' if cfg.backfill_enable else 'off'} "
+            f"asr={'on' if cfg.asr_enable else 'off'} "
+            f"gallery={'on' if cfg.gallery_enable else 'off'} "
+            f"weekly={'on' if cfg.weekly_enable else 'off'} "
+            f"computer={'on:' + cfg.computer_mode if cfg.computer_enable else 'off'} "
+            f"link_read={'on' if cfg.link_read_enable else 'off'} "
+            # B站/小黑盒各自一个开关，横幅里必须能一眼看到（出问题先看这行）
+            f"bili={'on' if cfg.bili_enable else 'off'} "
+            f"heybox={'on' if cfg.heybox_enable else 'off'} "
+            f"bili_grow={'on' if cfg.bili_grow_enable else 'off'}"
+            f"(hour={cfg.bili_grow_hour}) "
+            f"bili_inbox={'on' if cfg.bili_inbox_enable else 'off'}"
+            f"(every={cfg.bili_inbox_interval_sec}s) "
+            f"browse={'on' if cfg.heybox_browse_enable else 'off'}"
+            f"(every={cfg.heybox_browse_interval_min_sec}~{cfg.heybox_browse_interval_max_sec}s "
+            f"p={cfg.heybox_browse_comment_probability}) "
+            f"own_life={'on' if cfg.own_life_enable else 'off'}"
+            f"(interval={cfg.own_life_interval_sec}s cap={cfg.own_life_max_per_day}/day "
+            f"groups={len(cfg.own_life_group_ids())})"
         )
         if cfg.trends_enable:
             asyncio.create_task(_warmup_trends())
+
+        # 技能层（默认关）：启动时打一行清单，让"到底装了哪些技能、触发词是什么"
+        # 在日志里可见。故意只记日志、不注入提示：技能靠命中触发词才会进上下文，
+        # 把清单常驻进提示是纯开销（见 skills.catalog_text 的说明）。
+        if cfg.skill_enable:
+            try:
+                from .skills import catalog_text, get_skill_registry
+
+                registry = get_skill_registry(cfg.skill_dir)
+                specs = registry.all()
+                log_event(
+                    "skills.ready",
+                    count=len(specs),
+                    names=",".join(s.name for s in specs) or None,
+                    catalog=catalog_text(registry) or None,
+                )
+            except Exception as exc:  # noqa: BLE001 — 技能目录坏了不能挡住上线
+                log_event("skills.load_failed", level="warning", error=f"{type(exc).__name__}: {exc}")
+
+        # MCP 外部工具（默认关）。放到后台任务里拉起：它要连第三方进程或外部地址，
+        # 连不上最多是少几个工具，绝不能把机器人上线挡住。
+        if cfg.mcp_enable:
+            asyncio.create_task(_start_mcp())
 
         if cfg.should_autostart_gptsovits():
             from .gptsovits_server import start_gptsovits_server
@@ -86,12 +133,51 @@ if driver is not None:
         except Exception as e:  # noqa: BLE001
             logger.warning(f"[dl_senpai] verify reschedule skipped: {e}")
         asyncio.create_task(register_groups(bot))
+        # 商店素材后台预热：货架每天 4 点换新，缩略图单张约 85 秒，
+        # 不预热的话用户早上第一句「商店」要等 4 分半（实测 4 分 19 秒）。
+        from .shop_warmup import shop_warmup_loop
 
-        from .config import get_config as _cfg
-        from .social_proactive import social_loop
+        asyncio.create_task(shop_warmup_loop())
 
-        # 不传入 config 快照：循环内每轮 get_config()，.env 开关改完重启即生效
-        asyncio.create_task(social_loop(bot))
+        # 她自己的生活：没人找她的时候也会自己醒一次（默认关闭，见配置）。
+        # 放在 bot_connect 而不是 startup：它要往外发消息，必须有活的 bot。
+        from .own_life import own_life_loop
+
+        asyncio.create_task(own_life_loop(bot))
+
+        # 她自己刷帖子：隔一阵去小黑盒首页逛逛，有话说就评一句（默认关闭）。
+        # 不放在 startup：它要用登录态开浏览器，跟 bot 是否在线无关，
+        # 但跟"同一时间只开一个浏览器"有关，所以跟聊天共用一个浏览器锁。
+        from .heybox_browse import browse_loop
+
+        asyncio.create_task(browse_loop())
+
+        # B站留言：官方消息接口，一次 GET 就能看有没有人回（默认关闭）。
+        from .bili_inbox import bili_inbox_loop
+
+        asyncio.create_task(bili_inbox_loop())
+
+        # B站养号：每天攒一点经验到 Lv2（那是 B 站允许评论的门槛）。默认关。
+        from .bili_grow import bili_grow_loop
+
+        asyncio.create_task(bili_grow_loop())
+
+        # 断线补课：连接是刚刚才建立起来的，所以这里是**唯一**能补的时机。
+        # 补课结果不会直接发消息，只写一份摘要等下一轮拼提示词时注入一次。
+        from .backfill import run_backfill
+
+        try:
+            patch = await run_backfill(bot, get_config())
+            if patch not in ("disabled", "empty"):
+                logger.info(f"[dl_senpai] backfill {patch}")
+        except Exception as e:  # noqa: BLE001 — 补课失败绝不能影响聊天
+            logger.warning(f"[dl_senpai] backfill skipped: {e}")
+
+        # 周报：每半小时看一眼是不是到点了（默认关闭）。
+        from .weekly import weekly_loop
+
+        asyncio.create_task(weekly_loop(bot))
+
 
     @driver.on_shutdown
     async def _on_shutdown() -> None:
@@ -100,7 +186,29 @@ if driver is not None:
 
         await get_watcher().stop()
         await stop_gptsovits_server()
+        # MCP：摘掉注册的工具并断开所有服务器连接（未开启时是空操作）
+        await _stop_mcp()
 
+
+    async def _start_mcp() -> None:
+        """后台拉起 MCP 工具接入，并把结果写进日志。
+
+        单独一行日志是刻意的：启动横幅是几十个字段的长行，
+        「MCP 到底连上了没」这种要立刻回答的问题不该再去长行里找。
+        """
+        from .mcp_setup import start_mcp_tools
+
+        status = await start_mcp_tools()
+        logger.info(
+            f"[dl_senpai] mcp state={status.get('state')} "
+            f"servers={status.get('servers')} tools={status.get('tools')} "
+            f"errors={status.get('errors') or {}}"
+        )
+
+    async def _stop_mcp() -> None:
+        from .mcp_setup import stop_mcp_tools
+
+        await stop_mcp_tools()
 
     async def _warmup_trends() -> None:
         try:

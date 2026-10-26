@@ -43,6 +43,10 @@ SESSION_PRIVATE = "private"
 NOTICE_GROUP_INCREASE = "notice.group_increase"
 NOTICE_GROUP_DECREASE = "notice.group_decrease"
 NOTICE_OTHER = "notice.other"
+# 撤回通知：群（group_recall）/ 好友（friend_recall）。用户撤自己消息、管理员撤别人、
+# 以及「她发的消息被别人撤了」走的是同一类事件，靠 author/operator 区分。
+NOTICE_GROUP_RECALL = "notice.group_recall"
+NOTICE_FRIEND_RECALL = "notice.friend_recall"
 
 
 @dataclass
@@ -80,8 +84,16 @@ class MessageContext:
 
     trace_id: str = ""
 
-    # 通知类事件的子类型（group_increase / group_decrease / ...）
+    # 通知类事件的子类型（group_increase / group_decrease / group_recall / ...）
     notice_type: str = ""
+
+    # 撤回通知的细节（只有 notice_type 是 recall 时才有值）
+    # recalled_message_id：被撤回那条消息的 id
+    # recall_author_id：被撤回消息的**作者**（等于 self_id 就是她被撤了）
+    # recall_operator_id：**执行撤回的人**（管理员撤别人时与 author 不同）
+    recalled_message_id: str = ""
+    recall_author_id: str = ""
+    recall_operator_id: str = ""
 
     # 过渡期逃生舱：legacy bridge 需要 OneBot 私有能力时使用
     raw_event: Any = None

@@ -7,7 +7,7 @@ Phase 5 第三十四/三十五/三十六节明确要求：
   affection / inner_state / group_style）**全部保留**；
 - **不迁移数据、不改 schema、不上向量库**。
 
-Facade 解决的具体痛点：`handlers._handle_chat_inner` 里有 60+ 行
+Facade 解决的具体痛点（重构前）：`handlers._handle_chat_inner` 里有 60+ 行
 "从 6 个模块各取一段 brief 再拼进 prompt"的编排代码，散落在
 830 行函数里。AgentRuntime 不该知道底层有 6 套存储。
 
@@ -231,7 +231,14 @@ class MemoryFacade:
         from ..memory import ChatMemory
 
         cfg = self._cfg(config)
-        memory = ChatMemory(cfg.memory_dir, max_history=cfg.max_history)
+        # 一律 getattr 兜底：测试用的精简 config 里可能没有这几个键，
+        # 直接取属性会抛 AttributeError，被外层 except 吞掉后表现为「检索不到东西」
+        memory = ChatMemory(
+            cfg.memory_dir,
+            max_history=getattr(cfg, "max_history", 0),
+            max_chars=getattr(cfg, "history_max_chars", 0),
+            persist_max=getattr(cfg, "memory_persist_max_messages", 0),
+        )
         return memory.load_all(ref.session_id)
 
     def load_history_for_prompt(
@@ -254,12 +261,34 @@ class MemoryFacade:
         cfg = self._cfg(config)
         started = _time.perf_counter()
         raw = self.get_session_history(ref, cfg)
+        # 心情滤镜：她此刻的心情决定「更容易想起哪一类事」。
+        # 读不到就当没有（空串），排序完全退回关键词命中。
+        mood_word = ""
+        try:
+            # MemoryRef 没有 private 字段：私聊靠 session_id 前缀区分
+            _sid = str(getattr(ref, "session_id", "") or "")
+            key = self.inner_scope_key(
+                per_group=bool(getattr(cfg, "inner_state_per_group", True)),
+                group_id=(getattr(ref, "group_id", "") or None),
+                private=_sid.startswith("private:"),
+            )
+            from ..inner_state import current_word
+
+            mood_word = current_word(self.load_inner_state(key, cfg))
+        except Exception:  # noqa: BLE001 — 滤镜失败不能挡召回
+            mood_word = ""
         history, brief = messages_for_llm_with_recall(
             raw,
             query,
             recent_turns=cfg.memory_recent_turns,
             recall_top=cfg.memory_recall_top,
             enable=enable_recall,
+            # 条数由 memory_recent_turns 管，长度由这里兜：
+            # 一条超长消息（贴日志/转聊天记录）能顶掉整段上下文
+            max_chars=int(getattr(cfg, "history_max_chars", 0) or 0),
+            # 只带最近 N 条她的回复：更早的是旧人设输出，是污染源不是记忆
+            max_assistant_turns=int(getattr(cfg, "history_assistant_turns", 0) or 0),
+            mood_word=mood_word,
         )
         # 召回条目数：brief 非空时按行估算（不解析内容）
         recalled = 0
@@ -337,7 +366,13 @@ class MemoryFacade:
         cfg = self._cfg(config)
         started = _time.perf_counter()
         user = get_affection_store(cfg.affection_dir).get_user(scope, user_id)
-        brief = build_affection_brief(name=str(user_id), value=user.value)
+        # 主观认知优先于分数：分数只用来决定档位口气
+        brief = build_affection_brief(
+            name=str(user_id),
+            value=user.value,
+            view=getattr(user, "view", "") or "",
+            view_at=float(getattr(user, "view_at", 0.0) or 0.0),
+        )
         _instrument_memory(
             affection_loaded=True,
             duration_ms=(_time.perf_counter() - started) * 1000,
@@ -369,7 +404,18 @@ class MemoryFacade:
         cfg = self._cfg(config)
         started = _time.perf_counter()
         store = get_inner_state_store(cfg.inner_state_dir)
-        brief = build_inner_state_brief(store.load(key))
+        now = _time.time()
+        state = store.load(key, now=now)
+        # 惰性日结算：底色一天定一次。这里不挂定时任务，读的时候顺手判——
+        # 定时任务要靠人记得开，读是每轮都会发生的事，漏不掉。
+        # 只在「有手札、且上次结算超过一天」时结算，避免每轮重算把底色刷成
+        # 最近一句的情绪（那就成了一句话定生死）。
+        try:
+            if state.notes and (now - float(state.base_since or 0)) > 86400:
+                state = store.settle(key, now=now)
+        except Exception:  # noqa: BLE001 — 结算失败不能挡聊天
+            state = store.load(key, now=now)
+        brief = build_inner_state_brief(state, now=now)
         _instrument_memory(
             inner_state_loaded=True,
             duration_ms=(_time.perf_counter() - started) * 1000,
@@ -561,7 +607,14 @@ class MemoryFacade:
         from ..memory import ChatMemory
 
         cfg = self._cfg(config)
-        memory = ChatMemory(cfg.memory_dir, max_history=cfg.max_history)
+        # 一律 getattr 兜底：测试用的精简 config 里可能没有这几个键，
+        # 直接取属性会抛 AttributeError，被外层 except 吞掉后表现为「检索不到东西」
+        memory = ChatMemory(
+            cfg.memory_dir,
+            max_history=getattr(cfg, "max_history", 0),
+            max_chars=getattr(cfg, "history_max_chars", 0),
+            persist_max=getattr(cfg, "memory_persist_max_messages", 0),
+        )
         memory.append_turn(ref.session_id, user_content, assistant_content)
 
     def observe_group_text(
@@ -601,6 +654,19 @@ class MemoryFacade:
             interrupt=interrupt,
             private_chat=private_chat,
         )
+
+    def add_inner_note(
+        self, key: str, text: str, tag: str = "", config: Any = None
+    ) -> None:
+        """写一条心绪手札（写入）。
+
+        agent/ 层不允许直接碰 inner_state 的存储（架构边界，见
+        tests/test_phase55_boundaries.py），所以记心事工具走这里。
+        """
+        from ..inner_state import get_inner_state_store
+
+        cfg = self._cfg(config)
+        get_inner_state_store(cfg.inner_state_dir).add_note(key, text, tag)
 
     @staticmethod
     def inner_scope_key(

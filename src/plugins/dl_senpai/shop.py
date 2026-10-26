@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import random
 import re
@@ -735,6 +736,69 @@ async def _plain_senpai_path(store: ShopStore, config: PluginConfig) -> Path | N
         return generated
 
 
+
+def _missing_thumb_items(items, store: ShopStore) -> list[ClothingItem]:
+    """筛出还没生成缩略图的款式（缓存文件存在且非空即视为已就绪）。"""
+    out = []
+    for item in items:
+        cached = store.thumb_dir / f"{item.id}.png"
+        if not (cached.is_file() and cached.stat().st_size > 0):
+            out.append(item)
+    return out
+
+
+async def prewarm_shop_assets(
+    items: list[ClothingItem],
+    store: ShopStore,
+    config: PluginConfig,
+    *,
+    concurrency: int | None = None,
+) -> int:
+    """并发补齐商店素材（每件衣服的缩略图 + 学姐素衣图），返回成功张数。
+
+    为什么必须并发：单张 gpt-image-2 约 85 秒，4 件串行就是 4 分半，
+    用户会以为 bot 挂了（实测 20:46 那次等了 4 分 19 秒才出图）。
+    为什么要有信号量：上游绘图接口有限流，一次性打 4~5 个请求容易整批失败，
+    所以并发度做成配置项（DL_SENPAI_SHOP_THUMB_CONCURRENCY，默认 3）。
+    命中缓存的直接跳过，不发任何请求。
+    """
+    limit = max(1, int(concurrency or getattr(config, "shop_thumb_concurrency", 3) or 3))
+    sem = asyncio.Semaphore(limit)
+    plain_cached = store.composite_dir / "plain_senpai.png"
+    need_plain = not (plain_cached.is_file() and plain_cached.stat().st_size > 0)
+    todo = _missing_thumb_items(items, store)
+    if not todo and not need_plain:
+        return 0
+
+    async def _one_thumb(item: ClothingItem):
+        async with sem:
+            return await _thumb_path(item, store, config)
+
+    async def _one_plain():
+        async with sem:
+            return await _plain_senpai_path(store, config)
+
+    jobs = [_one_thumb(item) for item in todo]
+    if need_plain:
+        jobs.append(_one_plain())
+    # return_exceptions=True：单张失败（限流/超时）不能拖垮整批，
+    # 失败的格子在画布上留空，与串行版本的降级行为一致。
+    results = await asyncio.gather(*jobs, return_exceptions=True)
+    ok = 0
+    failed = 0
+    for res in results:
+        if isinstance(res, BaseException):
+            failed += 1
+            logger.warning(f"dl_senpai shop prewarm failed: {res}")
+        elif res is not None:
+            ok += 1
+    logger.info(
+        f"dl_senpai shop prewarm done ok={ok} failed={failed} "
+        f"total={len(jobs)} concurrency={limit}"
+    )
+    return ok
+
+
 def _truncate_text(
     draw: ImageDraw.ImageDraw,
     text: str,
@@ -795,6 +859,9 @@ async def build_shop_composite(
     start_y = top_pad + max(0, (height - top_pad - 24 - grid_total_h) // 2)
 
     display_quotes = typed_quotes[:SHOP_SLOT_COUNT]
+    # 先把缺的素材并发补齐，下面逐格取图时全部命中缓存（原先是串行 await，
+    # 每件 85 秒，新群首次开店要等 4 分半）。
+    await prewarm_shop_assets([q.item for q in display_quotes], store, config)
     for idx, quote in enumerate(display_quotes):
         item = quote.item
         col = idx % SHOP_GRID_COLS

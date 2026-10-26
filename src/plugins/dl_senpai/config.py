@@ -144,12 +144,36 @@ class PluginConfig(BaseSettings):
         default="喵喵,喵学姐", alias="DL_SENPAI_SUMMON_KEYWORDS"
     )
     max_history: int = Field(default=0, alias="DL_SENPAI_MAX_HISTORY")
-    temperature: float = Field(default=1.05, alias="DL_SENPAI_TEMPERATURE")
+    # 喂给模型的历史字符预算（0 = 不限）。只影响「读给模型」，
+    # 不会删磁盘上的记忆——用户聊天记录必须留着。
+    history_max_chars: int = Field(default=12000, alias="DL_SENPAI_HISTORY_MAX_CHARS")
+    # 落盘侧滚动上限（条数，0 = 不限）。为什么不靠上面的 max_history：
+    # max_history 只裁剪「读给模型」那一份，磁盘文件仍会无限长——
+    # 实测有个私聊会话攒到 343 条。文件越长，每轮 append 都要整份重写，
+    # 而且旧人设时期的原文会一直躺在里面被反复读到。
+    # 被滚出去的消息不会丢：追加到 memory/.rollover/<session>.jsonl。
+    memory_persist_max_messages: int = Field(
+        default=120, alias="DL_SENPAI_MEMORY_PERSIST_MAX_MESSAGES"
+    )
+    # 1.1 对齐参考实现（brain.js）。低于 0.9 时措辞会稳定到「像模板」的程度：
+    # 安全但没味道，日常闲聊一眼看出是机器。
+    temperature: float = Field(default=1.1, alias="DL_SENPAI_TEMPERATURE")
     max_tokens: int = Field(default=1600, alias="DL_SENPAI_MAX_TOKENS")
     interrupt_max_tokens: int = Field(default=200, alias="DL_SENPAI_INTERRUPT_MAX_TOKENS")
     reply_max_chars: int = Field(default=1500, alias="DL_SENPAI_REPLY_MAX_CHARS")
     reply_chunk_chars: int = Field(default=900, alias="DL_SENPAI_REPLY_CHUNK_CHARS")
-    reply_hard_max_chars: int = Field(default=8000, alias="DL_SENPAI_REPLY_HARD_MAX_CHARS")
+
+    # 正文超过这个字数就用合并转发（聊天记录卡片）发，避免连发气泡刷屏；
+    # 0 = 关闭，退回原来的「按 reply_chunk_chars 切段再转发」行为
+    forward_min_chars: int = Field(default=400, alias="DL_SENPAI_FORWARD_MIN_CHARS")
+    # 合并转发里每一节的字数上限：手机上超过这个长度要滑好几屏
+    forward_node_chars: int = Field(default=600, alias="DL_SENPAI_FORWARD_NODE_CHARS")
+    # 硬上限，0 = 不截断（默认）。要有这个上限，是为了防模型跑飞把整段话灌进群里，
+    # 不是为了控长度——控长度靠提示词里的长度纪律。
+    # 注意：真触发时只在句子边界切，绝不切半句话（见 llm.truncate_reply）。
+    reply_hard_max_chars: int = Field(
+        default=0, alias="DL_SENPAI_REPLY_HARD_MAX_CHARS"
+    )
     allowed_groups: str = Field(default="", alias="DL_SENPAI_ALLOWED_GROUPS")
     enable_private: bool = Field(default=True, alias="DL_SENPAI_ENABLE_PRIVATE")
     welcome_enable: bool = Field(default=True, alias="DL_SENPAI_WELCOME_ENABLE")
@@ -255,17 +279,96 @@ class PluginConfig(BaseSettings):
     agent_native_tools: bool = Field(
         default=False, alias="DL_SENPAI_AGENT_NATIVE_TOOLS"
     )
+    # 每条请求一行 trace 摘要（DL_SENPAI_AGENT_TRACE_SUMMARY）。
+    #
+    # 为什么默认开：现有的 telemetry 已经把工具/模型/发送/记忆全采集了，
+    # 但**没有任何一行日志落地** —— 只有打开 DL_SENPAI_VALIDATION 时才写
+    # JSONL，且要跑离线脚本才看得见。线上排查「这条消息为什么这样回」
+    # 时手里没有可 grep 的东西。这一行就是给那个场景的。
+    # 关掉它不影响任何行为，只是少一行日志。
+    agent_trace_summary: bool = Field(
+        default=True,
+        alias="DL_SENPAI_AGENT_TRACE_SUMMARY",
+        description="每条请求结束输出一行可 grep 的 trace 摘要",
+    )
 
     # 拟人化：口语 few-shot / 碎句发送 / 内心状态 / 群风格 / 记忆召回
     fewshot_enable: bool = Field(default=True, alias="DL_SENPAI_FEWSHOT_ENABLE")
     humanize_send: bool = Field(default=True, alias="DL_SENPAI_HUMANIZE_SEND")
-    typing_delay_ms_min: int = Field(default=400, alias="DL_SENPAI_TYPING_DELAY_MS_MIN")
+    # 下限从 400 提到 900：真人回一句「嗯」也要看一眼、抬手、打完再发，
+    # 400ms 那种秒回反而假。ai-companion 的 Humanizer 用的是 1200ms。
+    typing_delay_ms_min: int = Field(default=900, alias="DL_SENPAI_TYPING_DELAY_MS_MIN")
     typing_delay_ms_max: int = Field(default=1200, alias="DL_SENPAI_TYPING_DELAY_MS_MAX")
+    # 一次回复最多拆成几条气泡。**默认 3 = 拆**（2026-10-25 改）。
+    #
+    # 为什么从 1 改回来：真正的活人是一条一条蹦的，不是把一段话压在一条里发。
+    # 以前关掉它的理由是「把一句话切成三条发像刷屏」——那个判断对，但问题在
+    # 上游：模型写了一大段，出站再按标点切，切出来当然像被剁碎的段落。
+    # 现在的做法是让模型先说短句（一条一行），出站只按**它自己分的行**拆泡，
+    # 单段长文不硬切（见 bubble_require_newline）。这样拆出来的是三句独立的话，
+    # 不是一段话的三块。
     bubble_max: int = Field(default=3, alias="DL_SENPAI_BUBBLE_MAX")
-    bubble_min_chars: int = Field(default=40, alias="DL_SENPAI_BUBBLE_MIN_CHARS")
-    bubble_prefer_chars: int = Field(default=120, alias="DL_SENPAI_BUBBLE_PREFER_CHARS")
-    # 几个气泡的合计字数超过它就不再逐条发，改用合并转发卡片，避免连发刷屏
-    bubble_total_max_chars: int = Field(default=700, alias="DL_SENPAI_BUBBLE_TOTAL_MAX_CHARS")
+    # 下限从 40 降到 8：闲聊本来就短，40 的门槛等于「短回复永不拆」，
+    # 而短回复恰恰最该分成两三口发。
+    bubble_min_chars: int = Field(default=8, alias="DL_SENPAI_BUBBLE_MIN_CHARS")
+    # 每个气泡的目标字数。32 ≈ 一句口语的长度；原来 120 是把三句并成一条。
+    bubble_prefer_chars: int = Field(default=32, alias="DL_SENPAI_BUBBLE_PREFER_CHARS")
+    # 合计字数超过它就不再拆泡、整条单发（不是转卡片）：
+    # 160 字以上通常是正经答疑，拆成三条每条约 60 字才是真刷屏。
+    bubble_total_max_chars: int = Field(default=160, alias="DL_SENPAI_BUBBLE_TOTAL_MAX_CHARS")
+    # 只按模型自己分的行拆泡，单段长文绝不按标点硬切。
+    # 这一条是「拆泡」和「剁碎」的分界线：有换行 = 她本来就想分两句发；
+    # 没换行 = 她就是想一口气说完，切了就是替她做决定。
+    bubble_require_newline: bool = Field(
+        default=True, alias="DL_SENPAI_BUBBLE_REQUIRE_NEWLINE"
+    )
+
+    # -- 发送闸门：熔断 + 频率上限（搬自 ai-companion-kit 第十三章防风控）--
+    # 腾讯判断机器人最看的不是你打几个字，而是「失败之后还一直重试」。
+    # 下面这几个默认值都是踩坑调出来的，别为了「响应更快」放大。
+    send_breaker_enable: bool = Field(default=True, alias="DL_SENPAI_SEND_BREAKER_ENABLE")
+    # 连续失败几次就熔断
+    send_breaker_fail_threshold: int = Field(
+        default=3, alias="DL_SENPAI_SEND_BREAKER_FAIL_THRESHOLD"
+    )
+    # 熔断后停多久（秒）。期间连尝试都不发起。
+    send_breaker_cooldown_sec: int = Field(
+        default=180, alias="DL_SENPAI_SEND_BREAKER_COOLDOWN_SEC"
+    )
+    # 0 = 不限。默认 6 条/分钟、80 条/小时。
+    # 拆泡后一次回复要发 2~3 条，6 条/分钟等于两轮就撞墙（2026-10-25 提到 12）。
+    # 没敢提太高：腾讯看的不是你打几个字，是短时间内发多少条。
+    send_rate_per_minute: int = Field(default=12, alias="DL_SENPAI_SEND_RATE_PER_MINUTE")
+    send_rate_per_hour: int = Field(default=160, alias="DL_SENPAI_SEND_RATE_PER_HOUR")
+
+    # -- 真·「正在输入」（OneBot 扩展 set_input_status）--
+    # 上报太勤本身就是机器人特征（原项目一天 175 次，反而暴露了）。
+    # 所以默认：短消息不发、至少隔 45 秒、35% 概率。
+    # NapCat 不一定实现这个接口，探到不支持会自动永久关闭。
+    typing_status_enable: bool = Field(default=True, alias="DL_SENPAI_TYPING_STATUS_ENABLE")
+    typing_status_min_chars: int = Field(
+        default=20, alias="DL_SENPAI_TYPING_STATUS_MIN_CHARS"
+    )
+    typing_status_min_interval_sec: int = Field(
+        default=45, alias="DL_SENPAI_TYPING_STATUS_MIN_INTERVAL_SEC"
+    )
+    typing_status_probability: float = Field(
+        default=0.35, alias="DL_SENPAI_TYPING_STATUS_PROBABILITY"
+    )
+    # 打字时长按字数算（真人手打约 110ms/字）。0 = 仍用固定延迟区间。
+    typing_ms_per_char: int = Field(default=110, alias="DL_SENPAI_TYPING_MS_PER_CHAR")
+    # 单条最长等多久（毫秒）。封顶是为了别让长回复把人等跑。
+    typing_ms_max: int = Field(default=3000, alias="DL_SENPAI_TYPING_MS_MAX")
+    # 打字间隔抖动比例：0 = 完全按字数算（太规整，机器味），
+    # 0.35 = 每次在 ±35% 之间浮动，同一句话两次能差一半。
+    typing_jitter_ratio: float = Field(
+        default=0.35, alias="DL_SENPAI_TYPING_JITTER_RATIO"
+    )
+    # 群里随口一句时，「看见了但不接」的概率。真人不会每条必回。
+    # 只作用于非强制触发（插嘴/概率醒），@ 和私聊仍然必回。
+    silence_prob_group: float = Field(
+        default=0.1, alias="DL_SENPAI_SILENCE_PROB_GROUP"
+    )
 
     inner_state_enable: bool = Field(default=True, alias="DL_SENPAI_INNER_STATE_ENABLE")
     inner_state_dir: str = Field(
@@ -273,6 +376,154 @@ class PluginConfig(BaseSettings):
     )
     inner_state_per_group: bool = Field(
         default=True, alias="DL_SENPAI_INNER_STATE_PER_GROUP"
+    )
+
+    # -- 她自己的日记（搬自 ai-companion-kit 的 diary）--
+    # 记忆是「关于你的事」，日记是「她自己的一天」。两者分开存：
+    # 记忆有硬上限，写满会顶掉旧条目；日记天天写、一年几百条，
+    # 混在一起最后就是「她记得昨天酸奶酸了」却「忘了你是谁」。
+    diary_enable: bool = Field(default=True, alias="DL_SENPAI_DIARY_ENABLE")
+    diary_dir: str = Field(default="data/dl_senpai/diary", alias="DL_SENPAI_DIARY_DIR")
+    # 注入提示词的条数。3 条就够：日记是「她昨天干了什么」，
+    # 不是第二本记忆账本，全塞进去会把她拽在旧事里接不上眼前的话。
+    diary_context_n: int = Field(default=3, alias="DL_SENPAI_DIARY_CONTEXT_N")
+    diary_max_chars: int = Field(default=600, alias="DL_SENPAI_DIARY_MAX_CHARS")
+
+    # -- 她自己的生活：定时静默唤醒（搬自 ai-companion-kit 的 own-life）--
+    # 默认关闭。它是唯一一种「用户没开口、她自己往外发消息」的能力，
+    # 必须由人显式打开，并且配合下面的白名单群才允许发言。
+    # -- 主人：说话直接接，不受冷却和概率限制（搬自 ai-companion-kit 的 ownerIds）--
+    # 逗号分隔 QQ 号。留空 = 没有主人，一切按概率/冷却走。
+    # 为什么需要：群里她刚回过话、正在冷却时，你再说一句会被静默晾着——
+    # 那种「明明在却不理我」比不回更伤。这里让指定的人始终能叫得动她。
+    owner_ids: str = Field(default="", alias="DL_SENPAI_OWNER_IDS")
+
+    # -- 本轮语气判定（吐槽 / 真倾诉）--
+    # 人设里的「日常吐槽不是情绪求助」压不住（连「今天好累」都点名了照样安慰），
+    # 所以每轮先判一次，再把结论贴到提示词最末。纯字符串匹配，不花 API。
+    tone_classify_enable: bool = Field(
+        default=True, alias="DL_SENPAI_TONE_CLASSIFY_ENABLE"
+    )
+    # 对方只是随口一句时，本轮追加的具体字数（0 = 不加）。
+    # 通用规则「不超过 60 字」实测压不住，只有「本轮具体」这种才动得动。
+    casual_reply_hint_chars: int = Field(
+        default=30, alias="DL_SENPAI_CASUAL_REPLY_HINT_CHARS"
+    )
+    # 安慰腔的出站过滤：命中词表就把那个小句剪掉（不靠模型听话）。
+    comfort_strip_enable: bool = Field(
+        default=True, alias="DL_SENPAI_COMFORT_STRIP_ENABLE"
+    )
+    # 随口一句时，回复按**整句**累加到这个字数为止（0 = 不截）。
+    # 只切在句末标点后，绝不吐半句话；第一句再长也照发。
+    casual_trim_chars: int = Field(default=60, alias="DL_SENPAI_CASUAL_TRIM_CHARS")
+    # 私聊的字数预算单独给：私聊本来就该多说两句，
+    # 用群聊那个 60 会把她压得像个客服机器人（这是我第一版的漏项）。
+    private_trim_chars: int = Field(default=150, alias="DL_SENPAI_PRIVATE_TRIM_CHARS")
+    # 「随口一句」的字数上限：超过这个长度就不当作随口一句，不截断。
+    casual_prompt_max_chars: int = Field(
+        default=25, alias="DL_SENPAI_CASUAL_PROMPT_MAX_CHARS"
+    )
+
+    # -- 梗密度（见 meme.py）--
+    # auto = 按本轮语气/话题自动定档；也可强制 off / light / normal / heavy。
+    # 自动规则：真倾诉不用、正经答疑不用、对方在用梗就接、随口闲聊克制。
+    meme_level: str = Field(default="auto", alias="DL_SENPAI_MEME_LEVEL")
+
+    # -- 反 AI 味出站清洗（见 humanize.py）--
+    # 严重档（AI 自指/免责/客服收尾/自曝检索/元话语）整句删，删空退回原句。
+    humanize_enable: bool = Field(default=True, alias="DL_SENPAI_HUMANIZE_ENABLE")
+    # 轻微档：首先/其次/综上所述 这类书面连接词。答疑时有用，闲聊时是味道。
+    humanize_soft_enable: bool = Field(
+        default=True, alias="DL_SENPAI_HUMANIZE_SOFT_ENABLE"
+    )
+
+    # -- 复盘腔 / 点评自己 的出站收缩（见 humanize.collapse_self_review）--
+    # 「说实话，我刚才的回答确实偏了，抱歉。翻回去看……」这类自我诊断报告
+    # 是最不像人的一类：被指出错误后写分段的 bug 说明。整段收成一句或者不发。
+    self_review_collapse_enable: bool = Field(
+        default=True, alias="DL_SENPAI_SELF_REVIEW_COLLAPSE_ENABLE"
+    )
+    # 闲聊时的口语替换（因此→所以、是否→是不是）。答疑长回复不走这条，
+    # 那里书面连接词是正常表述。
+    casual_speak_swaps_enable: bool = Field(
+        default=True, alias="DL_SENPAI_CASUAL_SPEAK_SWAPS_ENABLE"
+    )
+    # 「像不像人」指标写日志（llm.ai_flavor）。只观测，不改写。
+    # 要拿数据判断改提示词有没有用，就靠这一行日志。
+    ai_flavor_log_enable: bool = Field(
+        default=True, alias="DL_SENPAI_AI_FLAVOR_LOG_ENABLE"
+    )
+    # -- 跨场合对话流（见 cross_chat.py）--
+    # 记忆按会话存 → 同一个人换个群就不认识；这一层按时间存，补这个洞。
+    # 隐私规则写死在代码里（私聊内容不进群），没有开关。
+    cross_chat_enable: bool = Field(
+        default=False, alias="DL_SENPAI_CROSS_CHAT_ENABLE"
+    )
+    cross_chat_recent_n: int = Field(default=8, alias="DL_SENPAI_CROSS_CHAT_RECENT_N")
+    cross_chat_max_chars: int = Field(
+        default=800, alias="DL_SENPAI_CROSS_CHAT_MAX_CHARS"
+    )
+    cross_chat_max_entries: int = Field(
+        default=600, alias="DL_SENPAI_CROSS_CHAT_MAX_ENTRIES"
+    )
+    cross_chat_dir: str | None = Field(default=None, alias="DL_SENPAI_CROSS_CHAT_DIR")
+
+    # -- 重复消息去重 --
+    # NapCat 断线重连会重放没 ack 的事件；不去重，她会对着同一句话回两遍。
+    dedupe_enable: bool = Field(default=True, alias="DL_SENPAI_DEDUPE_ENABLE")
+    # 判重窗口秒数：窗口内同 id 视为重复
+    dedupe_window_sec: int = Field(default=300, alias="DL_SENPAI_DEDUPE_WINDOW_SEC")
+    # 最多记多少条，超了按 FIFO 丢最老的（重连风暴时不能无限涨）
+    dedupe_max_items: int = Field(default=512, alias="DL_SENPAI_DEDUPE_MAX_ITEMS")
+
+    # -- 消息合并窗口（搬自 ai-companion-kit 的 Waker.batch）--
+    # 对方连着发三条短消息时，等一小会儿攒成一批再回一次，
+    # 而不是追着每条都答一句。
+    # 注意跟 bubble_max 不是一回事：那个管「她的话拆几条」，这个管「对方的话攒几条」。
+    batch_enable: bool = Field(default=True, alias="DL_SENPAI_BATCH_ENABLE")
+    # 群聊窗口比私聊长：群里打字慢、常分几条说
+    batch_window_group_ms: int = Field(
+        default=2500, alias="DL_SENPAI_BATCH_WINDOW_GROUP_MS"
+    )
+    batch_window_private_ms: int = Field(
+        default=1500, alias="DL_SENPAI_BATCH_WINDOW_PRIVATE_MS"
+    )
+    # 攒到这么多条就不再等，立刻交出去（防刷屏时一直不吭声）
+    batch_max_items: int = Field(default=6, alias="DL_SENPAI_BATCH_MAX_ITEMS")
+
+    # -- 干跑模式（搬自 ai-companion-kit 的 --dry-run）--
+    # 打开后整条链路照跑（记忆、提示词、模型、工具），**只在最后发送那一步换成打日志**。
+    # 用途：刚改完人设/长度，想连问十句看语气，但又不能在群里真的发出去。
+    # 日志里搜「[干跑]」就能看到她会说什么。改完记得关掉。
+    dry_run: bool = Field(default=False, alias="DL_SENPAI_DRY_RUN")
+
+    # -- 回复长度纪律（注入到系统提示词最末）--
+    # 原来人设里写着「答疑目标 400~1500 字」，群里问一句她回三段小作文。
+    # 关掉就退回旧行为（话会明显变长），一般不该关。
+    reply_brevity_enable: bool = Field(
+        default=True, alias="DL_SENPAI_REPLY_BREVITY_ENABLE"
+    )
+
+    own_life_enable: bool = Field(default=False, alias="DL_SENPAI_OWN_LIFE_ENABLE")
+    # 唤醒间隔（秒）。默认 9000 = 2.5 小时，原项目调出来的节奏：
+    # 短于 1 小时会显得她在网吧通宵，长于半天就感觉不到「她有自己的日子」。
+    own_life_interval_sec: int = Field(
+        default=9000, alias="DL_SENPAI_OWN_LIFE_INTERVAL_SEC"
+    )
+    # 每天最多叫醒几次。被叫醒不等于必须说话，更不能一天六条。
+    own_life_max_per_day: int = Field(
+        default=6, alias="DL_SENPAI_OWN_LIFE_MAX_PER_DAY"
+    )
+    # 静默时段（本地时间，允许跨零点）。她凌晨也要睡觉。
+    own_life_quiet_start: int = Field(
+        default=3, alias="DL_SENPAI_OWN_LIFE_QUIET_START"
+    )
+    own_life_quiet_end: int = Field(default=8, alias="DL_SENPAI_OWN_LIFE_QUIET_END")
+    # 允许主动发言的群号，逗号分隔。**留空 = 只写日记不发消息**。
+    # 这条是硬闸门：主动消息是这个项目里唯一外发且撤不回的动作。
+    own_life_groups: str = Field(default="", alias="DL_SENPAI_OWN_LIFE_GROUPS")
+    own_life_dir: str = Field(
+        default="data/dl_senpai/own_life", alias="DL_SENPAI_OWN_LIFE_DIR"
     )
 
     group_style_enable: bool = Field(default=True, alias="DL_SENPAI_GROUP_STYLE_ENABLE")
@@ -286,7 +537,13 @@ class PluginConfig(BaseSettings):
         default=True, alias="DL_SENPAI_MEMORY_RECALL_ENABLE"
     )
     memory_recent_turns: int = Field(default=24, alias="DL_SENPAI_MEMORY_RECENT_TURNS")
-    memory_recall_top: int = Field(default=4, alias="DL_SENPAI_MEMORY_RECALL_TOP")
+    # 近期历史里最多带几条她自己的回复。
+    # 为什么要限：memory 是追加的，越早的 assistant 内容越可能是旧人设时期的
+    # 输出（猫娘腔、判词腔、自我点评）。24 条全带上等于把旧毛病当范本反复示范。
+    history_assistant_turns: int = Field(
+        default=8, alias="DL_SENPAI_HISTORY_ASSISTANT_TURNS"
+    )
+    memory_recall_top: int = Field(default=2, alias="DL_SENPAI_MEMORY_RECALL_TOP")
 
     # -- 最近聊天缓冲（记录全部消息，含她没参与的）--
     # 与 ChatMemory 的区别：后者只记她回过的轮次，群里别人互聊的内容
@@ -373,6 +630,16 @@ class PluginConfig(BaseSettings):
     voice_allow_on_interrupt: bool = Field(
         default=False, alias="DL_SENPAI_VOICE_ALLOW_ON_INTERRUPT"
     )
+    # 语音语言锁：非空（如 ja）时她**只会**用这门语言发语音条，朗读内容也会先换成这门语言。
+    # 为什么要这把锁：GPT-SoVITS 的音色是拿日语参考音频调的，混进中文/英文出来既不是
+    # 角色声线也听不懂；所以宁可不发这一条语音，也不发错语言的。
+    voice_lang_lock: str = Field(default="", alias="DL_SENPAI_VOICE_LANG")
+
+    # 撤回：她自己的消息被别人撤回时，允许她当场接一句（只在自己被撤时，且带冷却）。
+    # 为什么加开关与冷却：撤回通知来得又密又碎（有人连撤十条），
+    # 不限制的话群里会变成她一个人在追着每条撤回喊「怎么撤我」。
+    recall_reply_enable: bool = Field(default=True, alias="DL_SENPAI_RECALL_REPLY_ENABLE")
+    recall_reply_cooldown: int = Field(default=180, alias="DL_SENPAI_RECALL_REPLY_COOLDOWN")
     gptsovits_base_url: str = Field(
         default="http://127.0.0.1:9880", alias="DL_SENPAI_GPTSOVITS_URL"
     )
@@ -461,15 +728,27 @@ class PluginConfig(BaseSettings):
         description="时效/事实类问题在调用模型前自动联网，无需 <<<SEARCH>>>",
     )
     search_auto_aggressive: bool = Field(
-        default=True,
+        default=False,
         alias="DL_SENPAI_SEARCH_AUTO_AGGRESSIVE",
-        description="对像问事实/背景的消息更积极自动联网（类似网页版助手）",
+        description=(
+            "对像问事实/背景的消息更积极自动联网（类似网页版助手）。"
+            "默认关：2026-10-24 实测它把中文闲聊也判成事实查询，"
+            "三句日常对话各触发 5 轮无关检索；时效词/热点词/明确要求搜索仍照搜。"
+        ),
     )
     search_provider: str = Field(default="auto", alias="DL_SENPAI_SEARCH_PROVIDER")
     search_max_results: int = Field(default=5, alias="DL_SENPAI_SEARCH_MAX_RESULTS")
     search_max_rounds: int = Field(default=3, alias="DL_SENPAI_SEARCH_MAX_ROUNDS")
     search_max_auto_queries: int = Field(default=4, alias="DL_SENPAI_SEARCH_MAX_AUTO_QUERIES")
     search_timeout: float = Field(default=12.0, alias="DL_SENPAI_SEARCH_TIMEOUT")
+    # 整次联网检索的总预算（首轮 + 换词重试 + 时效补搜 + 抓正文）。
+    # 调用方没有外层超时，不设这个上限时实测能拖到 25 秒。
+    search_deadline: float = Field(default=12.0, alias="DL_SENPAI_SEARCH_DEADLINE")
+
+    # 静态抓不到正文时是否开浏览器兜底（知乎/贴吧/B站 挡爬虫或是 SPA）
+    search_browser_fallback: bool = Field(
+        default=True, alias="DL_SENPAI_SEARCH_BROWSER_FALLBACK"
+    )
     search_region: str = Field(default="zh-cn", alias="DL_SENPAI_SEARCH_REGION")
     search_prompt_max_chars: int = Field(
         default=2400, alias="DL_SENPAI_SEARCH_PROMPT_MAX_CHARS"
@@ -486,6 +765,19 @@ class PluginConfig(BaseSettings):
         alias="DL_SENPAI_SEARCH_MIN_INDEPENDENT_DOMAINS",
         description="联网结果至少要有几个独立域名才算获得交叉印证",
     )
+    # 抓网页正文：检索摘要常常只有标题级信息（"XX官网首页"），
+    # 只给标题等于逼模型照着标题编，或者干脆说"只搜到官网"。
+    search_fetch_page_body: bool = Field(
+        default=True,
+        alias="DL_SENPAI_SEARCH_FETCH_PAGE_BODY",
+        description="是否给前几条结果抓网页正文摘录",
+    )
+    search_page_body_timeout: float = Field(
+        default=6.0, alias="DL_SENPAI_SEARCH_PAGE_BODY_TIMEOUT"
+    )
+    search_page_body_max_chars: int = Field(
+        default=500, alias="DL_SENPAI_SEARCH_PAGE_BODY_MAX_CHARS"
+    )
 
     # 生图：OpenAI 兼容 images API（默认复用中转 Key/地址）
     draw_enable: bool = Field(default=True, alias="DL_SENPAI_DRAW_ENABLE")
@@ -497,6 +789,29 @@ class PluginConfig(BaseSettings):
     draw_timeout: float = Field(default=120.0, alias="DL_SENPAI_DRAW_TIMEOUT")
     draw_cooldown: int = Field(default=0, alias="DL_SENPAI_DRAW_COOLDOWN")
     draw_max_prompt_chars: int = Field(default=800, alias="DL_SENPAI_DRAW_MAX_PROMPT_CHARS")
+    # 画质增强三件套（对应网页版那套「内部改写 + 自检」体验）：
+    # 本中转的 gpt-image-* 实测 revised_prompt 原样返回，完全不做提示词改写，
+    # 也不会自己检查画得对不对，所以在外面补一层。
+    draw_enhance: bool = Field(
+        default=True,
+        alias="DL_SENPAI_DRAW_ENHANCE",
+        description="生图前用视觉模型扩写提示词 / 转述参考图",
+    )
+    draw_verify: bool = Field(
+        default=True,
+        alias="DL_SENPAI_DRAW_VERIFY",
+        description="生图后用视觉模型自检，不合格带反馈重画",
+    )
+    draw_vision_model: str = Field(
+        default="glm-5.3",
+        alias="DL_SENPAI_DRAW_VISION_MODEL",
+        description="增强/自检用的视觉模型（实测 deepseek-v4.1-flash 看不了图）",
+    )
+    draw_max_retry: int = Field(
+        default=1,
+        alias="DL_SENPAI_DRAW_MAX_RETRY",
+        description="自检不合格时最多重画几次（1 次约 +27s）",
+    )
     draw_max_archive: int = Field(default=200, alias="DL_SENPAI_DRAW_MAX_ARCHIVE")
     draw_dir: str = Field(default="data/dl_senpai/draw", alias="DL_SENPAI_DRAW_DIR")
     draw_allow_on_interrupt: bool = Field(
@@ -594,6 +909,46 @@ class PluginConfig(BaseSettings):
         description="本地知识库目录；相对路径按项目根目录解析",
     )
 
+    # MCP 接入：把**外部** MCP Server 的工具导入给 Agent。
+    #
+    # 与仓库里的 mcp_servers/ 方向相反：那些是「把学姐的能力导出给 Cursor」，
+    # 这里是「让学姐去用别人的工具」。两者共用业务模块，不互相替代。
+    #
+    # 默认**关闭**：它会拉起第三方进程或连外部地址，属于必须显式选择的能力。
+    # 另外它只对原生 tool calling 有意义（见 mcp_setup 的 blocked 分支）。
+    mcp_enable: bool = Field(
+        default=False,
+        alias="DL_SENPAI_MCP_ENABLE",
+        description="接入外部 MCP Server 的工具（需同时开启 AGENT_NATIVE_TOOLS）",
+    )
+    mcp_servers: str = Field(
+        default="",
+        alias="DL_SENPAI_MCP_SERVERS",
+        description="MCP 服务器配置 JSON；兼容带 mcpServers 外壳的写法",
+    )
+    mcp_config_path: str = Field(
+        default="",
+        alias="DL_SENPAI_MCP_CONFIG",
+        description="从 JSON 文件读 MCP 配置（与 DL_SENPAI_MCP_SERVERS 二选一）",
+    )
+    mcp_init_timeout: float = Field(default=30.0, alias="DL_SENPAI_MCP_INIT_TIMEOUT")
+    mcp_tool_timeout: float = Field(default=30.0, alias="DL_SENPAI_MCP_TOOL_TIMEOUT")
+    mcp_max_tools: int = Field(
+        default=40,
+        alias="DL_SENPAI_MCP_MAX_TOOLS",
+        description="所有 MCP 服务器合计最多注册多少工具（0=不限），防上下文被灌爆",
+    )
+    mcp_tools_admin_only: bool = Field(
+        default=True,
+        alias="DL_SENPAI_MCP_TOOLS_ADMIN_ONLY",
+        description="MCP 工具只对管理员可见；关掉则对所有群友开放",
+    )
+    mcp_disabled_servers: str = Field(
+        default="",
+        alias="DL_SENPAI_MCP_DISABLED_SERVERS",
+        description="逗号分隔的服务器名，运行期单独屏蔽（不必改整段 JSON）",
+    )
+
     # 社交：自动同意好友 / 拉群邀请（入群申请永不自动同意，留给真人群管）
     auto_accept_friend: bool = Field(default=True, alias="DL_SENPAI_AUTO_ACCEPT_FRIEND")
     auto_accept_group: bool = Field(
@@ -605,41 +960,12 @@ class PluginConfig(BaseSettings):
         default="", alias="DL_SENPAI_AUTO_ACCEPT_FRIEND_REMARK"
     )
 
-    # 主动社交：遍历群成员发好友申请（默认关，防风控）
-    # mode: web=Cookie CGI（NapCat 推荐）；auto=CGI 失败再探测 OneBot 一次；onebot=仅协议
-    friend_add_enable: bool = Field(default=False, alias="DL_SENPAI_FRIEND_ADD_ENABLE")
-    friend_add_mode: str = Field(default="web", alias="DL_SENPAI_FRIEND_ADD_MODE")
-    friend_add_daily_limit: int = Field(default=20, alias="DL_SENPAI_FRIEND_ADD_DAILY_LIMIT")
-    friend_add_verify_msg: str = Field(
-        default="我是群里的学姐~", alias="DL_SENPAI_FRIEND_ADD_VERIFY_MSG"
-    )
-    friend_add_exclude: str = Field(
-        default="", alias="DL_SENPAI_FRIEND_ADD_EXCLUDE",
-        description="逗号分隔的 QQ 号，永不发好友申请",
-    )
-    owner_ids: str = Field(
-        default="",
-        alias="DL_SENPAI_OWNER_IDS",
-        description="逗号分隔主人 QQ；可私聊「导出未加好友」（另认 SUPERUSERS）",
-    )
-
-    # 本机 QQ 客户端 RPA 加好友（独立进程点 UI，需校准坐标）
-    friend_rpa_enable: bool = Field(default=True, alias="DL_SENPAI_FRIEND_RPA_ENABLE")
-    friend_rpa_mode: str = Field(default="deeplink", alias="DL_SENPAI_FRIEND_RPA_MODE")
-    friend_rpa_verify_msg: str = Field(
-        default="我是群里的学姐~", alias="DL_SENPAI_FRIEND_RPA_VERIFY_MSG"
-    )
-    friend_rpa_delay_min: float = Field(default=8.0, alias="DL_SENPAI_FRIEND_RPA_DELAY_MIN")
-    friend_rpa_delay_max: float = Field(default=18.0, alias="DL_SENPAI_FRIEND_RPA_DELAY_MAX")
-    friend_rpa_max_per_run: int = Field(
-        default=20, alias="DL_SENPAI_FRIEND_RPA_MAX_PER_RUN"
-    )
-
     # 签到：默认仅指定群启用
     checkin_enable: bool = Field(default=True, alias="DL_SENPAI_CHECKIN_ENABLE")
-    checkin_groups: str = Field(
-        default="980229149,600478436,1050332675", alias="DL_SENPAI_CHECKIN_GROUPS"
-    )
+    # 默认留空：群号写死在源码里，一旦仓库开源就跟着出去了
+    # （scripts/check_leaks.py 专门扫这类东西）。实际值放 .env，.env 已被 git 忽略。
+    # 留空 = 没有群开启签到，不是错误状态；要用的群在 .env 里配上即可。
+    checkin_groups: str = Field(default="", alias="DL_SENPAI_CHECKIN_GROUPS")
     checkin_dir: str = Field(default="data/dl_senpai/checkin", alias="DL_SENPAI_CHECKIN_DIR")
     checkin_sticker_prob: float = Field(default=0.35, alias="DL_SENPAI_CHECKIN_STICKER_PROB")
     checkin_sync_special_title: bool = Field(
@@ -731,6 +1057,286 @@ class PluginConfig(BaseSettings):
         default=0.35, alias="DL_SENPAI_SHOP_AFFECTION_DISCOUNT_MAX_RATE"
     )
 
+    # 商店缩略图并发生成数：单张 gpt-image-2 约 85 秒，串行 4 件要 4 分半；
+    # 并发能压到 ~90 秒，但上游有限流，所以做成可调（1=退回串行）。
+    shop_thumb_concurrency: int = Field(
+        default=3, alias="DL_SENPAI_SHOP_THUMB_CONCURRENCY"
+    )
+    # 后台预热：每日 4 点换新后素材是冷的，先在后台把各群缩略图生成好，
+    # 用户白天问「商店」就能秒回；关掉则退回「首次访问现画」。
+    shop_warmup: bool = Field(default=True, alias="DL_SENPAI_SHOP_WARMUP")
+
+
+
+    # ================================================================
+    # 以下这批是「借鉴小黑盒 @异世回忆（小鲸鱼）那套 kit」落地到学姐的部分。
+    # 统一原则：**默认值一律取「什么都不做」**。
+    # 这套能力的价值在打开之后像个人，但其中好几项能发出撤不回的消息、
+    # 或者动到桌面，所以宁可让用户手动打开，也不要在升级时自动生效。
+    # ================================================================
+
+    # -- 她自己过日子：随机间隔 / 真发概率 / 安静门槛 --
+    # 原版是固定 9000 秒一跳。作者后来自己推翻了这个设计：「固定间隔 =
+    # 闹钟，随机才像想起来才找你」。所以这里改成区间，每次醒来重新抽一个
+    # 下一次的时间点（写进 state），而不是「到点就必醒」。
+    own_life_interval_min_sec: int = Field(
+        default=2700, alias="DL_SENPAI_OWN_LIFE_INTERVAL_MIN_SEC"
+    )
+    own_life_interval_max_sec: int = Field(
+        default=6600, alias="DL_SENPAI_OWN_LIFE_INTERVAL_MAX_SEC"
+    )
+    # 被叫醒不等于要说话。决定「说话」之后还要再过一次骰子，
+    # 否则每次醒来都冒一句，一天就是六条群消息（原版给的参考值 0.35）。
+    own_life_send_probability: float = Field(
+        default=0.35, alias="DL_SENPAI_OWN_LIFE_SEND_PROBABILITY"
+    )
+    # 你们正在聊的时候她不打断：主人最近 N 秒内说过话就不叫醒。
+    own_life_min_silence_sec: int = Field(
+        default=900, alias="DL_SENPAI_OWN_LIFE_MIN_SILENCE_SEC"
+    )
+
+    # -- 断线补课 --
+    # 桥接断开期间的消息是真的丢了（不会补发）。重连后拉一次最近历史补上，
+    # 但**只总结、不逐条回**——原版第一版就是开机后一口气回了 30 条。
+    backfill_enable: bool = Field(default=False, alias="DL_SENPAI_BACKFILL_ENABLE")
+    backfill_max_messages: int = Field(
+        default=30, alias="DL_SENPAI_BACKFILL_MAX_MESSAGES"
+    )
+    backfill_max_age_sec: int = Field(
+        default=21600, alias="DL_SENPAI_BACKFILL_MAX_AGE_SEC"
+    )
+
+    # -- 语音转文字（本地 whisper）--
+    # 只做本地：她听到的语音不该上传到别人服务器（原版强调这一点）。
+    asr_enable: bool = Field(default=False, alias="DL_SENPAI_ASR_ENABLE")
+    asr_model: str = Field(default="small", alias="DL_SENPAI_ASR_MODEL")
+    asr_language: str = Field(default="zh", alias="DL_SENPAI_ASR_LANGUAGE")
+    asr_timeout_sec: float = Field(default=90.0, alias="DL_SENPAI_ASR_TIMEOUT_SEC")
+
+    # -- 自选相册（她自己挑的图 + 一句理由）--
+    # 与 draw_store（生成台账）不同：这里是「她挑的」，价值在挑这个动作。
+    gallery_enable: bool = Field(default=False, alias="DL_SENPAI_GALLERY_ENABLE")
+    gallery_dir: str = Field(
+        default="data/dl_senpai/gallery", alias="DL_SENPAI_GALLERY_DIR"
+    )
+    gallery_max_items: int = Field(default=200, alias="DL_SENPAI_GALLERY_MAX_ITEMS")
+    gallery_context_n: int = Field(default=3, alias="DL_SENPAI_GALLERY_CONTEXT_N")
+
+    # -- 印象保鲜 --
+    # 人会变。印象不重写，她三个月后还在用第一次见面的判断跟你说话。
+    impression_refresh_enable: bool = Field(
+        default=True, alias="DL_SENPAI_IMPRESSION_REFRESH_ENABLE"
+    )
+    impression_refresh_days: int = Field(
+        default=14, alias="DL_SENPAI_IMPRESSION_REFRESH_DAYS"
+    )
+
+    # -- 周报 --
+    weekly_enable: bool = Field(default=False, alias="DL_SENPAI_WEEKLY_ENABLE")
+    weekly_weekday: int = Field(default=1, alias="DL_SENPAI_WEEKLY_WEEKDAY")
+    weekly_hour: int = Field(default=22, alias="DL_SENPAI_WEEKLY_HOUR")
+    weekly_groups: str = Field(default="", alias="DL_SENPAI_WEEKLY_GROUPS")
+
+    # -- 问候去重 --
+    # 「别每次念同一句开场白」是原版最实用的一条心得：固定问候听三天就背下来了。
+    greeting_dedupe_enable: bool = Field(
+        default=True, alias="DL_SENPAI_GREETING_DEDUPE_ENABLE"
+    )
+    greeting_dedupe_window_sec: int = Field(
+        default=21600, alias="DL_SENPAI_GREETING_DEDUPE_WINDOW_SEC"
+    )
+
+    # -- 电脑（GUI）操作：默认关，围栏见 computer_control.py --
+    computer_enable: bool = Field(default=False, alias="DL_SENPAI_COMPUTER_ENABLE")
+    # view = 只能看（截图/窗口）；control = 能点能打字。升档要显式配。
+    computer_mode: str = Field(default="view", alias="DL_SENPAI_COMPUTER_MODE")
+    # 前台窗口白名单。**留空 = 谁都不许碰**（安全侧默认，不是便利侧默认）。
+    computer_allow_apps: str = Field(default="", alias="DL_SENPAI_COMPUTER_ALLOW_APPS")
+    computer_deny_keywords: str = Field(
+        default="", alias="DL_SENPAI_COMPUTER_DENY_KEYWORDS"
+    )
+    # 是否必须持有租约才能操作。关掉它等于「只要白名单命中就能动」，
+    # 只建议在调试期短暂关闭。
+    computer_require_lease: bool = Field(
+        default=True, alias="DL_SENPAI_COMPUTER_REQUIRE_LEASE"
+    )
+    computer_dir: str = Field(
+        default="data/dl_senpai/computer", alias="DL_SENPAI_COMPUTER_DIR"
+    )
+    computer_max_actions_per_min: int = Field(
+        default=20, alias="DL_SENPAI_COMPUTER_MAX_ACTIONS_PER_MIN"
+    )
+    computer_click_min_interval_ms: int = Field(
+        default=300, alias="DL_SENPAI_COMPUTER_CLICK_MIN_INTERVAL_MS"
+    )
+    computer_screenshot_max_side: int = Field(
+        default=1280, alias="DL_SENPAI_COMPUTER_SCREENSHOT_MAX_SIDE"
+    )
+
+    # ---- 读链接（把对方贴的 URL 变成正文）----
+    # 只读能力，默认开：不开的话她看到链接只能靠截图或凭 URL 猜。
+    link_read_enable: bool = Field(default=True, alias="DL_SENPAI_LINK_READ_ENABLE")
+    # 主动读：消息里出现链接就先读一遍再让她开口。
+    # 关掉之后只剩她自己想起 <<<READ url>>> 才读（更省，但群里常见的
+    # 「甩个链接+一句话」大概率就答歪了）。
+    link_read_auto: bool = Field(default=True, alias="DL_SENPAI_LINK_READ_AUTO")
+    # 静态 HTML 抽不出正文时是否开浏览器渲染（SPA 兜底）。
+    # 关掉能省内存，但知乎/小黑盒/B站专栏这类就只剩空壳。
+    link_read_use_browser: bool = Field(default=True, alias="DL_SENPAI_LINK_READ_USE_BROWSER")
+    # 浏览器渲染时"正文够了没"的门槛：低于这个字数就继续等（小黑盒这类站
+    # 的正文是 XHR 后才挂上 DOM 的，等太短只能拿到导航和备案号）。
+    link_read_browser_min_chars: int = Field(
+        default=400, alias="DL_SENPAI_LINK_READ_BROWSER_MIN_CHARS"
+    )
+    # 喂给模型的正文上限（字）。太长会稀释注意力，超出部分首尾各留一半。
+    link_read_max_chars: int = Field(default=6000, alias="DL_SENPAI_LINK_READ_MAX_CHARS")
+    # 下载上限：超过就明确失败，不硬撑（大于 2MB 的"网页"基本是附件）。
+    link_read_max_bytes: int = Field(default=2097152, alias="DL_SENPAI_LINK_READ_MAX_BYTES")
+    link_read_timeout: float = Field(default=20.0, alias="DL_SENPAI_LINK_READ_TIMEOUT")
+
+    # ---- 技能层（Skills：按需注入的一页领域说明）----
+    # 定位见 skills.py 顶部：技能只是"说明书"，不执行任何东西。
+    # 默认关：新能力先让想用的人显式打开，避免默认行为变化。
+    skill_enable: bool = Field(default=False, alias="DL_SENPAI_SKILL_ENABLE")
+    # 技能目录。相对路径按项目根解析（与 knowledge_base 等保持一致）。
+    skill_dir: str = Field(default="data/skills", alias="DL_SENPAI_SKILL_DIR")
+    # 单条技能正文注入上限：太长会稀释注意力，也会抢人设的戏份。
+    skill_max_chars: int = Field(default=1500, alias="DL_SENPAI_SKILL_MAX_CHARS")
+    # 单条消息最多注入几个技能。默认 1：两个领域规范同时上，模型会互相打架。
+    skill_max_skills: int = Field(default=1, alias="DL_SENPAI_SKILL_MAX_SKILLS")
+    # 热重载：改完 SKILL.md 立刻生效，不必重启 bot。
+    # 调提示词本来就是"改一句、问一句"，重启一次十几秒，这个开关值这个代价。
+    skill_hot_reload: bool = Field(default=True, alias="DL_SENPAI_SKILL_HOT_RELOAD")
+    # 缓存时长：同一链接反复被贴时不必反复抓（新闻类可调小）。
+    link_read_cache_ttl_sec: int = Field(default=21600, alias="DL_SENPAI_LINK_READ_CACHE_TTL_SEC")
+    link_read_cache_dir: str = Field(default="", alias="DL_SENPAI_LINK_READ_CACHE_DIR")
+    # 域名白名单，逗号分隔。**留空 = 除内网外都可以**（内网永远禁，见 link_reader）。
+    link_read_allowed_domains: str = Field(
+        default="", alias="DL_SENPAI_LINK_READ_ALLOWED_DOMAINS"
+    )
+    # 长文先摘要：超过下面的字数先压成要点，再连同原文片段一起给模型。
+    link_read_summary_enable: bool = Field(
+        default=True, alias="DL_SENPAI_LINK_READ_SUMMARY_ENABLE"
+    )
+    link_read_summary_min_chars: int = Field(
+        default=4000, alias="DL_SENPAI_LINK_READ_SUMMARY_MIN_CHARS"
+    )
+
+    # ---- B站 / 小黑盒：只读上网（刷视频、搜帖子）----
+    # 为什么默认开：这两种动作只读、不需要登录，出事的最小损失是"被站点限流"，
+    # 不是"以她的名义发东西"。写入类的动作（发说说、发帖）另外一套开关，见 T2。
+    bili_enable: bool = Field(default=True, alias="DL_SENPAI_BILI_ENABLE")
+    # 每日配额：防她（或被群友指挥着）连着刷。0 或负数 = 不限。
+    bili_daily_limit: int = Field(default=60, alias="DL_SENPAI_BILI_DAILY_LIMIT")
+    bili_timeout: float = Field(default=15.0, alias="DL_SENPAI_BILI_TIMEOUT")
+    heybox_enable: bool = Field(default=True, alias="DL_SENPAI_HEYBOX_ENABLE")
+    heybox_daily_limit: int = Field(default=40, alias="DL_SENPAI_HEYBOX_DAILY_LIMIT")
+    # 要用真浏览器渲染搜索页，比接口慢得多，超时给宽一点
+    heybox_timeout: float = Field(default=30.0, alias="DL_SENPAI_HEYBOX_TIMEOUT")
+    # 配额账本：B站/小黑盒/以后的动作类功能共用一份，按天清零
+    quota_file: str = Field(default="data/dl_senpai/quota.json", alias="DL_SENPAI_QUOTA_FILE")
+
+    # ---- 写入层（T2）：发说说、黑盒评论 ----
+    # 默认全关。理由见 docs/social-web.md：这两个是「以她名义在公开平台留痕」，
+    # 发出去撤不回来，跟只读层不是一个量级。
+    qzone_enable: bool = Field(default=False, alias="DL_SENPAI_QZONE_ENABLE")
+    # 是否允许她自己直接发（false = 只存草稿，等主人说「发」）
+    qzone_auto_post: bool = Field(default=False, alias="DL_SENPAI_QZONE_AUTO_POST")
+    qzone_daily_limit: int = Field(default=1, alias="DL_SENPAI_QZONE_DAILY_LIMIT")
+    qzone_max_chars: int = Field(default=120, alias="DL_SENPAI_QZONE_MAX_CHARS")
+    qzone_draft_file: str = Field(
+        default="data/dl_senpai/qzone_drafts.json", alias="DL_SENPAI_QZONE_DRAFT_FILE"
+    )
+    heybox_write_enable: bool = Field(
+        default=False, alias="DL_SENPAI_HEYBOX_WRITE_ENABLE"
+    )
+    # 0 = 不设上限。为什么不按天卡死：主人要的是"她想评就评"，
+    # 卡条数会让她攒着补发，反而更像机器人。真正的护栏是下面的间隔和去重。
+    heybox_comment_daily_limit: int = Field(
+        default=0, alias="DL_SENPAI_HEYBOX_COMMENT_DAILY_LIMIT"
+    )
+    # 两条评论之间的最小间隔（秒）。默认 10 分钟，评太快是最容易被判脚本的信号。
+    heybox_comment_min_gap_sec: int = Field(
+        default=600, alias="DL_SENPAI_HEYBOX_COMMENT_MIN_GAP_SEC"
+    )
+    # 评过的帖子、最近的文案，存这里（台账 + 去重依据）
+    heybox_write_state_file: str = Field(
+        default="data/dl_senpai/heybox_write_state.json",
+        alias="DL_SENPAI_HEYBOX_WRITE_STATE_FILE",
+    )
+    # ---- 自己刷帖子（自主活动）----
+    # 开了之后她自己会隔一阵去刷首页信息流，遇到想说的就评一句。
+    heybox_browse_enable: bool = Field(default=False, alias="DL_SENPAI_HEYBOX_BROWSE_ENABLE")
+    heybox_browse_interval_min_sec: int = Field(
+        default=3600, alias="DL_SENPAI_HEYBOX_BROWSE_INTERVAL_MIN_SEC"
+    )
+    heybox_browse_interval_max_sec: int = Field(
+        default=10800, alias="DL_SENPAI_HEYBOX_BROWSE_INTERVAL_MAX_SEC"
+    )
+    # 刷到想说的东西之后，真正评论的概率（0~1）。别调到 1：全都评等于刷屏。
+    heybox_browse_comment_probability: float = Field(
+        default=0.35, alias="DL_SENPAI_HEYBOX_BROWSE_COMMENT_PROBABILITY"
+    )
+    # 两次"开浏览器"之间的最小间隔。太密会被小黑盒判成脚本（实测 show_captcha）
+    heybox_session_gap_sec: int = Field(default=240, alias="DL_SENPAI_HEYBOX_SESSION_GAP_SEC")
+    # 别人回她的留言，她要不要自己接话（默认接：留言是对话，不是刷屏）
+    heybox_browse_reply_enable: bool = Field(
+        default=True, alias="DL_SENPAI_HEYBOX_BROWSE_REPLY_ENABLE"
+    )
+    # 一次醒来最多回头看几篇帖子找留言（每篇要开一次浏览器，别设太大）
+    heybox_inbox_posts: int = Field(default=1, alias="DL_SENPAI_HEYBOX_INBOX_POSTS")
+    # ---- B站（小号登录后才能用）----
+    # 发评论/回留言总开关。默认关：没有小号登录态时它只会报错。
+    bili_write_enable: bool = Field(default=False, alias="DL_SENPAI_BILI_WRITE_ENABLE")
+    bili_comment_min_gap_sec: int = Field(
+        default=900, alias="DL_SENPAI_BILI_COMMENT_MIN_GAP_SEC"
+    )
+    bili_comment_max_chars: int = Field(default=200, alias="DL_SENPAI_BILI_COMMENT_MAX_CHARS")
+    # 0 = 不按天卡条数（同小黑盒：卡条数会让她攒着补发，更像机器人）
+    bili_comment_daily_limit: int = Field(
+        default=0, alias="DL_SENPAI_BILI_COMMENT_DAILY_LIMIT"
+    )
+    bili_write_state_file: str = Field(
+        default="data/dl_senpai/bili_write_state.json",
+        alias="DL_SENPAI_BILI_WRITE_STATE_FILE",
+    )
+    # 留言轮询：B站消息接口很轻（一次 GET），但别太勤，默认半小时
+    bili_inbox_enable: bool = Field(default=False, alias="DL_SENPAI_BILI_INBOX_ENABLE")
+    bili_inbox_interval_sec: int = Field(
+        default=1800, alias="DL_SENPAI_BILI_INBOX_INTERVAL_SEC"
+    )
+    bili_inbox_max_per_tick: int = Field(default=2, alias="DL_SENPAI_BILI_INBOX_MAX_PER_TICK")
+    # ---- 养号（攒经验到 Lv2 才能评论）----
+    # 注意：B站协议不允许自动化操作账号，这里默认关，风险自负
+    bili_grow_enable: bool = Field(default=False, alias="DL_SENPAI_BILI_GROW_ENABLE")
+    bili_grow_hour: int = Field(default=12, alias="DL_SENPAI_BILI_GROW_HOUR")
+    # 每天投几枚硬币（0 = 不投；投币 +1 经验/枚，但那是她的硬币）
+    bili_grow_coins: int = Field(default=0, alias="DL_SENPAI_BILI_GROW_COINS")
+    bili_grow_log_file: str = Field(
+        default="data/dl_senpai/bili_grow_log.jsonl",
+        alias="DL_SENPAI_BILI_GROW_LOG_FILE",
+    )
+    bili_inbox_log_file: str = Field(
+        default="data/dl_senpai/bili_inbox_log.jsonl",
+        alias="DL_SENPAI_BILI_INBOX_LOG_FILE",
+    )
+    # 她自己的活动记录（刷了啥、说了啥），主人可以翻
+    heybox_browse_log_file: str = Field(
+        default="data/dl_senpai/heybox_browse_log.jsonl",
+        alias="DL_SENPAI_HEYBOX_BROWSE_LOG_FILE",
+    )
+    heybox_comment_max_chars: int = Field(
+        default=300, alias="DL_SENPAI_HEYBOX_COMMENT_MAX_CHARS"
+    )
+    # 登录态（cookie）落盘目录。里面等同于密码，别提交、别外传。
+    web_login_dir: str = Field(
+        default="data/dl_senpai/web_login", alias="DL_SENPAI_WEB_LOGIN_DIR"
+    )
+    # 登录的是主人主号就拒绝 —— 主号不许拿来发东西
+    web_login_guard_owner: bool = Field(
+        default=True, alias="DL_SENPAI_WEB_LOGIN_GUARD_OWNER"
+    )
+
     def shop_auto_import_query_list(self) -> list[str]:
         raw = self.shop_auto_import_queries.strip()
         if not raw:
@@ -742,6 +1348,49 @@ class PluginConfig(BaseSettings):
         if not raw:
             return set()
         return {g.strip() for g in raw.split(",") if g.strip()}
+
+    def owner_id_set(self) -> set[str]:
+        """主人 QQ 号集合。空集合 = 没有主人，走普通概率/冷却。"""
+        raw = self.owner_ids.strip()
+        if not raw:
+            return set()
+        return {q.strip() for q in raw.split(",") if q.strip()}
+
+    def is_owner(self, user_id: object) -> bool:
+        """这个人是不是主人。
+
+        两处判定入口（新 agent 链路 / 旧编排）都走这里，避免各写一份 str()
+        转换——QQ 号在不同地方有 int 和 str 两种形态，比较不统一就会出现
+        「配了但不生效」这种最难查的毛病。
+        """
+        owners = self.owner_id_set()
+        if not owners:
+            return False
+        return str(user_id).strip() in owners
+
+    def own_life_interval_range(self) -> tuple[int, int]:
+        """随机唤醒区间（秒）。下限保底 60 秒，上限不低于下限。
+
+        为什么不留固定间隔：固定间隔等于闹钟，她会像打卡一样准点出现。
+        随机会让她表现得像「想起来才找你」——这是原版作者自己推翻
+        最初设计后给出的结论。
+        """
+        lo = max(60, int(self.own_life_interval_min_sec))
+        hi = max(lo, int(self.own_life_interval_max_sec))
+        return lo, hi
+
+    def weekly_group_ids(self) -> list[str]:
+        raw = self.weekly_groups.strip()
+        if not raw:
+            return []
+        return [g.strip() for g in raw.split(",") if g.strip()]
+
+    def own_life_group_ids(self) -> list[str]:
+        """允许她自己发消息的群。空列表 = 只写日记，不说话。"""
+        raw = self.own_life_groups.strip()
+        if not raw:
+            return []
+        return [g.strip() for g in raw.split(",") if g.strip()]
 
     def checkin_group_ids(self) -> set[str]:
         raw = self.checkin_groups.strip()

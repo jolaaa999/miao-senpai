@@ -123,6 +123,17 @@ class PromptRequest:
     memory_cards_brief: str = ""
     # 当天聊天流水：她自己没参与、但发生在她眼前的对话背景。
     recent_chat_brief: str = ""
+    # 跨场合对话流：她在别的群/私聊里接过的轮次（见 cross_chat.py）
+    cross_chat_brief: str = ""
+    # 她自己最近写过的日记（搬自 ai-companion-kit）。
+    # 与记忆账本分开注入：记忆是「关于别人的事实」，日记是「她自己的日子」，
+    # 混成一段会让模型把两者都当成档案念，反而不会顺嘴提一句「我昨天也……」。
+    diary_brief: str = ""
+    # 回复长度纪律。放在提示词最末——人设中段的规则压不住模型的输出长度，
+    # 最后读到的那段才管用。
+    brevity_hint: str = ""
+    # 本轮语气判断（吐槽/真倾诉）。比长度纪律更靠后：它判的是这一句要不要安慰
+    tone_hint: str = ""
     # -- 注册表驱动的工具集合 --
     visible_tools: list[ToolDefinition] = field(default_factory=list)
 
@@ -235,6 +246,30 @@ class PromptBuilder:
         if recent_chat:
             text = f"{text}\n{recent_chat}"
 
+        # 跨场合对话流紧跟在当天流水之后：先看「这个群刚才聊了什么」，
+        # 再看「我在别处接过什么话」，粒度从近到远。
+        cross_chat = (request.cross_chat_brief or "").strip()
+        if cross_chat:
+            text = f"{text}\n{cross_chat}"
+
+        # 她自己的日记。放在聊天流水之后：先看「群里发生了什么」，
+        # 再看「我自己最近是什么状态」，顺序跟人回忆的顺序一致。
+        # 与 persona.py 解耦的理由同上——那个文件有守卫测试盯着不许漂移。
+        diary = (request.diary_brief or "").strip()
+        if diary:
+            text = f"{text}\n{diary}"
+
+        # 长度纪律放在**最末**：模型对最后读到的那段最敏感，塞在几千字人设
+        # 中段的规则实际压不住。之前「目标 400~1500 字」就是这么把闲聊撑成
+        # 小作文的，改完人设还得在这儿再兜一道。
+        if request.brevity_hint.strip():
+            text = f"{text}\n{request.brevity_hint.strip()}"
+
+        # 本轮语气判断放在**整个提示词的最后一行之后**：
+        # 位置比措辞重要，这一段要的是「读到最后还记得」。
+        if (request.tone_hint or "").strip():
+            text = f"{text}\n{request.tone_hint.strip()}"
+
         sections = {
             "vision": request.has_images,
             **flags,
@@ -246,6 +281,11 @@ class PromptBuilder:
             "memory_recall": bool(request.memory_recall_brief.strip()),
             "memory_cards": bool((request.memory_cards_brief or "").strip()),
             "recent_chat": bool((request.recent_chat_brief or "").strip()),
+            "cross_chat": bool((request.cross_chat_brief or "").strip()),
+            "diary": bool((request.diary_brief or "").strip()),
+            # 诊断用：长度纪律这次有没有真的拼进提示词（它是最容易漏接的一段）
+            "brevity_hint": bool((request.brevity_hint or "").strip()),
+            "tone_hint": bool((request.tone_hint or "").strip()),
             # 诊断用：本次追加了哪些新工具的说明块。
             "extra_tool_block": bool(block),
         }

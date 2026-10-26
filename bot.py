@@ -67,15 +67,19 @@ def _kill_port_occupants() -> None:
     import subprocess
 
     try:
-        out = subprocess.run(
+        # 为什么不用 text=True：中文 Windows 的 netstat 输出是 GBK，
+        # 让 subprocess 按默认 UTF-8 解码会在读线程抛 UnicodeDecodeError，
+        # 异常后 stdout 直接变 None，下面 splitlines 就崩（实测启动即退出）。
+        raw = subprocess.run(
             ["netstat", "-ano", "-p", "TCP"],
             capture_output=True,
-            text=True,
             check=False,
         ).stdout
     except OSError as exc:
         _log(f"netstat 不可用: {exc}")
         return
+    # errors=replace 兜底：编码再怪也只是显示乱码，不会让启动流程挂掉
+    out = (raw or b"").decode("utf-8", errors="replace")
     pids: set[int] = set()
     for line in out.splitlines():
         parts = line.split()

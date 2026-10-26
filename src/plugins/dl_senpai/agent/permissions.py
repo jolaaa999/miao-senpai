@@ -122,6 +122,24 @@ class PermissionService:
         "grep",
         "shell",
         "code",
+        # 电脑（GUI）类：看屏幕、点鼠标、打字。
+        # 它们比文件/命令类更危险——文件改错了能还原，鼠标点错了撤不回。
+        # 除了这里，computer_control.check_action 还会再叠一层围栏
+        # （模式 / 租约 / 白名单 / 限流），两者是串联关系，不是二选一。
+        "computer_screen",
+        "computer_windows",
+        "computer_focus",
+        "computer_click",
+        "computer_type",
+        "computer_key",
+        "computer_scroll",
+        "computer_wait",
+        # 写入层：发说说、黑盒评论。它们不是"改本机文件"，是**以她的名义
+        # 在公开平台留痕**，发出去撤不回——所以和 shell/code 同一档：
+        # 非管理员连名字都看不到。
+        "qzone",
+        "bili_write",
+    "heybox_write",
     })
 
     def __init__(self, config: Any = None) -> None:

@@ -41,7 +41,9 @@ _BROWSE_INTENT_RE = re.compile(
     r"|(淘宝|taobao).{0,24}(搜|找|查|看看)"
     r"|(pixiv|p站|皮克斯维).{0,24}(搜|找|查|壁纸|插画|图)"
     r"|(截图|截屏|截一张|截个图).{0,24}(网页|网站|页面|网址|链接)?"
-    r"|帮我(去)?(找|搜).{0,24}(衣服|卫衣|裙子|外套|壁纸|插画|图片|图)"
+    # 「图」单字必须排除图书馆/图标/图层这类词：实测「帮我搜一下武科大图书馆电话」
+    # 会因为这颗「图」被判成搜图任务，走浏览器而不是文字检索。
+    r"|帮我(去)?(找|搜).{0,24}(衣服|卫衣|裙子|外套|壁纸|插画|图片|照片|头像|图集|图(?!书|馆|标|表|层|例|灵))"
     r"|找(一?张|个)?(壁纸|插画|好看.{0,6}图)"
     r"|(看看|浏览).{0,12}(淘宝|pixiv|p站|网页|网站)",
     re.IGNORECASE,
@@ -621,7 +623,22 @@ async def _download_image(hit: dict[str, str], dest: Path, *, timeout: float) ->
         return False
 
 
-async def _with_page(config: PluginConfig, fn: Any) -> Any:
+async def _with_page(
+    config: PluginConfig,
+    fn: Any,
+    *,
+    storage_state: str | None = None,
+    persist_path: str | None = None,
+) -> Any:
+    """起一次浏览器把 page 交给 fn。
+
+    storage_state  给了就带上这份 cookie/localStorage（要登录态的动作靠它）
+    persist_path   给了就把跑完时的 cookie 回写到这里
+
+    为什么要有回写：小黑盒这类站的验证是**按"你是不是老熟人"来判的**，
+    每次都用全新匿名 context 等于每次都是陌生人，被要人机验证的概率高得多。
+    回写之后 cookie 罐（buvid/风控 token 等）会累积，像同一个浏览器在反复看。
+    """
     try:
         from playwright.async_api import async_playwright
     except ImportError as exc:
@@ -640,9 +657,22 @@ async def _with_page(config: PluginConfig, fn: Any) -> Any:
                     },
                     user_agent=_UA,
                     locale="zh-CN",
+                    storage_state=storage_state if storage_state else None,
                 )
                 page = await context.new_page()
                 page.set_default_timeout(int(float(config.browser_timeout) * 1000))
-                return await fn(page)
+                try:
+                    return await fn(page)
+                finally:
+                    # 回写 cookie：失败不致命（没有写权限/浏览器已崩），只记一条
+                    if persist_path:
+                        try:
+                            # 目录可能还不存在（第一次跑），先建好再写
+                            from pathlib import Path as _Path
+
+                            _Path(persist_path).parent.mkdir(parents=True, exist_ok=True)
+                            await context.storage_state(path=str(persist_path))
+                        except Exception as exc:  # noqa: BLE001
+                            logger.debug(f"dl_senpai storage_state 回写失败: {exc}")
             finally:
                 await browser.close()

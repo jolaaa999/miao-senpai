@@ -166,7 +166,11 @@ class AgentRuntime:
                 group_style_brief=context.extra.get("group_style_brief", ""),
                 memory_recall_brief=context.extra.get("memory_recall_brief", ""),
                 recent_chat_brief=context.extra.get("recent_chat_brief", ""),
+                cross_chat_brief=context.extra.get("cross_chat_brief", ""),
                 memory_cards_brief=context.extra.get("memory_cards_brief", ""),
+                diary_brief=context.extra.get("diary_brief", ""),
+                brevity_hint=context.extra.get("brevity_hint", ""),
+                tone_hint=context.extra.get("tone_hint", ""),
                 visible_tools=visible,
             )
         )
@@ -278,6 +282,13 @@ class AgentRuntime:
                 guard.record_tool_call(call.fingerprint())
 
             if allowed:
+                # 工具执行器靠 extra["reply_text"] 合成媒体：voice 直接念这段，
+                # sticker / draw 拿它做语义匹配。RUNTIME 里没有任何代码写过这个
+                # 键（唯一写者是跑不起来的 legacy orchestrator），于是 voice 拿到
+                # 空文本必然 TTS 失败、表情包永远选不中。这里用模型本轮输出的
+                # 正文补上 —— 它就是即将发给用户的那句话。
+                if not context.extra.get("reply_text") and parsed.text:
+                    context.extra["reply_text"] = parsed.text
                 executed_results = await asyncio.gather(
                     *(
                         self._executor.execute(call, context, dry_run=dry_run)
@@ -431,6 +442,12 @@ class AgentRuntime:
                 max_tokens=self._max_tokens(context),
                 interrupt=False,
                 session_id=context.session_id,
+                # 补救轮也必须带上工具 schema：native 模式
+                # （DL_SENPAI_AGENT_NATIVE_TOOLS=true）下模型只能通过 tools
+                # 参数调工具，正文里本来就没有 marker 可补。此前这里漏了
+                # tools，等于让补救轮永远调不动任何工具——「漏写 marker 补救」
+                # 在 native 下形同虚设，白烧一次模型调用。
+                tools=self._native_tool_schemas(context),
             )
             response = await self._gateway.chat(request, context)
             if response.error:
@@ -463,12 +480,18 @@ class AgentRuntime:
             {"role": "system", "content": system_prompt},
             *messages,
         ]
+        # 正文只放原话，**不再**拼「昵称：」前缀。
+        # 为什么：`{昵称}：{正文}` 里昵称是裸文本，模型分不清哪部分是名字、
+        # 哪部分是对方说的话。线上真实事故：用户昵称是「失语.」（自带句点），
+        # 拼出来是「失语.：什么意思」，模型把句点当成句末，认定用户在说
+        # 「失语.」这个词，于是连着几轮解释「失语症」是什么意思，还把这个
+        # 错误认知写进了个人印象。昵称现在改由状态栏声明（见 _build_status_bar）。
         if user_text:
-            built_messages.append(
-                {"role": "user", "content": f"{context.actor}：{user_text}"}
-            )
+            built_messages.append({"role": "user", "content": user_text})
         elif not messages:
-            built_messages.append({"role": "user", "content": f"{context.actor}："})
+            # 没正文也没历史：多半是纯图/纯表情消息，给一句中性占位，
+            # 不能再用「昵称：」冒充发言内容。
+            built_messages.append({"role": "user", "content": "（对方这条没打字）"})
 
         # 状态栏（第二章 2.6）：紧贴生成位置、以 user 消息追加，而不是写进
         # system prompt。写 system 会让 KV Cache 的静态前缀每轮失效；
