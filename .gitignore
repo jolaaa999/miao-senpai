@@ -115,3 +115,28 @@ data/dl_senpai/stickers/files/
 data/dl_senpai/shop/thumbs/
 data/dl_senpai/shop/composites/
 data/dl_senpai/shop/outfits/
+
+# ---- 运行时个人数据：聊天记忆 / 用户画像 / 好感签到状态 ----
+# 这些文件按真实 QQ 号命名，内容是群友的聊天画像。
+# 只留本地，不进公开仓库（历史提交里已有的无法靠这行消除，见提交说明）。
+data/dl_senpai/person_memory/
+data/dl_senpai/memory/
+data/dl_senpai/recent_chat/
+data/dl_senpai/inner_state/
+data/dl_senpai/group_style/
+data/dl_senpai/affection/
+data/dl_senpai/checkin/
+data/validation/
+
+# ---- 运行时产物与缓存 ----
+data/dl_senpai/draw/
+data/dl_senpai/verify_drafts.json
+data/dl_senpai/link_cache/
+data/dl_senpai/web_login/
+data/dl_senpai/workspace/
+data/dl_senpai/context/
+data/dl_senpai/own_life/
+data/dl_senpai/_archive_*/
+data/dl_senpai/heybox_*.json
+data/dl_senpai/heybox_*.jsonl
+data/dl_senpai/bili_*.jsonl
