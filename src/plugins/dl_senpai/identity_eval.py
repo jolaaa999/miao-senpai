@@ -65,7 +65,7 @@ class IdentityScore:
     verdict: str = "not_evaluated"
     evaluated_fields: tuple[str, ...] = ()
     not_evaluated: tuple[str, ...] = ()
-    basis: str = "none"      # verified_profile / verified_profile+reference / verified_reference / none
+    basis: str = "none"      # human_verified_profile(+reference) / verified_reference / none
 
 
 class CharacterIdentityEvaluator:
@@ -83,12 +83,15 @@ class CharacterIdentityEvaluator:
     def evaluable_fields(self) -> tuple[str, ...]:
         """可评分的字段。
 
-        - 有已验证字段时：只评这些（有文字依据）。
-        - 一条都没验证、但有已验证参考图时：可以评档案里所有非空字段
+        - 有人工核验字段时：只评这些（有文字依据）。
+        - 一条都没人工核验、但有**人工核验参考图**时：可以评所有非空字段
           （依据是那张图，不是模型记忆）。
         - 两者都没有：什么都不评，返回空。
+
+        assistant_reviewed 字段**不算依据**：那是模型自己的判断，
+        拿它当"标准答案"去给另一张模型输出打分，等于自评自卷。
         """
-        verified = self.profile.verified_fields()
+        verified = self.profile.human_verified_fields()
         if verified:
             return tuple(k for k in verified if self.profile.visual_identity.get(k))
         if self.verified_reference_count > 0:
@@ -96,11 +99,11 @@ class CharacterIdentityEvaluator:
         return ()
 
     def _basis(self) -> str:
-        has_verified = bool(self.profile.verified_fields())
+        has_verified = bool(self.profile.human_verified_fields())
         if has_verified and self.verified_reference_count:
-            return "verified_profile+reference"
+            return "human_verified_profile+reference"
         if has_verified:
-            return "verified_profile"
+            return "human_verified_profile"
         if self.verified_reference_count:
             return "verified_reference"
         return "none"

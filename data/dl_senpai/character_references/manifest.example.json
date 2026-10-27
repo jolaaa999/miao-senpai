@@ -7,7 +7,7 @@
     {
       "file": "official_fullbody_01.png",
       "type": "official_fullbody",
-      "verified": true,
+      "verification_status": "human_verified",
       "priority": 100,
       "reference_role": "fullbody",
       "sha256": "（导入时自动写入，人工不要手填）",
@@ -16,6 +16,17 @@
       "source_type": "official",
       "source_url": "https://example.invalid/…",
       "notes": "官方立绘全身，用于身份锚定"
+    },
+    {
+      "file": "ref_portrait_01.png",
+      "type": "verified_reference",
+      "verification_status": "assistant_reviewed",
+      "priority": 50,
+      "reference_role": "portrait",
+      "sha256": "（同上）",
+      "verification_method": "assistant_review",
+      "source_type": "fan_art",
+      "notes": "仅模型审阅过，不会被用于 images.edit"
     }
   ]
 }

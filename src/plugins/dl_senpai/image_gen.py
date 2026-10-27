@@ -827,7 +827,10 @@ async def build_image_segment(
                 reference = library_ref.as_pair()
                 trace.reference_mode = "local_verified"
                 trace.reference_count = 1
+                # 只有人工核验过的图才算 verified；assistant_reviewed 会给 False，
+                # 于是 Level B（"以参考图为准"）的提示词分支根本不会触发。
                 trace.reference_verified = library_ref.verified
+                trace.reference_verification_status = library_ref.verification_status.value
                 trace.reference_source = "character_library"
                 trace.reference_source_trust = library_ref.source_trust
                 trace.extra["reference_priority"] = library_ref.priority
@@ -905,10 +908,18 @@ async def build_image_segment(
         # 为什么跳过扩写：那一步是让另一个模型重写提示词，实测它会把专有名词
         # 同义化（艾雅法拉 → 羊角少女、凯尔希 → 精灵耳医生），正是身份管线要防的事。
         # 代价是画风/光影少了点润色，但身份一致性优先——这是本次改造的核心取舍。
+        # 只有「人工核验过的本地参考图」才配在提示词里说"以图为准"（Level B）。
+        # 网图即使通过视觉校验也只是 verify_only/probe，不升级为身份权威；
+        # assistant_reviewed 的库图同样不算（verified 派生属性为 False）。
         built = ImagePromptBuilder().build(
             user_request=user_request,
             draft_prompt=prompt,
             resolution=resolution,
+            reference_verified=(
+                reference is not None
+                and trace.reference_mode == "local_verified"
+                and bool(trace.reference_verified)
+            ),
         )
         # 已知角色提示词更长（身份条款 + 场景），上限单独放宽，
         # 否则身份写全了、场景会被尾部截断，出现「场景丢失」的新问题。
@@ -923,8 +934,9 @@ async def build_image_segment(
         # 把「这段提示词里的哪些约束有依据」记下来：以后怀疑画错时，
         # 第一个要查的就是这次到底是硬约束还是软提示。
         trace.character_profile_status = built.profile_status
-        trace.verified_fields = built.verified_fields
-        trace.hint_fields = built.hint_fields
+        trace.human_verified_fields = built.human_verified_fields
+        trace.assistant_reviewed_fields = built.assistant_reviewed_fields
+        trace.unverified_fields = built.unverified_fields
     else:
         # 普通图：维持原有链路，行为与改动前完全一致（不许被角色管线污染）
         from .draw_cards import augment_prompt, match_character_card

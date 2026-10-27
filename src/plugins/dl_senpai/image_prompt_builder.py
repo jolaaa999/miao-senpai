@@ -13,27 +13,25 @@
 2. 普通图 —— 原样返回草稿，一个字都不加。这条是硬要求：不能为了修角色生图，
    把「画一只猫」也拖进角色管线。
 
-**三档可信度**（2026-10-27 修正）：
+## 四层可信度（2026-10-27 修正）
 
-上一版不分青红皂白写「Canonical visual identity (authoritative, do not contradict)」，
-把未经人工核对的设定当成权威。这是错的——资料写错时，越强的措辞越稳定地画错。
-现在按字段可信度分层：
+上一版把「模型审阅过的资料」也写成了 authoritative 硬约束。那等于让 AI 给自己的
+判断盖上人工核验的章，资料错的时候越强的措辞越稳定地画错。现在按来源分层：
 
-    Level A 已验证字段  → 硬约束（must be preserved / do not contradict）
-    Level B 未验证非空  → supporting hints（只作参考，不许用权威措辞）
-    Level C 空 / 未知   → 完全不写（未知 ≠ 没有）
+    Level A  human_verified 字段      → 硬约束（must be preserved / do not contradict）
+    Level B  human-verified 参考图    → 参考图是脸与整体外观的权威
+    Level C  assistant_reviewed 字段  → supporting hints，**禁止** authoritative 措辞
+    Level D  unverified / 空          → 不写入（未知 ≠ 没有，也不许模型自己编）
 
-只有 Level A 为空时才允许出现 supporting 分支里的"未人工核验"声明——否则
-模型会把提示当权威，等于回到老问题。
+只有 Level A 才配得上「不得违背」这种话。
 """
 
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import Any
 
-from .character_registry import CharacterProfile, VisualIdentity
+from .character_registry import CharacterProfile
 from .character_resolver import CharacterResolution
 
 # 请求里的动作词/客套词：从用户原话里剥出"场景"时用。
@@ -59,11 +57,23 @@ class ImagePrompt:
     franchise: str = ""
     identity_priority: str = ""
     creative_freedom: tuple[str, ...] = ()
-    # 可信度快照：trace 与评估器都要知道这段提示词里哪些是硬约束
+    # 可信度快照：trace 与评估器都要知道这段提示词里哪些是真硬约束
     profile_status: str = ""
-    verified_fields: tuple[str, ...] = ()
-    hint_fields: tuple[str, ...] = ()
+    human_verified_fields: tuple[str, ...] = ()
+    assistant_reviewed_fields: tuple[str, ...] = ()
+    unverified_fields: tuple[str, ...] = ()
+    reference_verified: bool = False
     notes: tuple[str, ...] = field(default_factory=tuple)
+
+    @property
+    def verified_fields(self) -> tuple[str, ...]:
+        """兼容旧名：只含人工核验字段。"""
+        return self.human_verified_fields
+
+    @property
+    def hint_fields(self) -> tuple[str, ...]:
+        """兼容旧名：模型审阅过的字段。"""
+        return self.assistant_reviewed_fields
 
 
 class ImagePromptBuilder:
@@ -75,6 +85,7 @@ class ImagePromptBuilder:
         user_request: str,
         draft_prompt: str = "",
         resolution: CharacterResolution | None = None,
+        reference_verified: bool = False,
     ) -> ImagePrompt:
         draft = (draft_prompt or "").strip()
         if resolution is None or not resolution.is_known or resolution.profile is None:
@@ -88,6 +99,7 @@ class ImagePromptBuilder:
             profile=resolution.profile,
             user_request=user_request,
             draft_prompt=draft,
+            reference_verified=reference_verified,
         )
 
     # -- 已知角色 --
@@ -98,20 +110,24 @@ class ImagePromptBuilder:
         profile: CharacterProfile,
         user_request: str,
         draft_prompt: str,
+        reference_verified: bool,
     ) -> ImagePrompt:
-        identity = self._identity_block(profile)
+        identity = self._identity_block(profile, reference_verified=reference_verified)
         scene = self._scene_block(profile=profile, user_request=user_request, draft_prompt=draft_prompt)
         negatives = self._negatives(profile)
         tiers = profile.identity_tiers()
+        human = tuple(key for key, _ in tiers["human"])
+        reviewed = tuple(key for key, _ in tiers["reviewed"])
+        unverified = tuple(key for key, _ in tiers["unverified"])
 
         parts = [identity]
         if scene:
             parts.append(f"Scene / composition (the only part that may change):\n{scene}")
         if negatives:
             header = (
-                "Avoid (verified constraints and any supplied reference image win if they conflict):"
-                if tiers["verified"]
-                else "Avoid if possible (these notes are not verified; a supplied reference wins):"
+                "Avoid (human-verified constraints and the reference image win if they conflict):"
+                if human or reference_verified
+                else "Avoid if possible (these notes are not human-verified; a reference image wins):"
             )
             parts.append(header + "\n" + "\n".join(f"- {n}" for n in negatives))
         text = "\n\n".join(parts)
@@ -127,13 +143,15 @@ class ImagePromptBuilder:
             identity_priority=profile.identity_priority,
             creative_freedom=profile.creative_freedom,
             profile_status=profile.effective_status(),
-            verified_fields=tuple(key for key, _ in tiers["verified"]),
-            hint_fields=tuple(key for key, _ in tiers["hints"]),
+            human_verified_fields=human,
+            assistant_reviewed_fields=reviewed,
+            unverified_fields=unverified,
+            reference_verified=reference_verified,
             notes=(f"profile_{profile.effective_status()}",),
         )
 
-    def _identity_block(self, profile: CharacterProfile) -> str:
-        """身份段落：分档输出，权威性只给已验证字段。
+    def _identity_block(self, profile: CharacterProfile, *, reference_verified: bool) -> str:
+        """身份段落：四层输出，权威性只给人工核验的东西。
 
         英文锚点（canonical name + franchise）始终保留：图片模型对角色名的联想
         是按拉丁字母建立的，只给中文名时它会退化成按形容词作画。
@@ -144,8 +162,8 @@ class ImagePromptBuilder:
             f" ({profile.franchise_localized})" if profile.franchise_localized else ""
         )
         tiers = profile.identity_tiers()
-        verified, hints = tiers["verified"], tiers["hints"]
-        hard_items, soft_items = profile.split_preserve()
+        human, reviewed, unverified = tiers["human"], tiers["reviewed"], tiers["unverified"]
+        hard_items, reviewed_items, soft_items = profile.split_preserve()
 
         lines = [
             f"Depict {names} from {franchise}.",
@@ -153,47 +171,55 @@ class ImagePromptBuilder:
             "Character identity preservation is the highest priority.",
         ]
 
-        # ---- Level A：硬约束 ----
-        if verified:
+        # ---- Level A：人工核验 → 硬约束 ----
+        if human:
             lines.append("")
-            lines.append("Verified canonical identity constraints:")
-            for key, value in verified:
+            lines.append("Human-verified identity constraints:")
+            for key, value in human:
                 lines.append(f"- {profile.visual_identity.label(key)}：{value}")
             if hard_items:
                 lines.append("Preserve these verified identity items: " + ", ".join(hard_items) + ".")
-            lines.append("These verified features must be preserved. Do not contradict them.")
+            lines.append("These features are human-verified. Do not contradict them.")
 
-        # ---- Level B：支撑性提示（不许使用权威措辞）----
-        if hints:
+        # ---- Level B：人工核验参考图 → 脸与整体外观的权威 ----
+        if reference_verified:
             lines.append("")
-            if verified:
-                lines.append(
-                    "Supporting identity hints (not independently verified — follow them only "
-                    "where they stay consistent with the verified constraints above and with any "
-                    "supplied reference image, and never let them override those):"
-                )
-            else:
-                # 全档都是 hints：先明确"这份档案还没被人工核验"，避免提示词自己造权威
-                lines.append(
-                    "Supporting identity hints (this profile has NOT been human-verified yet; "
-                    "treat them as guidance only rather than recorded facts, and prefer any "
-                    "supplied reference image wherever they differ):"
-                )
-            for key, value in hints:
+            lines.append(
+                "Human-verified reference image supplied: follow it for facial identity, "
+                "proportions and overall appearance. Where this description and the reference "
+                "image disagree, follow the reference image."
+            )
+
+        # ---- Level C：模型审阅 → 仅支撑性提示 ----
+        if reviewed:
+            lines.append("")
+            lines.append(
+                "Assistant-reviewed identity hints (not human-verified; use as supporting "
+                "guidance only):"
+            )
+            for key, value in reviewed:
                 lines.append(f"- {profile.visual_identity.label(key)}：{value}")
-            if soft_items:
-                lines.append(
-                    "Prefer preserving, where the reference and scene allow: "
-                    + ", ".join(soft_items)
-                    + "."
-                )
+            if reviewed_items:
+                lines.append("Likely identity traits, in order of confidence: " + ", ".join(reviewed_items) + ".")
+            lines.append(
+                "These hints are not authoritative. Do not let them override the reference "
+                "image or any human-verified identity fields."
+            )
+
+        # ---- Level D：未核验 / 未知 → 不写具体值，但明确「不要自己编」 ----
+        if unverified:
+            lines.append("")
+            lines.append(
+                "Some visual traits are unrecorded or unverified and are intentionally left "
+                "unspecified. Do not invent them and do not quietly substitute generic defaults."
+            )
 
         lines.append("")
         lines.append(
             f"The result must be immediately recognizable as {names} from {profile.franchise}."
         )
         lines.append("Do not redesign the character into a generic fantasy character.")
-        # 这一条不引用任何具体字段（未验证的字段不该被写成硬约束）：
+        # 这一条不引用任何具体字段（未核验的字段不该被写成硬约束）：
         # 只说"别用一个两个特征拼出来的泛化角色顶替她"，正好针对「羊角少女」这类退化。
         lines.append(
             "Do not replace the canonical design with a generic anime character that merely "
@@ -201,6 +227,8 @@ class ImagePromptBuilder:
         )
         allowed = ", ".join(profile.creative_freedom) or "pose, background, lighting, camera_angle, expression"
         lines.append(f"Allowed to change: {allowed}.")
+        if soft_items:
+            lines.append("Minor items to keep in mind if the scene allows: " + ", ".join(soft_items) + ".")
         return "\n".join(lines)
 
     def _scene_block(
@@ -243,8 +271,7 @@ class ImagePromptBuilder:
         """禁止项：只输出档案自带的负向备注。
 
         为什么不在这里加「do not change hair color」这类生成式硬禁止：
-        那些约束必须以「该字段已验证」为前提，否则又变成把未验证信息写成硬规则。
-        已验证字段的硬约束由 Level A 段声明，这里不重复。
+        那些约束必须以「该字段人工核验过」为前提，否则又变成把未核验信息写成硬规则。
         """
         return tuple(dict.fromkeys(profile.negative_notes))
 

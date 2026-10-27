@@ -102,11 +102,11 @@ def _profile_from(path: Path, name: str = "艾雅法拉"):
 def test_case1_verify_field_recomputes_status(data_file) -> None:
     profile = _profile_from(data_file)
     before = profile.effective_status()
-    assert before in ("draft", "partial_verified", "verified")
+    assert before in ("draft", "assistant_reviewed", "partial_verified", "verified")
 
     ok, message = update_field_verification(
-        data_file, "艾雅法拉", "hair", verified=True,
-        method="human_review", at="2026-10-27",
+        data_file, "艾雅法拉", "hair", verified=True, method="human_review",
+
     )
     assert ok, message
 
@@ -121,13 +121,13 @@ def test_case1_verify_field_recomputes_status(data_file) -> None:
 
 def test_case1_cannot_verify_empty_field(data_file) -> None:
     """空字段不能靠"验证"变成事实。"""
-    ok, message = update_field_verification(data_file, "艾雅法拉", "face", verified=True)
+    ok, message = update_field_verification(data_file, "艾雅法拉", "face", verified=True, method="human_review")
     assert ok is False
     assert "没有内容" in message
 
 
 def test_case1_unknown_field_rejected(data_file) -> None:
-    ok, message = update_field_verification(data_file, "艾雅法拉", "hairstyle", verified=True)
+    ok, message = update_field_verification(data_file, "艾雅法拉", "hairstyle", verified=True, method="human_review")
     assert ok is False and "未知字段" in message
 
 
@@ -158,8 +158,11 @@ def test_case2_unverify_removes_hard_constraint(data_file) -> None:
         user_request="画一张艾雅法拉", draft_prompt="",
         resolution=resolve_character("画一张艾雅法拉", registry=CharacterRegistry.from_file(data_file)),
     )
-    assert "horns" not in built.verified_fields
-    assert "horns" in built.hint_fields
+    # 撤销后 horns 回到 unverified：既不进硬约束，也不进"模型审阅提示"，
+    # 更不该出现在提示词里（unverified = Level D，不写入）
+    assert "horns" not in built.human_verified_fields
+    assert "horns" not in built.assistant_reviewed_fields
+    assert "一对弯曲的羊角" not in built.identity_block
 
 
 def test_case2_status_derivation_is_generic(data_file) -> None:
@@ -209,7 +212,7 @@ def test_case3_add_verified_reference(tmp_path) -> None:
     manifest_path = tmp_path / "refs" / "arknights" / "eyjafjalla" / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     entry = manifest["references"][0]
-    assert entry["verified"] is True
+    assert entry["verification_status"] == "human_verified"
     assert entry["sha256"] == sha256_of(PNG)
     assert entry["reference_role"] == "fullbody"
     assert entry["verification_method"] == "human_review"
@@ -227,8 +230,9 @@ def test_case3_role_preference_by_prompt(tmp_path) -> None:
     """头像要肖像图、全身要全身图——极简规则，但必须生效。"""
     cfg = _Cfg(character_reference_dir=str(tmp_path / "refs"))
     profile = CharacterRegistry.load().resolve("艾雅法拉")
-    add_reference_to_library(cfg, profile, PNG, original_name="a.png", role="fullbody", priority=10, verified=True)
-    add_reference_to_library(cfg, profile, PNG2, original_name="b.png", role="portrait", priority=10, verified=True)
+    add_reference_to_library(cfg, profile, PNG, original_name="a.png", role="fullbody", priority=10, verified=True, method="human_review")
+    add_reference_to_library(cfg, profile, PNG2, original_name="b.png", role="portrait", priority=10, verified=True, method="human_review")
+
 
     full = resolve_library_reference(cfg, profile, user_request="画一张全身立绘")
     head = resolve_library_reference(cfg, profile, user_request="画个头像")
@@ -242,7 +246,7 @@ def test_case3_role_preference_by_prompt(tmp_path) -> None:
 def test_case4_tampered_reference_is_rejected(tmp_path) -> None:
     cfg = _Cfg(character_reference_dir=str(tmp_path / "refs"))
     profile = CharacterRegistry.load().resolve("艾雅法拉")
-    ok, _ = add_reference_to_library(cfg, profile, PNG, original_name="a.png", verified=True)
+    ok, _ = add_reference_to_library(cfg, profile, PNG, original_name="a.png", verified=True, method="human_review")
     assert ok
 
     char_dir = tmp_path / "refs" / "arknights" / "eyjafjalla"
@@ -259,7 +263,7 @@ def test_case4_tampered_reference_is_rejected(tmp_path) -> None:
 def test_case4_non_image_reference_is_rejected(tmp_path) -> None:
     cfg = _Cfg(character_reference_dir=str(tmp_path / "refs"))
     profile = CharacterRegistry.load().resolve("艾雅法拉")
-    ok, _ = add_reference_to_library(cfg, profile, PNG, original_name="a.png", verified=True)
+    ok, _ = add_reference_to_library(cfg, profile, PNG, original_name="a.png", verified=True, method="human_review")
     assert ok
     char_dir = tmp_path / "refs" / "arknights" / "eyjafjalla"
     next(char_dir.glob("*.png")).write_bytes(b"not an image at all")
@@ -275,10 +279,10 @@ def test_case4_non_image_reference_is_rejected(tmp_path) -> None:
 def test_case5_duplicate_reference_rejected(tmp_path) -> None:
     cfg = _Cfg(character_reference_dir=str(tmp_path / "refs"))
     profile = CharacterRegistry.load().resolve("艾雅法拉")
-    ok, _ = add_reference_to_library(cfg, profile, PNG, original_name="a.png", verified=True)
+    ok, _ = add_reference_to_library(cfg, profile, PNG, original_name="a.png", verified=True, method="human_review")
     assert ok
 
-    ok2, message2 = add_reference_to_library(cfg, profile, PNG, original_name="a_copy.png", verified=True)
+    ok2, message2 = add_reference_to_library(cfg, profile, PNG, original_name="a_copy.png", verified=True, method="human_review")
     assert ok2 is False
     assert "already exists" in message2
 
@@ -298,7 +302,7 @@ def test_case5_add_rejects_non_image_and_oversize(tmp_path) -> None:
 def test_case5_unverify_reference_keeps_file(tmp_path) -> None:
     cfg = _Cfg(character_reference_dir=str(tmp_path / "refs"))
     profile = CharacterRegistry.load().resolve("艾雅法拉")
-    add_reference_to_library(cfg, profile, PNG, original_name="a.png", verified=True)
+    add_reference_to_library(cfg, profile, PNG, original_name="a.png", verified=True, method="human_review")
     name = next((tmp_path / "refs" / "arknights" / "eyjafjalla").glob("*.png")).name
 
     ok, _ = set_reference_verified(cfg, profile, name, verified=False, note="核验错了")
@@ -316,7 +320,7 @@ def test_case5_unverify_reference_keeps_file(tmp_path) -> None:
 async def test_case6_local_verified_skips_web_search(monkeypatch, tmp_path) -> None:
     cfg = _Cfg(character_reference_dir=str(tmp_path / "refs"))
     profile = CharacterRegistry.load().resolve("艾雅法拉")
-    add_reference_to_library(cfg, profile, PNG, original_name="a.png", role="fullbody", verified=True)
+    add_reference_to_library(cfg, profile, PNG, original_name="a.png", role="fullbody", verified=True, method="human_review")
 
     async def _web_must_not_run(*a, **kw):
         raise AssertionError("本地已有核验参考图，不该联网搜图")
@@ -358,7 +362,7 @@ async def test_case6_local_only_never_falls_back_to_web(monkeypatch, tmp_path) -
     """
     cfg = _Cfg(character_reference_dir=str(tmp_path / "refs"))
     profile = CharacterRegistry.load().resolve("艾雅法拉")
-    add_reference_to_library(cfg, profile, PNG, original_name="a.png", verified=True)
+    add_reference_to_library(cfg, profile, PNG, original_name="a.png", verified=True, method="human_review")
     char_dir = tmp_path / "refs" / "arknights" / "eyjafjalla"
     next(char_dir.glob("*.png")).write_bytes(PNG2)   # 篡改
 

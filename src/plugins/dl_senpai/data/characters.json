@@ -23,64 +23,60 @@
       "visual_identity": {
         "race": {
           "value": "卡普里尼族（羊族）",
-          "verified": true,
-          "verified_at": "2026-10-27",
+          "verification_status": "assistant_reviewed",
           "verification_method": "assistant_review",
+          "verified_at": "2026-10-27",
           "note": "模型据公开设定核对；待人工复核"
         },
         "hair": {
           "value": "银白偏浅紫的长发",
-          "verified": true,
-          "verified_at": "2026-10-27",
+          "verification_status": "assistant_reviewed",
           "verification_method": "assistant_review",
+          "verified_at": "2026-10-27",
           "note": "模型据公开设定核对；待人工复核"
         },
         "eyes": {
           "value": "紫色眼睛",
-          "verified": true,
-          "verified_at": "2026-10-27",
+          "verification_status": "assistant_reviewed",
           "verification_method": "assistant_review",
+          "verified_at": "2026-10-27",
           "note": "模型据公开设定核对；待人工复核"
         },
         "horns": {
           "value": "一对弯曲的羊角（深色带纹理）",
-          "verified": true,
-          "verified_at": "2026-10-27",
+          "verification_status": "assistant_reviewed",
           "verification_method": "assistant_review",
+          "verified_at": "2026-10-27",
           "note": "模型据公开设定核对；待人工复核"
         },
         "ears": {
           "value": "人耳（羊角长在头顶两侧）",
-          "verified": true,
-          "verified_at": "2026-10-27",
+          "verification_status": "assistant_reviewed",
           "verification_method": "assistant_review",
+          "verified_at": "2026-10-27",
           "note": "模型据公开设定核对；待人工复核"
         },
         "clothing": {
           "value": "罗德岛黑色制服外套，白色内衬",
-          "verified": true,
-          "verified_at": "2026-10-27",
+          "verification_status": "assistant_reviewed",
           "verification_method": "assistant_review",
+          "verified_at": "2026-10-27",
           "note": "模型据公开设定核对；待人工复核"
         },
         "accessories": {
           "value": "火山与岩浆主题的法杖",
-          "verified": true,
-          "verified_at": "2026-10-27",
+          "verification_status": "assistant_reviewed",
           "verification_method": "assistant_review",
+          "verified_at": "2026-10-27",
           "note": "模型据公开设定核对；待人工复核"
-        },
-        "color_palette": {
-          "value": "黑、白，点缀橙黄（火山意象）",
-          "verified": false
         },
         "silhouette": {
           "value": "纤细少女体型",
-          "verified": false
+          "verification_status": "unverified"
         },
         "palette": {
           "value": "银白与浅紫为主调，黑色制服搭配白色内衬，紫瞳点缀",
-          "verified": true,
+          "verification_status": "assistant_reviewed",
           "verification_method": "assistant_review",
           "verified_at": "2026-10-27",
           "note": "模型据公开设定核对；待人工复核"
@@ -135,39 +131,35 @@
       "visual_identity": {
         "race": {
           "value": "菲林族（猫科）",
-          "verified": false
+          "verification_status": "unverified"
         },
         "hair": {
           "value": "很长很直的浅绿/银绿色头发",
-          "verified": false
+          "verification_status": "unverified"
         },
         "eyes": {
           "value": "绿色眼睛",
-          "verified": false
+          "verification_status": "unverified"
         },
         "ears": {
           "value": "头顶一对猫耳",
-          "verified": false
+          "verification_status": "unverified"
         },
         "body_features": {
           "value": "身后有猫尾（绝不是精灵尖耳）",
-          "verified": false
+          "verification_status": "unverified"
         },
         "clothing": {
           "value": "白色医生长外套，黑色高领内衬，黑色腰带",
-          "verified": false
+          "verification_status": "unverified"
         },
         "accessories": {
           "value": "肩上有罗德岛标志",
-          "verified": false
-        },
-        "color_palette": {
-          "value": "白色为主，黑色内衬，浅绿点缀",
-          "verified": false
+          "verification_status": "unverified"
         },
         "silhouette": {
           "value": "高挑清瘦，神情冷淡克制",
-          "verified": false
+          "verification_status": "unverified"
         }
       },
       "must_preserve": [
@@ -213,35 +205,31 @@
       "visual_identity": {
         "race": {
           "value": "卡特斯族（兔族）",
-          "verified": false
+          "verification_status": "unverified"
         },
         "hair": {
           "value": "深棕色中长发",
-          "verified": false
+          "verification_status": "unverified"
         },
         "eyes": {
           "value": "蓝绿色眼睛",
-          "verified": false
+          "verification_status": "unverified"
         },
         "ears": {
           "value": "头顶一对很长的兔耳",
-          "verified": false
+          "verification_status": "unverified"
         },
         "clothing": {
           "value": "黑色连帽外套配白色内衬，深色短裤",
-          "verified": false
+          "verification_status": "unverified"
         },
         "accessories": {
           "value": "胸前蓝色菱形源石徽章，黑色手套",
-          "verified": false
-        },
-        "color_palette": {
-          "value": "黑色外套、白色内衬、蓝色徽章",
-          "verified": false
+          "verification_status": "unverified"
         },
         "silhouette": {
           "value": "少年少女体型，个子不高",
-          "verified": false
+          "verification_status": "unverified"
         }
       },
       "must_preserve": [
@@ -292,27 +280,23 @@
       "visual_identity": {
         "hair": {
           "value": "紫色长发，编成粗辫子搭在身前",
-          "verified": false
+          "verification_status": "unverified"
         },
         "eyes": {
           "value": "紫色眼睛",
-          "verified": false
+          "verification_status": "unverified"
         },
         "clothing": {
           "value": "紫色和服式战斗装，肩部与腰间有铠甲部件",
-          "verified": false
+          "verification_status": "unverified"
         },
         "accessories": {
           "value": "紫色发饰与雷元素装饰",
-          "verified": false
-        },
-        "color_palette": {
-          "value": "紫色与深紫，金色点缀",
-          "verified": false
+          "verification_status": "unverified"
         },
         "silhouette": {
           "value": "高挑，气质威严",
-          "verified": false
+          "verification_status": "unverified"
         }
       },
       "must_preserve": [
@@ -353,27 +337,23 @@
       "visual_identity": {
         "hair": {
           "value": "浅蓝白短发，两侧有卷翘发尾",
-          "verified": false
+          "verification_status": "unverified"
         },
         "eyes": {
           "value": "蓝色系眼睛（左右深浅不同）",
-          "verified": false
+          "verification_status": "unverified"
         },
         "clothing": {
           "value": "蓝白色西装式礼装，短裤与长袜",
-          "verified": false
+          "verification_status": "unverified"
         },
         "accessories": {
           "value": "蓝色礼帽",
-          "verified": false
-        },
-        "color_palette": {
-          "value": "蓝、白，金色点缀",
-          "verified": false
+          "verification_status": "unverified"
         },
         "silhouette": {
           "value": "娇小少女体型",
-          "verified": false
+          "verification_status": "unverified"
         }
       },
       "must_preserve": [
@@ -417,27 +397,23 @@
       "visual_identity": {
         "hair": {
           "value": "青绿色（葱绿）超长双马尾，发梢很长",
-          "verified": false
+          "verification_status": "unverified"
         },
         "eyes": {
           "value": "青绿色眼睛",
-          "verified": false
+          "verification_status": "unverified"
         },
         "clothing": {
           "value": "灰色无袖上衣配青绿色领带，黑色短裙，青绿色袖套",
-          "verified": false
+          "verification_status": "unverified"
         },
         "accessories": {
           "value": "方形发饰，耳机式麦克风",
-          "verified": false
-        },
-        "color_palette": {
-          "value": "青绿与灰黑",
-          "verified": false
+          "verification_status": "unverified"
         },
         "silhouette": {
           "value": "纤细少女体型",
-          "verified": false
+          "verification_status": "unverified"
         }
       },
       "must_preserve": [
@@ -463,5 +439,5 @@
       }
     }
   ],
-  "schema_version": 2
+  "schema_version": 3
 }

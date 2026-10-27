@@ -38,7 +38,7 @@ from typing import Any
 
 from nonebot import logger
 
-from .character_registry import CharacterProfile
+from .character_registry import CharacterProfile, VerificationStatus, migrate_status
 
 # 认这些后缀就够：库里不该出现 webp/avif 这类生图接口不一定接受的格式。
 _REF_SUFFIXES = (".png", ".jpg", ".jpeg")
@@ -82,7 +82,9 @@ class ReferenceEntry:
 
     file: str
     type: str = "verified_reference"
-    verified: bool = False
+    # 三态。verified 是派生属性，不再是一个可写字段：
+    # 只有 human_verified 才算「可以被 images.edit 使用」。
+    verification_status: VerificationStatus = VerificationStatus.UNVERIFIED
     priority: int = 0
     notes: str = ""
     source_url: str = ""
@@ -94,6 +96,15 @@ class ReferenceEntry:
     verified_at: str = ""
     role: str = ROLE_IDENTITY
 
+    @property
+    def verified(self) -> bool:
+        """派生：只有人工核验过的图才算 verified。"""
+        return self.verification_status is VerificationStatus.HUMAN_VERIFIED
+
+    @property
+    def reviewed(self) -> bool:
+        return self.verification_status is VerificationStatus.ASSISTANT_REVIEWED
+
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ReferenceEntry | None:
         name = str(data.get("file") or "").strip()
@@ -104,10 +115,17 @@ class ReferenceEntry:
         except (TypeError, ValueError):
             priority = 0
         role = str(data.get("reference_role") or data.get("role") or ROLE_IDENTITY).strip().lower()
+        # 旧清单只有 verified:bool：必须靠 migrate_status 判断到底是人核验还是模型审阅，
+        # 不能凭 verified=true 就当成人工核验（上一阶段就是这样被污染的）。
+        status = migrate_status(
+            verified=bool(data.get("verified")),
+            method=str(data.get("verification_method") or ""),
+            explicit=str(data.get("verification_status") or ""),
+        )
         return cls(
             file=name,
             type=str(data.get("type") or "verified_reference").strip(),
-            verified=bool(data.get("verified")),
+            verification_status=status,
             priority=priority,
             notes=str(data.get("notes") or "").strip(),
             source_url=str(data.get("source_url") or "").strip(),
@@ -123,7 +141,7 @@ class ReferenceEntry:
         out: dict[str, Any] = {
             "file": self.file,
             "type": self.type,
-            "verified": self.verified,
+            "verification_status": self.verification_status.value,
             "priority": self.priority,
             "reference_role": self.role,
         }
@@ -151,8 +169,8 @@ class CharacterManifest:
     references: tuple[ReferenceEntry, ...] = ()
 
     def verified_entries(self) -> tuple[ReferenceEntry, ...]:
-        """只返回人工核验过的条目，按 priority 降序。"""
-        items = [e for e in self.references if e.verified]
+        """只返回**人工核验**过的条目，按 priority 降序。模型审阅过的图不算。"""
+        items = [e for e in self.references if e.verification_status is VerificationStatus.HUMAN_VERIFIED]
         items.sort(key=lambda e: e.priority, reverse=True)
         return tuple(items)
 
@@ -167,13 +185,18 @@ class ReferenceCandidate:
     source_domain: str = ""
     source_type: str = SOURCE_UNKNOWN
     source_trust: float = 0.0
-    verified: bool = False        # 是否人工核验（本地库 manifest）
+    verification_status: VerificationStatus = VerificationStatus.UNVERIFIED
     priority: int = 0
     role: str = ROLE_IDENTITY
     integrity_ok: bool = True
     visual_score: float | None = None
     identity_score: float | None = None
     issue: str = ""
+
+    @property
+    def verified(self) -> bool:
+        """派生：只有人工核验的参考图才算 verified。"""
+        return self.verification_status is VerificationStatus.HUMAN_VERIFIED
 
     def as_pair(self) -> tuple[str, bytes]:
         return self.filename, self.raw
@@ -216,7 +239,11 @@ def load_manifest(config: Any, profile: CharacterProfile) -> CharacterManifest |
         character=str(raw.get("character") or "").strip(),
         localized_name=str(raw.get("localized_name") or "").strip(),
         franchise=str(raw.get("franchise") or "").strip(),
-        verified=bool(raw.get("verified")),
+        # 顶层 verified 也做派生：清单里写 true 但没有任何 human_verified 条目时，
+        # 只能当 false —— 顶层布尔是上一阶段的污染源，不能再信它。
+        verified=any(
+            e.verification_status is VerificationStatus.HUMAN_VERIFIED for e in entries
+        ),
         references=entries,
     )
 
@@ -365,8 +392,9 @@ def resolve_library_reference(
             filename=entry.file,
             raw=raw,
             source_type=entry.source_type or ("verified_reference" if entry.verified else SOURCE_UNKNOWN),
-            source_trust=1.0 if entry.verified else 0.5,
-            verified=entry.verified,
+            # 只有人工核验的图才给满信任度：模型审阅过的图不该冒充可信来源
+            source_trust=1.0 if entry.verified else (0.6 if entry.reviewed else 0.5),
+            verification_status=entry.verification_status,
             priority=entry.priority,
             role=entry.role,
             integrity_ok=True,
@@ -409,7 +437,7 @@ def candidate_from_url(url: str, filename: str, raw: bytes) -> ReferenceCandidat
         source_domain=domain,
         source_type=source_type,
         source_trust=trust,
-        verified=False,
+        verification_status=VerificationStatus.UNVERIFIED,
         # 优先级只用于排序展示：网图一律排在本地核验图之后
         priority=0,
     )
@@ -590,6 +618,7 @@ def add_reference_to_library(
     role: str = ROLE_IDENTITY,
     priority: int = 100,
     verified: bool = False,
+    reviewed: bool = False,
     method: str = "",
     source_url: str = "",
     source_type: str = "",
@@ -612,6 +641,19 @@ def add_reference_to_library(
         return False, "不是有效图片（只认 PNG/JPEG/WEBP 文件头）"
     if role not in _KNOWN_ROLES:
         return False, f"未知 reference_role: {role}（可用: {', '.join(_KNOWN_ROLES)}）"
+
+    # 人工核验必须是显式动作。--verified 但方法不是 human_review 的，一律拒绝，
+    # 不让它悄悄降级成 assistant_reviewed 混进清单。
+    meth = (method or "").strip().lower()
+    if verified and meth != "human_review":
+        return False, "human_verified 需要 --method human_review（模型审阅请用 --reviewed）"
+    if verified:
+        status = VerificationStatus.HUMAN_VERIFIED
+    elif reviewed:
+        status = VerificationStatus.ASSISTANT_REVIEWED
+        meth = meth or "assistant_review"
+    else:
+        status = VerificationStatus.UNVERIFIED
 
     directory = profile_dir(config, profile)
     manifest_path = _manifest_path(config, profile)
@@ -638,13 +680,13 @@ def add_reference_to_library(
     entry = {
         "file": filename,
         "type": (f"official_{role}" if prefix == "official" else "verified_reference"),
-        "verified": bool(verified),
+        "verification_status": status.value,
         "priority": int(priority),
         "reference_role": role,
         "sha256": digest,
     }
-    if verified:
-        entry["verification_method"] = (method or "human_review").strip()
+    if status is not VerificationStatus.UNVERIFIED:
+        entry["verification_method"] = meth
         if at:
             entry["verified_at"] = at.strip()
     if source_type:
@@ -659,10 +701,16 @@ def add_reference_to_library(
     data.setdefault("localized_name", profile.localized_names[0] if profile.localized_names else "")
     data.setdefault("franchise", profile.franchise)
     data["references"] = entries
-    # 顶层 verified 只在「至少一张图核验过」时为真，别让它跟条目状态脱节
-    data["verified"] = any(bool(x.get("verified")) for x in entries)
+    # 顶层状态跟条目走，别让它跟条目脱节
+    data["verified"] = any(
+        str(x.get("verification_status")) == VerificationStatus.HUMAN_VERIFIED.value for x in entries
+    )
     _save_raw_manifest(manifest_path, data)
-    state = "verified=true" if verified else "verified=false（导入但未核验，不会被用于 images.edit）"
+    state = {
+        VerificationStatus.HUMAN_VERIFIED: "human_verified（可用于 images.edit）",
+        VerificationStatus.ASSISTANT_REVIEWED: "assistant_reviewed（仅供参考，不用于 images.edit）",
+        VerificationStatus.UNVERIFIED: "unverified（未核验，不用于 images.edit）",
+    }[status]
     return True, f"{filename} → {state} sha256={digest[:12]}…"
 
 
@@ -676,7 +724,14 @@ def set_reference_verified(
     note: str = "",
     at: str = "",
 ) -> tuple[bool, str]:
-    """人工核验/撤销某张参考图。撤销不删文件，只把 verified 打回 false。"""
+    """人工核验/撤销某张参考图。
+
+    撤销不删文件，只把状态打回 unverified（图还在，只是不再被信任）。
+    human_verified 必须显式 method=human_review，模型审阅无权写这一档。
+    """
+    meth = (method or "").strip().lower()
+    if verified and meth != "human_review":
+        return False, "human_verified 需要 --method human_review"
     manifest_path = _manifest_path(config, profile)
     data = _load_raw_manifest(manifest_path)
     entries = [x for x in data.get("references") or [] if isinstance(x, dict)]
@@ -700,20 +755,28 @@ def set_reference_verified(
         if target.get("sha256") and str(target["sha256"]).lower() != digest:
             return False, f"文件与清单里的 sha256 不一致（文件被改过）: {filename}"
         target["sha256"] = digest
-        target["verification_method"] = (method or "human_review").strip()
+        target["verification_method"] = meth
+        target["verification_status"] = VerificationStatus.HUMAN_VERIFIED.value
         if at:
             target["verified_at"] = at.strip()
+        target.pop("verified", None)
     else:
         target.pop("verified_at", None)
-        target["verification_method"] = ""
-    target["verified"] = bool(verified)
+        target.pop("verification_method", None)
+        target["verification_status"] = VerificationStatus.UNVERIFIED.value
+        target.pop("verified", None)
     if note:
         target["notes"] = note.strip()
 
     data["references"] = entries
-    data["verified"] = any(bool(x.get("verified")) for x in entries)
+    data["verified"] = any(
+        str(x.get("verification_status")) == VerificationStatus.HUMAN_VERIFIED.value for x in entries
+    )
     _save_raw_manifest(manifest_path, data)
-    return True, f"{filename} → verified={str(bool(verified)).lower()}"
+    return True, (
+        f"{filename} → "
+        f"{(VerificationStatus.HUMAN_VERIFIED if verified else VerificationStatus.UNVERIFIED).value}"
+    )
 
 
 def reference_integrity_report(config: Any, profile: CharacterProfile) -> list[dict[str, Any]]:
@@ -732,6 +795,7 @@ def reference_integrity_report(config: Any, profile: CharacterProfile) -> list[d
             {
                 "file": entry.file,
                 "verified": entry.verified,
+                "verification_status": entry.verification_status.value,
                 "role": entry.role,
                 "priority": entry.priority,
                 "sha256": entry.sha256[:12],

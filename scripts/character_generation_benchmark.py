@@ -163,6 +163,78 @@ def _profile(cfg):
     return profile
 
 
+# A/B 前置闸门：只认事实，不认 profile_status。
+#
+# 为什么不再看 profile_status == "verified"：上一阶段就是 status 被错误语义污染
+# （assistant_review 写成 verified），如果闸门只看 status，一条被污染的字段就能
+# 放行整个真实生成。所以这里直接数：人工核验了几个字段、覆盖了哪几类、有几张
+# 人工核验参考图。
+MIN_HUMAN_VERIFIED_FIELDS = 4
+MIN_HUMAN_VERIFIED_REFERENCES = 1
+# 必须覆盖的类别：头发、服装、配色（身份辨识度最高的三项）
+COVERAGE_REQUIRED = ("hair", "clothing", "palette")
+
+
+def ab_gate(cfg) -> tuple[bool, list[str]]:
+    """返回 (是否放行, 阻塞原因列表)。"""
+    from plugins.dl_senpai.character_references import count_verified_references
+
+    profile = _profile(cfg)
+    human = set(profile.human_verified_fields())
+    reasons: list[str] = []
+
+    if len(human) < MIN_HUMAN_VERIFIED_FIELDS:
+        reasons.append(
+            f"human_verified_fields = {len(human)} < {MIN_HUMAN_VERIFIED_FIELDS}"
+        )
+    missing = [key for key in COVERAGE_REQUIRED if key not in human]
+    # 标志性特征（角/耳/尾…）由数据推导，不写死某个字段：
+    # 「有角的角色要核验角」是对的，「所有角色都必须有角」是错的。
+    signature = profile.signature_feature_field()
+    if signature and signature not in human:
+        missing.append(f"{signature}（标志性特征）")
+    if missing:
+        reasons.append("未人工核验的关键项: " + ", ".join(missing))
+
+    refs = count_verified_references(cfg, profile)
+    if refs < MIN_HUMAN_VERIFIED_REFERENCES:
+        reasons.append(
+            f"human_verified_references = {refs} < {MIN_HUMAN_VERIFIED_REFERENCES}"
+        )
+    return (not reasons), reasons
+
+
+def _print_gate(cfg) -> bool:
+    """打印闸门状态。返回是否可以继续真实 A/B。"""
+    profile = _profile(cfg)
+    ok, reasons = ab_gate(cfg)
+    human = profile.human_verified_fields()
+    print("=== A/B 前置闸门 ===")
+    print(f"  profile_status           : {profile.effective_status()}")
+    print(f"  human_verified_fields    : {len(human)}/{MIN_HUMAN_VERIFIED_FIELDS}  {', '.join(human) or '-'}")
+    print(f"  assistant_reviewed_fields: {', '.join(profile.assistant_reviewed_fields()) or '-'}")
+    for key in COVERAGE_REQUIRED:
+        print(f"    {key:<10}: {'✓ 已人工核验' if key in human else '✗ 未人工核验'}")
+    signature = profile.signature_feature_field()
+    if signature:
+        print(f"    {signature:<10}: {'✓ 已人工核验' if signature in human else '✗ 未人工核验（标志性特征）'}")
+    if ok:
+        print("  → 闸门通过，可以执行真实 A/B")
+    else:
+        print()
+        print("  BLOCKED_BY_HUMAN_REFERENCE")
+        for reason in reasons:
+            print(f"    - {reason}")
+        print()
+        print("  解锁步骤：")
+        print("    python scripts/character_verify.py pending 艾雅法拉")
+        print("    python scripts/character_verify.py verify-field 艾雅法拉 <field> --method human_review")
+        print("    python scripts/character_reference.py add 艾雅法拉 <图片路径> --role fullbody "
+              "--source-type official --verified --method human_review")
+    print()
+    return ok
+
+
 async def _dry_run(cfg, names: list[str], prompt: str) -> int:
     """不生成任何图片：把两组会实际发生的事情摊开给人看。"""
     from plugins.dl_senpai.character_references import (
@@ -180,14 +252,15 @@ async def _dry_run(cfg, names: list[str], prompt: str) -> int:
     web_mode = str(getattr(cfg, "character_web_reference_mode", "verify_only"))
 
     print("=== 场景 ===")
-    print(f"  character : {profile.canonical_name} / {profile.localized_names[:1]}")
+    print(f"  character : {profile.canonical_name} / {(profile.localized_names or [''])[0]}")
     print(f"  prompt    : {prompt}")
     print(f"  scene     : {', '.join(SCENARIO['scene_checks'])}")
     print("=== 档案 ===")
-    print(f"  profile_status : {profile.effective_status()}")
-    print(f"  verified_fields: {', '.join(profile.verified_fields()) or '-'}")
-    print(f"  hint_fields    : {', '.join(profile.hint_fields()) if hasattr(profile, 'hint_fields') else ', '.join(profile.unverified_fields())}")
-    print(f"  required       : {', '.join(profile.required_fields())}")
+    print(f"  profile_status            : {profile.effective_status()}")
+    print(f"  human_verified_fields     : {', '.join(profile.human_verified_fields()) or '-'}")
+    print(f"  assistant_reviewed_fields : {', '.join(profile.assistant_reviewed_fields()) or '-'}")
+    print(f"  unverified_fields         : {', '.join(profile.unverified_fields()) or '-'}")
+    print(f"  required                  : {', '.join(profile.required_fields())}")
     print("=== 参考图 ===")
     print(f"  files            : {count_references(cfg, profile)}")
     print(f"  verified         : {verified_n}")
@@ -196,10 +269,14 @@ async def _dry_run(cfg, names: list[str], prompt: str) -> int:
         print(f"  - {row['file']} ok={row['ok']} issue={row['issue'] or '-'}")
     print("=== Prompt 分层 ===")
     low = built.text.lower()
-    print(f"  has_verified_section : {'verified canonical identity constraints' in low}")
-    print(f"  has_hint_section     : {'supporting identity hints' in low}")
-    print(f"  hard fields          : {', '.join(built.verified_fields) or '-'}")
-    print(f"  hint fields          : {', '.join(built.hint_fields) or '-'}")
+    print(f"  has_human_verified_section   : {'human-verified identity constraints' in low}")
+    print(f"  has_reference_section        : {'human-verified reference image supplied' in low}")
+    print(f"  has_assistant_reviewed_section: {'assistant-reviewed identity hints' in low}")
+    print(f"  has_forbidden_authority_leak : "
+          f"{'assistant-reviewed' in low and 'do not contradict them' in low}")
+    print(f"  human fields                 : {', '.join(built.human_verified_fields) or '-'}")
+    print(f"  reviewed fields              : {', '.join(built.assistant_reviewed_fields) or '-'}")
+    print(f"  unverified fields (不写入)    : {', '.join(built.unverified_fields) or '-'}")
     print("--- identity block ---")
     print(built.identity_block)
     print("=== 将执行的策略 ===")
@@ -207,12 +284,14 @@ async def _dry_run(cfg, names: list[str], prompt: str) -> int:
         spec = STRATEGIES[name]
         ref_mode = "local_verified" if spec["reference_policy"] == "local_only" else "none"
         if ref_mode == "local_verified" and verified_n == 0:
-            ref_mode = "none（无核验图，实际会退化成 text_only）"
+            ref_mode = "none（无人工核验图，实际会退化成 text_only）"
         print(f"  {name:<18} policy={spec['reference_policy']:<10} ref={ref_mode}")
     print()
+    print(_print_gate(cfg) and "闸门已通过" or "闸门未通过：真实 A/B 仍然阻塞")
     print("未生成任何图片（dry-run）。要真实跑：--run-paid --allow-paid 且环境变量 "
           f"{_ENV_FLAG}=true")
     return 0
+
 
 
 async def _evaluate_dir(cfg, directory: Path) -> list[dict]:
@@ -273,6 +352,12 @@ async def main() -> int:
     if not paid:
         print(f"拒绝：真实生成需要 --allow-paid 且环境变量 {_ENV_FLAG}=true", file=sys.stderr)
         return 2
+
+    # 闸门放在付费之前：宁可一次都不生成，也不要在没有人工核验依据的情况下
+    # 生成两张图然后得出一个看起来有依据的结论。
+    if not _print_gate(cfg):
+        print("BLOCKED_BY_HUMAN_REFERENCE：未执行任何真实生成，付费调用 0 次。", file=sys.stderr)
+        return 3
 
     rows: list[dict] = []
     for name in names:

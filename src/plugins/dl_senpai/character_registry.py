@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import re
+from enum import Enum
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -113,34 +114,139 @@ DEFAULT_IDENTITY_SALIENCE: dict[str, float] = {
     "body_features": 1.2,
 }
 
-# profile_status 三档
+# 核验方法。只有 METHOD_HUMAN 代表「人看过原始资料并确认」。
+METHOD_HUMAN = "human_review"
+# assistant_review：模型据训练知识核对。**永远不等于人工核验**。
+METHOD_ASSISTANT = "assistant_review"
+METHOD_REFERENCE = "reference_evidence"
+
+# profile_status 四档。
+#
+# 为什么必须有 assistant_reviewed 这一档（2026-10-27 修正）：
+# 上一阶段把「模型核对过公开设定」写成了 verified=true，于是那 8 个字段直接进了
+# 提示词的 authoritative 硬约束段。这是语义污染——AI 给自己盖了「人工核验」的章。
+# draft 又表达不了「审过了但没人确认」这个中间状态，所以补一档。
 STATUS_DRAFT = "draft"
+STATUS_ASSISTANT_REVIEWED = "assistant_reviewed"
 STATUS_PARTIAL = "partial_verified"
 STATUS_VERIFIED = "verified"
 
 
-@dataclass(frozen=True)
-class VisualField:
-    """一个视觉特征 + 它自己的可信度。
+class VerificationStatus(str, Enum):
+    """一个视觉字段（或一张参考图）的可信状态。
 
-    verified=True 只应该出现在「人工核对过」或「有已验证参考图佐证」的字段上。
-    默认 False 是刻意的：宁可少写一条硬约束，也不要凭空给权威性。
+    这是本项目的信任模型核心：**只有 HUMAN_VERIFIED 才有资格进提示词的硬约束段**。
+
+    HUMAN_VERIFIED must never be produced by automatic model review.
+    也就是说：模型、后台任务、自动脚本、编码 Agent 都不许把状态写成 human_verified。
+    唯一合法来源是人执行 scripts/character_verify.py verify-field。
     """
 
-    value: str = ""
-    verified: bool = False
-    # 核验时间与方法：只允许人工审核流程写入（scripts/character_verify.py）。
-    # 程序、视觉模型、生图结果都无权把 verified 从 false 改成 true。
-    verified_at: str = ""
-    verification_method: str = ""
-    note: str = ""
+    UNVERIFIED = "unverified"
+    ASSISTANT_REVIEWED = "assistant_reviewed"
+    HUMAN_VERIFIED = "human_verified"
+
+    @property
+    def authoritative(self) -> bool:
+        """能否作为权威约束写进提示词。"""
+        return self is VerificationStatus.HUMAN_VERIFIED
+
+    @property
+    def counts_as_basis(self) -> bool:
+        """能否作为身份评分的文字依据。assistant_reviewed 不算。"""
+        return self is VerificationStatus.HUMAN_VERIFIED
+
+
+def migrate_status(
+    *, verified: bool = False, method: str = "", explicit: str = ""
+) -> VerificationStatus:
+    """把旧数据（verified: bool + verification_method）迁到三态。
+
+    规则（保守方向：任何含糊情况都往低调）：
+        verified=true  + human_review      → HUMAN_VERIFIED
+        verified=true  + assistant_review  → ASSISTANT_REVIEWED
+        verified=false + assistant_review  → ASSISTANT_REVIEWED
+        其他                                → UNVERIFIED
+
+    为什么 verified=true 配不出名的方法不算 human：
+    「有人把 verified 设成 true 但没记来源」不能自动升级成人工核验，
+    否则旧的误标会永久继承权威性。
+    """
+    raw = (explicit or "").strip().lower()
+    if raw in (VerificationStatus.UNVERIFIED.value, VerificationStatus.ASSISTANT_REVIEWED.value,
+               VerificationStatus.HUMAN_VERIFIED.value):
+        return VerificationStatus(raw)
+
+    meth = (method or "").strip().lower()
+    if verified and meth == METHOD_HUMAN:
+        return VerificationStatus.HUMAN_VERIFIED
+    if meth == METHOD_ASSISTANT:
+        return VerificationStatus.ASSISTANT_REVIEWED
+    return VerificationStatus.UNVERIFIED
+
+
+class VisualField:
+    """一个视觉特征 + 它的可信状态。
+
+    verified 已经不是可写字段，而是 verification_status 的**派生属性**。
+    这是整条信任模型的地基：
+        只有 HUMAN_VERIFIED 才 verified=True；
+        ASSISTANT_REVIEWED 虽然「被审过」，但 verified 恒为 False。
+    上一阶段允许 verified=True 与 method=assistant_review 并存，等于让模型
+    给自己盖章，最终那 8 个字段直接进了提示词的 authoritative 段。
+    """
+
+    __slots__ = ("value", "verification_status", "verified_at", "verification_method", "note")
+
+    def __init__(
+        self,
+        value: str = "",
+        verification_status: VerificationStatus = VerificationStatus.UNVERIFIED,
+        verified_at: str = "",
+        verification_method: str = "",
+        note: str = "",
+    ) -> None:
+        object.__setattr__(self, "value", value)
+        object.__setattr__(self, "verification_status", verification_status)
+        object.__setattr__(self, "verified_at", verified_at)
+        object.__setattr__(self, "verification_method", verification_method)
+        object.__setattr__(self, "note", note)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        # 不可变：改值必须走 update_field_value，那里会顺手把核验状态打回 unverified
+        raise AttributeError("VisualField 不可变，请用 character_registry 的写回函数")
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, VisualField):
+            return NotImplemented
+        return self.as_dict() == other.as_dict()
+
+    def __repr__(self) -> str:
+        return f"VisualField({self.value!r}, {self.verification_status.value})"
 
     def __bool__(self) -> bool:
         return bool(self.value.strip())
 
+    @property
+    def verified(self) -> bool:
+        """兼容旧调用：派生值，不接受外部赋值。"""
+        return self.verification_status is VerificationStatus.HUMAN_VERIFIED
+
+    @property
+    def reviewed(self) -> bool:
+        """被模型审阅过（但没人工核验）。"""
+        return self.verification_status is VerificationStatus.ASSISTANT_REVIEWED
+
+    @property
+    def status(self) -> str:
+        return self.verification_status.value
+
     def as_dict(self) -> dict[str, Any]:
-        """写回 JSON 用。空元数据不写，避免数据文件被无意义字段淹没。"""
-        out: dict[str, Any] = {"value": self.value, "verified": self.verified}
+        """写回 JSON 用。新格式只写 verification_status，不再写 verified bool。"""
+        out: dict[str, Any] = {
+            "value": self.value,
+            "verification_status": self.verification_status.value,
+        }
         if self.verified_at:
             out["verified_at"] = self.verified_at
         if self.verification_method:
@@ -150,13 +256,17 @@ class VisualField:
         return out
 
 
+
 class VisualIdentity:
     """角色的可见特征集合。
 
-    兼容两种数据写法（旧数据不用改）：
-        "hair": "银白偏浅紫的长发"                       → verified=False
-        "hair": {"value": "...", "verified": true}      → 按标注
-    字符串一律当未验证，这是保守方向的默认值。
+    数据写法：
+        "hair": "银白偏浅紫的长发"                                    → unverified
+        "hair": {"value": "...", "verification_status": "human_verified"}   → 新格式
+        "hair": {"value": "...", "verified": true, "verification_method": "human_review"} → 旧格式，自动迁移
+
+    旧格式一律走 migrate_status()：只有 verified=true 且方法明确是 human_review
+    才迁成 HUMAN_VERIFIED，其余全部降级。
     """
 
     def __init__(self, fields: dict[str, VisualField]) -> None:
@@ -170,18 +280,27 @@ class VisualIdentity:
                 continue
             if isinstance(raw, dict):
                 value = str(raw.get("value") or "").strip()
-                verified = bool(raw.get("verified"))
+                status = migrate_status(
+                    verified=bool(raw.get("verified")),
+                    method=str(raw.get("verification_method") or ""),
+                    explicit=str(raw.get("verification_status") or ""),
+                )
                 verified_at = str(raw.get("verified_at") or "").strip()
                 method = str(raw.get("verification_method") or "").strip()
                 note = str(raw.get("note") or "").strip()
+                # 只有人工核验才保留核验时间/方法，别让降级后的字段还挂着"核验过"的味道
+                if status is not VerificationStatus.HUMAN_VERIFIED:
+                    if status is not VerificationStatus.ASSISTANT_REVIEWED:
+                        verified_at = ""
+                        method = ""
             else:
                 value = str(raw or "").strip()
-                verified = False
+                status = VerificationStatus.UNVERIFIED
                 verified_at = method = note = ""
             if value:
                 fields[key] = VisualField(
                     value=value,
-                    verified=verified,
+                    verification_status=status,
                     verified_at=verified_at,
                     verification_method=method,
                     note=note,
@@ -210,26 +329,35 @@ class VisualIdentity:
         """按展示顺序返回非空字段。"""
         return tuple(k for k in _FIELD_KEYS if k in self._fields)
 
+    def keys_with(self, status: VerificationStatus) -> tuple[str, ...]:
+        return tuple(k for k in self.keys() if self._fields[k].verification_status is status)
+
+    def human_verified_keys(self) -> tuple[str, ...]:
+        return self.keys_with(VerificationStatus.HUMAN_VERIFIED)
+
+    def assistant_reviewed_keys(self) -> tuple[str, ...]:
+        return self.keys_with(VerificationStatus.ASSISTANT_REVIEWED)
+
     def verified_keys(self) -> tuple[str, ...]:
-        return tuple(k for k in self.keys() if self._fields[k].verified)
+        """兼容旧名：**只**指人工核验过的字段。"""
+        return self.human_verified_keys()
 
     def unverified_keys(self) -> tuple[str, ...]:
-        return tuple(k for k in self.keys() if not self._fields[k].verified)
+        """既没人工核验、也没被模型审阅过的字段。"""
+        return self.keys_with(VerificationStatus.UNVERIFIED)
 
-    def lines(self, *, verified: bool | None = None) -> list[str]:
-        """拼成 ["头发：…", …]。
-
-        verified=None 取全部（默认，兼容旧调用）；True/False 只取对应档。
-        """
+    def lines(self, *, status: VerificationStatus | None = None) -> list[str]:
+        """拼成 ["头发：…", …]。status=None 取全部。"""
         out: list[str] = []
         for key in self.keys():
-            if verified is not None and self._fields[key].verified is not verified:
+            if status is not None and self._fields[key].verification_status is not status:
                 continue
             out.append(f"{self.label(key)}：{self._fields[key].value}")
         return out
 
     def as_dict(self) -> dict[str, Any]:
         return {k: v.as_dict() for k, v in self._fields.items()}
+
 
 
 @dataclass(frozen=True)
@@ -286,14 +414,29 @@ class CharacterProfile:
 
     # -- 可信度 --
 
+    def human_verified_fields(self) -> tuple[str, ...]:
+        """人工核验过的字段。**只有这些**能进提示词的硬约束段。"""
+        return self.visual_identity.human_verified_keys()
+
+    def assistant_reviewed_fields(self) -> tuple[str, ...]:
+        """模型审阅过、但没人确认的字段。只能做支撑性提示。"""
+        return self.visual_identity.assistant_reviewed_keys()
+
     def verified_fields(self) -> tuple[str, ...]:
-        return self.visual_identity.verified_keys()
+        """兼容旧名。语义已收紧：只含人工核验字段。"""
+        return self.human_verified_fields()
 
     def unverified_fields(self) -> tuple[str, ...]:
+        """既没人工核验也没被审阅：不写进提示词（未知 ≠ 没有）。"""
         return self.visual_identity.unverified_keys()
 
     def required_fields(self) -> tuple[str, ...]:
-        """升到 verified 需要核验哪些字段（按这个角色的实际数据算）。"""
+        """升到 verified 需要**人工核验**哪些字段（按这个角色的实际数据算）。
+
+        通用规则，不含任何角色特判：
+            必核 = hair + clothing + palette + 该角色确实有值的族属特征
+            不足 4 项时用 eyes / accessories / silhouette 里真有值的补足
+        """
         required: list[str] = list(_STATUS_BASE_FIELDS)
         required += [slot for slot in _SPECIES_SLOTS if self.visual_identity.get(slot)]
         for extra in _STATUS_FILL_FIELDS:
@@ -303,41 +446,66 @@ class CharacterProfile:
                 required.append(extra)
         return tuple(dict.fromkeys(required))
 
-    def effective_status(self) -> str:
-        """角色审核状态：**始终**按字段推导，不接受人工直接写字符串。
+    def signature_feature_field(self) -> str:
+        """这个角色的「标志性特征」落在哪个字段（角/耳/尾/身体特征…）。
 
-        唯一例外是显式声明 draft —— 那是人工主动锁定「这角色别用」，
-        属于保守方向，允许覆盖推导结果。反方向的升级一律由字段决定。
+        为什么不在规则里写死 horns：不是所有角色都有角。这里只回答「哪个槽有值」，
+        具体是角还是兽耳由数据决定。
+        """
+        for slot in _SPECIES_SLOTS:
+            if self.visual_identity.get(slot):
+                return slot
+        return ""
+
+    def effective_status(self) -> str:
+        """角色审核状态：**始终**由字段状态推导，不接受手写字符串。
+
+        四档：
+            verified            必核字段全部人工核验
+            partial_verified    有人工核验，但必核没全中
+            assistant_reviewed  只被模型审阅过，无任何人工核验
+            draft               什么都没有
+
+        例外只有一个：显式写 draft（人工主动锁定），允许把 verified 压到 partial。
+        反方向的升级一律看字段。
         """
         explicit = (self.profile_status or "").strip().lower()
-        verified = set(self.verified_fields())
+        human = set(self.human_verified_fields())
         required = self.required_fields()
-        hit = [key for key in required if key in verified]
+        hit = [key for key in required if key in human]
 
-        if not hit:
-            return STATUS_DRAFT
-
-        # 完整核验：必核项全中且数量够。此前还要角色级 verified=True 才能升，
-        # 那个开关让「字段全验了也停在 partial」，已经删掉。
         if len(hit) == len(required) and len(required) >= _STATUS_MIN_REQUIRED:
             return STATUS_VERIFIED if explicit != STATUS_DRAFT else STATUS_PARTIAL
-        return STATUS_PARTIAL
+        if human:
+            return STATUS_PARTIAL
+        if self.assistant_reviewed_fields():
+            return STATUS_ASSISTANT_REVIEWED
+        return STATUS_DRAFT
 
-    def split_preserve(self) -> tuple[list[str], list[str]]:
-        """把 must_preserve 拆成（硬约束, 提示）。
+    def split_preserve(self) -> tuple[list[str], list[str], list[str]]:
+        """把 must_preserve 拆成（人工硬约束, 模型审阅提示, 其余提示）。
 
-        规则：能映射到某个视觉字段、且该字段已验证 → 硬约束；
-        其余（含映射不到字段的抽象项，如「facial identity」但 face 为空）→ 提示。
+        规则只看字段状态，不看措辞：「该条能映射到某字段」+「字段是人工核验的」
+        才升级成硬约束。assistant_reviewed 一律只能当提示。
         """
         hard: list[str] = []
+        reviewed: list[str] = []
         soft: list[str] = []
         for item in self.must_preserve:
             key = _preserve_field_of(item)
-            if key is not None and self.visual_identity.field(key).verified:
+            status = (
+                self.visual_identity.field(key).verification_status
+                if key is not None
+                else VerificationStatus.UNVERIFIED
+            )
+            if status is VerificationStatus.HUMAN_VERIFIED:
                 hard.append(item)
+            elif status is VerificationStatus.ASSISTANT_REVIEWED:
+                reviewed.append(item)
             else:
                 soft.append(item)
-        return hard, soft
+        return hard, reviewed, soft
+
 
     def salience(self, key: str) -> float:
         """某字段的身份显著性权重。"""
@@ -347,16 +515,25 @@ class CharacterProfile:
         return float(DEFAULT_IDENTITY_SALIENCE.get(key, 1.0))
 
     def identity_tiers(self) -> dict[str, list[tuple[str, str]]]:
-        """分三档返回视觉特征：verified / hints /（空的不出现）。
+        """分档返回视觉特征，与提示词四层模型一一对应。
 
-        返回 [(字段key, 值), …]，顺序按 _FIELD_KEYS。
+        human      → Level A，可以写 authoritative / must preserve
+        reviewed   → Level C，只能写 supporting guidance
+        unverified → Level D，不写进提示词
+
+        （Level B 是参考图派生，不在文字字段里，由 Prompt Builder 单独处理。）
         """
-        verified: list[tuple[str, str]] = []
-        hints: list[tuple[str, str]] = []
+        human: list[tuple[str, str]] = []
+        reviewed: list[tuple[str, str]] = []
+        unverified: list[tuple[str, str]] = []
         for key in self.visual_identity.keys():
             fld = self.visual_identity.field(key)
-            (verified if fld.verified else hints).append((key, fld.value))
-        return {"verified": verified, "hints": hints}
+            bucket = {
+                VerificationStatus.HUMAN_VERIFIED: human,
+                VerificationStatus.ASSISTANT_REVIEWED: reviewed,
+            }.get(fld.verification_status, unverified)
+            bucket.append((key, fld.value))
+        return {"human": human, "reviewed": reviewed, "unverified": unverified}
 
     @classmethod
     def from_dict(cls, data: dict[str, Any], *, source: str = "builtin") -> CharacterProfile:
@@ -570,13 +747,6 @@ def reset_character_registry() -> None:
 # 程序、视觉模型、生图结果都不该走到这里——把生成结果学回档案，等于让模型
 # 自己给自己出题再自己判卷。
 
-# 允许的核验方法。human_review 才代表「人类看过原始资料并确认」。
-METHOD_HUMAN = "human_review"
-# assistant_review：模型根据训练知识核对。**不等同人工核验**，只作为占位，
-# 方便人在没有原始资料时先跑通链路，之后必须由人复核或撤销。
-METHOD_ASSISTANT = "assistant_review"
-METHOD_REFERENCE = "reference_evidence"
-
 
 def builtin_data_path() -> Path:
     """内置角色数据文件（随代码版本走，可提交可回滚）。"""
@@ -626,6 +796,126 @@ def _raw_field(entry: dict[str, Any], field: str) -> dict[str, Any]:
     return out
 
 
+def _normalize_status(status: VerificationStatus | str) -> VerificationStatus | None:
+    if isinstance(status, VerificationStatus):
+        return status
+    raw = str(status or "").strip().lower()
+    try:
+        return VerificationStatus(raw)
+    except ValueError:
+        return None
+
+
+def update_field_status(
+    path: Path,
+    character: str,
+    field: str,
+    *,
+    status: VerificationStatus | str,
+    method: str = "",
+    at: str = "",
+    note: str = "",
+) -> tuple[bool, str]:
+    """写入字段的可信状态。返回 (ok, 说明)。
+
+    这是**唯一**能产生 HUMAN_VERIFIED 的入口，规则刻意收得很紧：
+
+    1. HUMAN_VERIFIED 必须同时传 method=human_review。
+       模型审阅（assistant_review）想写成 human_verified 会被直接拒绝——
+       否则「AI 给自己的判断盖人工章」这件事会在数据层重新出现。
+    2. 空字段不能核验。写出「角：无 verified=true」比不写更糟。
+    3. 撤销时保留 value 与 note，只把状态打回 unverified。
+    """
+    target = _normalize_status(status)
+    if target is None:
+        return False, f"非法状态: {status}（可用: unverified / assistant_reviewed / human_verified）"
+    if field not in _FIELD_KEYS:
+        return False, f"未知字段: {field}（可用: {', '.join(_FIELD_KEYS)}）"
+
+    meth = (method or "").strip().lower()
+    if target is VerificationStatus.HUMAN_VERIFIED and meth != METHOD_HUMAN:
+        return False, (
+            "assistant_review cannot create a verified field"
+            if meth == METHOD_ASSISTANT
+            else "human_verified 必须显式传 --method human_review"
+        )
+
+    data = _load_raw(path)
+    entry = find_raw_entry(data, character)
+    if entry is None:
+        return False, f"未找到角色: {character}"
+
+    raw = _raw_field(entry, field)
+    current = str(raw.get("value") or "").strip()
+    if target is not VerificationStatus.UNVERIFIED and not current:
+        return False, f"{field} 没有内容，不能核验空字段（先 edit-field 填描述）"
+
+    # 旧字段一律清掉，避免 verified=true 与 verification_status 打架
+    raw.pop("verified", None)
+    raw["verification_status"] = target.value
+
+    if target is VerificationStatus.UNVERIFIED:
+        raw.pop("verified_at", None)
+        raw.pop("verification_method", None)
+    else:
+        raw["verification_method"] = meth or (
+            METHOD_HUMAN if target is VerificationStatus.HUMAN_VERIFIED else METHOD_ASSISTANT
+        )
+        if at:
+            raw["verified_at"] = at.strip()
+        elif target is VerificationStatus.HUMAN_VERIFIED and not raw.get("verified_at"):
+            raw["verified_at"] = ""
+    if note:
+        raw["note"] = note.strip()
+
+    _save_raw(path, data)
+    return True, f"{entry.get('canonical_name')}.{field} → {target.value}"
+
+
+def update_field_value(
+    path: Path,
+    character: str,
+    field: str,
+    value: str,
+    *,
+    note: str = "",
+) -> tuple[bool, str]:
+    """改字段内容。**任何改动都会让核验状态失效**（打回 unverified）。
+
+    为什么必须这样：否则「A 内容被人工核验过」+「改成 B」会让 B 自动继承 A 的
+    核验结论。那是最阴险的信任污染——数据看起来永远是 verified，但内容早就换了。
+    """
+    if field not in _FIELD_KEYS:
+        return False, f"未知字段: {field}（可用: {', '.join(_FIELD_KEYS)}）"
+    data = _load_raw(path)
+    entry = find_raw_entry(data, character)
+    if entry is None:
+        return False, f"未找到角色: {character}"
+
+    raw = _raw_field(entry, field)
+    old = str(raw.get("value") or "").strip()
+    new = str(value or "").strip()
+    if not new:
+        return False, "不能把字段改成空值（要删除请显式告诉我，不要用空字符串）"
+
+    previous = raw.get("verification_status") or ""
+    raw["value"] = new
+    raw.pop("verified", None)
+    raw["verification_status"] = VerificationStatus.UNVERIFIED.value
+    raw.pop("verified_at", None)
+    raw.pop("verification_method", None)
+    if note:
+        raw["note"] = note.strip()
+    elif previous:
+        # 留痕：为什么这个字段突然变 unverified，否则以后没人知道是改过内容
+        raw["note"] = f"内容已修改（原状态 {previous}），核验失效"
+    _save_raw(path, data)
+
+    if previous and previous != VerificationStatus.UNVERIFIED.value:
+        return True, f"{entry.get('canonical_name')}.{field} 已更新，核验状态 {previous} → unverified"
+    return True, f"{entry.get('canonical_name')}.{field} 已更新（unverified）"
+
+
 def update_field_verification(
     path: Path,
     character: str,
@@ -637,44 +927,33 @@ def update_field_verification(
     note: str = "",
     value: str | None = None,
 ) -> tuple[bool, str]:
-    """写入某个视觉字段的核验状态。返回 (ok, 说明)。
+    """兼容旧签名（测试与旧脚本在用）。语义已收紧：
 
-    约束（都是刻意的）：
-    - 只能验证**有内容**的字段。空值字段不能靠"验证"变成事实，那会写出
-      「角：无 verified=true」这种比不写更糟的数据。
-    - 撤销时不删除 value，只把 verified 打回 false —— 描述留着当下次核验的起点。
+    verified=True 只有配 method=human_review 才会变成 HUMAN_VERIFIED，
+    其余 combination 一律降为 ASSISTANT_REVIEWED 或拒绝。
     """
-    if field not in _FIELD_KEYS:
-        return False, f"未知字段: {field}（可用: {', '.join(_FIELD_KEYS)}）"
-
-    data = _load_raw(path)
-    entry = find_raw_entry(data, character)
-    if entry is None:
-        return False, f"未找到角色: {character}"
-
-    raw = _raw_field(entry, field)
     if value is not None:
-        raw["value"] = str(value).strip()
-    current = str(raw.get("value") or "").strip()
-    if verified and not current:
-        return False, f"{field} 没有内容，不能验证空字段（先 set-value 填描述）"
-
-    raw["verified"] = bool(verified)
+        ok, message = update_field_value(path, character, field, value, note=note)
+        if not ok:
+            return ok, message
+        if not verified:
+            return True, message
     if verified:
-        raw["verified_at"] = str(at or "").strip()
-        raw["verification_method"] = str(method or METHOD_HUMAN).strip()
-        if note:
-            raw["note"] = str(note).strip()
-    else:
-        # 保留历史痕迹：什么时候撤的、为什么撤，比"悄悄变回 false"有用
-        raw.pop("verified_at", None)
-        raw["verification_method"] = ""
-        if note:
-            raw["note"] = str(note).strip()
+        meth = (method or "").strip().lower()
+        if meth and meth != METHOD_HUMAN:
+            # 旧调用想用 assistant_review 冒充 verified：降级，不报错
+            return update_field_status(
+                path, character, field,
+                status=VerificationStatus.ASSISTANT_REVIEWED, method=meth, at=at, note=note,
+            )
+        return update_field_status(
+            path, character, field,
+            status=VerificationStatus.HUMAN_VERIFIED, method=METHOD_HUMAN, at=at, note=note,
+        )
+    return update_field_status(
+        path, character, field, status=VerificationStatus.UNVERIFIED, note=note
+    )
 
-    _save_raw(path, data)
-    state = "verified=true" if verified else "verified=false"
-    return True, f"{entry.get('canonical_name')}.{field} → {state}"
 
 
 def update_profile_status_lock(path: Path, character: str, status: str) -> tuple[bool, str]:
@@ -684,7 +963,7 @@ def update_profile_status_lock(path: Path, character: str, status: str) -> tuple
     draft（保守方向），或者清掉历史遗留的手写值让推导生效（传空字符串）。
     """
     value = (status or "").strip().lower()
-    if value not in ("", STATUS_DRAFT, STATUS_PARTIAL, STATUS_VERIFIED):
+    if value not in ("", STATUS_DRAFT, STATUS_ASSISTANT_REVIEWED, STATUS_PARTIAL, STATUS_VERIFIED):
         return False, f"非法状态: {status}"
     data = _load_raw(path)
     entry = find_raw_entry(data, character)
@@ -700,20 +979,25 @@ def update_profile_status_lock(path: Path, character: str, status: str) -> tuple
 
 __all__ = [
     "DEFAULT_IDENTITY_SALIENCE",
-    "_SPECIES_SLOTS",
-    "_STATUS_BASE_FIELDS",
-    "_STATUS_MIN_REQUIRED",
+    "METHOD_ASSISTANT",
+    "METHOD_HUMAN",
+    "METHOD_REFERENCE",
+    "STATUS_ASSISTANT_REVIEWED",
     "STATUS_DRAFT",
     "STATUS_PARTIAL",
     "STATUS_VERIFIED",
+    "VerificationStatus",
+    "migrate_status",
+    "update_field_status",
+    "update_field_value",
+    "_SPECIES_SLOTS",
+    "_STATUS_BASE_FIELDS",
+    "_STATUS_MIN_REQUIRED",
     "CharacterMatch",
     "CharacterProfile",
     "CharacterRegistry",
     "VisualField",
     "VisualIdentity",
-    "METHOD_ASSISTANT",
-    "METHOD_HUMAN",
-    "METHOD_REFERENCE",
     "builtin_data_path",
     "editable_data_path",
     "find_raw_entry",

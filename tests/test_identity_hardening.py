@@ -84,8 +84,8 @@ def _profile(**overrides) -> CharacterProfile:
         "confidence": 0.95,
         "profile_status": "partial_verified",
         "visual_identity": {
-            "hair": {"value": "银色长发", "verified": True},
-            "horns": {"value": "一对弯曲羊角", "verified": True},
+            "hair": {"value": "银色长发", "verified": True, "verification_method": "human_review"},
+            "horns": {"value": "一对弯曲羊角", "verified": True, "verification_method": "human_review"},
             "clothing": {"value": "黑色外套", "verified": False},
         },
         "must_preserve": [
@@ -146,7 +146,9 @@ def test_case1_draft_profile_never_authoritative() -> None:
         assert banned not in low, f"draft 档案不该出现 {banned!r}"
     # 但身份锚点和支撑性提示必须还在：不能因为降级就把信息丢了
     assert "Kal'tsit" in built.text and "Arknights" in built.text
-    assert "supporting identity hints" in low
+    # 凯尔希所有字段都是 unverified → Level D：写一句"未记录、别自己编"，
+    # 但一个具体值都不写进去
+    assert "some visual traits are unrecorded or unverified" in low
     assert built.profile_status == "draft"
     assert built.verified_fields == ()
 
@@ -159,21 +161,22 @@ def test_case2_field_level_tiers() -> None:
         user_request="画测试角色", draft_prompt="", resolution=_resolution(_profile())
     )
     low = built.text.lower()
-    assert "verified canonical identity constraints" in low
+    assert "human-verified identity constraints" in low
     assert "do not contradict them" in low
     # hair / horns 已验证 → 进硬约束
     assert set(built.verified_fields) == {"hair", "horns"}
     # clothing 未验证 → 只能进 hints
-    assert "clothing" in built.hint_fields
-    verified_part = built.identity_block.split("Supporting identity hints")[0]
-    hints_part = built.identity_block.split("Supporting identity hints")[-1]
+    # clothing 既没人工核验、也没被模型审阅 → unverified，不写入提示词
+    assert "clothing" not in built.assistant_reviewed_fields
+    verified_part = built.identity_block.split("Assistant-reviewed identity hints")[0]
+    hints_part = built.identity_block.split("Assistant-reviewed identity hints")[-1]
     assert "银色长发" in verified_part and "一对弯曲羊角" in verified_part
     assert "黑色外套" not in verified_part
-    assert "黑色外套" in hints_part
+    assert "黑色外套" not in hints_part
 
 
 def test_case2_must_preserve_split_by_verification() -> None:
-    hard, soft = _profile().split_preserve()
+    hard, reviewed, soft = _profile().split_preserve()
     assert "hairstyle and hair color" in hard
     assert "horn shape and placement" in hard
     assert "signature outfit structure" in soft
@@ -185,7 +188,7 @@ def test_case2_must_preserve_split_by_verification() -> None:
 
 
 def test_case3_unknown_is_not_written_as_none() -> None:
-    profile = _profile(visual_identity={"hair": {"value": "银色长发", "verified": True}})
+    profile = _profile(visual_identity={"hair": {"value": "银色长发", "verified": True, "verification_method": "human_review"}})
     built = ImagePromptBuilder().build(
         user_request="画测试角色", draft_prompt="", resolution=_resolution(profile)
     )
@@ -212,8 +215,8 @@ async def test_case4_local_verified_reference_blocks_web(monkeypatch, stub_gener
             {
                 "character": "Eyjafjalla",
                 "franchise": "Arknights",
-                "verified": True,
-                "references": [{"file": "ref_01.png", "verified": True, "priority": 100}],
+                "verified": True, "verification_method": "human_review",
+                "references": [{"file": "ref_01.png", "verified": True, "verification_method": "human_review", "priority": 100}],
             }
         ),
         encoding="utf-8",
@@ -477,8 +480,8 @@ def test_validate_character_profile_reports_verified_images_with_draft_profile(t
     char_dir.mkdir(parents=True)
     (char_dir / "ref_01.png").write_bytes(PNG)
     (char_dir / "manifest.json").write_text(
-        json.dumps({"character": "Kal'tsit", "franchise": "Arknights", "verified": True,
-                    "references": [{"file": "ref_01.png", "verified": True, "priority": 10}]}),
+        json.dumps({"character": "Kal'tsit", "franchise": "Arknights", "verified": True, "verification_method": "human_review",
+                    "references": [{"file": "ref_01.png", "verified": True, "verification_method": "human_review", "priority": 10}]}),
         encoding="utf-8",
     )
     profile = CharacterRegistry.load().resolve("凯尔希")
@@ -494,10 +497,10 @@ def test_manifest_priority_ordering(tmp_path) -> None:
     (char_dir / "high.png").write_bytes(b"\x89PNG\r\n\x1a\nhigh")
     (char_dir / "manifest.json").write_text(
         json.dumps({
-            "character": "Eyjafjalla", "verified": True,
+            "character": "Eyjafjalla", "verified": True, "verification_method": "human_review",
             "references": [
-                {"file": "low.png", "verified": True, "priority": 10},
-                {"file": "high.png", "verified": True, "priority": 99},
+                {"file": "low.png", "verified": True, "verification_method": "human_review", "priority": 10},
+                {"file": "high.png", "verified": True, "verification_method": "human_review", "priority": 99},
             ],
         }),
         encoding="utf-8",

@@ -6,7 +6,7 @@ source_url 只是记录，不等于核验。
 
 用法：
 
-    python scripts/character_reference.py add 艾雅法拉 "C:\refs\eyja.png" --role fullbody --source-type official --source-url "..." --verified
+    python scripts/character_reference.py add 艾雅法拉 "C:\\refs\\eyja.png" --role fullbody --source-type official --source-url "..." --verified
     python scripts/character_reference.py list 艾雅法拉
     python scripts/character_reference.py check 艾雅法拉
     python scripts/character_reference.py unverify 艾雅法拉 ref_fullbody_01.png
@@ -63,6 +63,7 @@ def cmd_add(args: argparse.Namespace) -> int:
         role=args.role,
         priority=args.priority,
         verified=args.verified,
+        reviewed=getattr(args, "reviewed", False),
         method=args.method,
         source_url=args.source_url,
         source_type=args.source_type,
@@ -126,7 +127,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
 
     ok, message = set_reference_verified(
         _cfg(), _profile(args.character), args.file,
-        verified=True, method=args.method, note=args.note, at=args.at,
+        verified=True, method=getattr(args, "method", "human_review"), note=args.note, at=args.at,
     )
     print(message)
     return 0 if ok else 1
@@ -185,7 +186,12 @@ def main() -> int:
     p.add_argument("--source-type", default="", help="official / wiki / fan_art …（只记录，不决定 verified）")
     p.add_argument("--source-url", default="")
     p.add_argument("--notes", default="")
-    p.add_argument("--verified", action="store_true", help="人工确认为可信参考图")
+    # 人工核验必须是显式动作：--verified 不写 --method human_review 会被拒绝，
+    # 免得"顺手加个 --verified"就把一张图升级成身份权威。
+    p.add_argument("--verified", action="store_true",
+                   help="人工核验过这张图（必须同时 --method human_review）")
+    p.add_argument("--reviewed", action="store_true",
+                   help="模型审阅过但没人确认（assistant_reviewed，不用于 images.edit）")
     p.add_argument("--method", default="human_review")
     p.add_argument("--at", default="")
     p.set_defaults(func=cmd_add)

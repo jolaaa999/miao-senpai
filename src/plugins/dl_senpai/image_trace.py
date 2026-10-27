@@ -92,11 +92,16 @@ class ImageGenerationTrace:
     reference_mode: str = "none"       # user_image / local_verified / web_verified / web_probe_only / web_rejected / none
     reference_count: int = 0
     reference_source: str = ""         # 例如 character_library / web:deviantart.com
-    reference_verified: bool = False   # 这张参考图是否人工核验过（本地库 manifest）
+    reference_verified: bool = False   # 这张参考图是否**人工核验**过（assistant_reviewed 不算）
+    reference_verification_status: str = ""  # unverified / assistant_reviewed / human_verified
     reference_source_trust: float = 0.0
     # 档案可信度快照：提示词里的硬约束是不是有依据，看这两个字段
     character_profile_status: str = ""
-    verified_fields: tuple[str, ...] = ()
+    # 可信度快照：分档记录，避免"verified_fields"这种含糊名字又被误读成
+    # "被模型审阅过也算verified"。
+    human_verified_fields: tuple[str, ...] = ()
+    assistant_reviewed_fields: tuple[str, ...] = ()
+    unverified_fields: tuple[str, ...] = ()
     hint_fields: tuple[str, ...] = ()
     # 身份评分（只测量，不触发重画）
     identity_score: float | None = None
@@ -137,9 +142,13 @@ class ImageGenerationTrace:
             "reference_count": self.reference_count,
             "reference_source": self.reference_source or None,
             "reference_verified": self.reference_verified or None,
+            "reference_verification_status": self.reference_verification_status or None,
             "reference_source_trust": round(self.reference_source_trust, 2) or None,
+            "profile_status": self.character_profile_status or None,
             "character_profile_status": self.character_profile_status or None,
-            "verified_fields": list(self.verified_fields) or None,
+            "human_verified_fields": list(self.human_verified_fields) or None,
+            "assistant_reviewed_fields": list(self.assistant_reviewed_fields) or None,
+            "unverified_fields": list(self.unverified_fields) or None,
             "hint_fields": list(self.hint_fields) or None,
             "identity_score": round(self.identity_score, 3) if self.identity_score is not None else None,
             "identity_dimensions": {k: (round(v, 3) if isinstance(v, (int, float)) else v)

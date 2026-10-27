@@ -72,9 +72,13 @@ def _write_manifest(directory: Path, *, verified: bool = True, priority: int = 1
                 "localized_name": "艾雅法拉",
                 "franchise": "Arknights",
                 "verified": verified,
+                # 新格式用 verification_status；人工核验必须配 method=human_review，
+                # 否则加载时会（正确地）降级成 unverified，这条参考图就不会被使用。
                 "references": [
                     {"file": "ref_01.png", "type": "verified_reference",
-                     "verified": verified, "priority": priority},
+                     "verification_status": "human_verified" if verified else "unverified",
+                     "verification_method": "human_review" if verified else "",
+                     "priority": priority},
                 ],
             },
             ensure_ascii=False,
