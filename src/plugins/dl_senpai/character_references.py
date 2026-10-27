@@ -29,6 +29,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from dataclasses import dataclass, field
@@ -66,6 +67,15 @@ _DOMAIN_HINTS: tuple[tuple[tuple[str, ...], str, float], ...] = (
 )
 
 
+# reference_role：这张图适合拿来锚定什么。
+# 为什么需要：一张半身官方立绘当「全身图」的参考，构图会被强行拉成半身；
+# 肖像头像用全身图同理。第一版只预留字段 + 极简规则，不做智能选择。
+ROLE_IDENTITY = "identity"
+ROLE_FULLBODY = "fullbody"
+ROLE_PORTRAIT = "portrait"
+_KNOWN_ROLES = (ROLE_IDENTITY, ROLE_FULLBODY, ROLE_PORTRAIT)
+
+
 @dataclass(frozen=True)
 class ReferenceEntry:
     """manifest 里的一条参考图声明。"""
@@ -77,6 +87,12 @@ class ReferenceEntry:
     notes: str = ""
     source_url: str = ""
     source_type: str = ""
+    # 完整性：sha256 是「这张图没被人换过」的唯一证据。
+    # 只靠 verified=true 是不够的——文件被替换后清单照样说 verified。
+    sha256: str = ""
+    verification_method: str = ""
+    verified_at: str = ""
+    role: str = ROLE_IDENTITY
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ReferenceEntry | None:
@@ -87,6 +103,7 @@ class ReferenceEntry:
             priority = int(data.get("priority") or 0)
         except (TypeError, ValueError):
             priority = 0
+        role = str(data.get("reference_role") or data.get("role") or ROLE_IDENTITY).strip().lower()
         return cls(
             file=name,
             type=str(data.get("type") or "verified_reference").strip(),
@@ -95,7 +112,32 @@ class ReferenceEntry:
             notes=str(data.get("notes") or "").strip(),
             source_url=str(data.get("source_url") or "").strip(),
             source_type=str(data.get("source_type") or "").strip(),
+            sha256=str(data.get("sha256") or "").strip().lower(),
+            verification_method=str(data.get("verification_method") or "").strip(),
+            verified_at=str(data.get("verified_at") or "").strip(),
+            role=role if role in _KNOWN_ROLES else ROLE_IDENTITY,
         )
+
+    def as_dict(self) -> dict[str, Any]:
+        """写回 manifest 用。"""
+        out: dict[str, Any] = {
+            "file": self.file,
+            "type": self.type,
+            "verified": self.verified,
+            "priority": self.priority,
+            "reference_role": self.role,
+        }
+        for key, value in (
+            ("sha256", self.sha256),
+            ("verification_method", self.verification_method),
+            ("verified_at", self.verified_at),
+            ("source_type", self.source_type),
+            ("source_url", self.source_url),
+            ("notes", self.notes),
+        ):
+            if value:
+                out[key] = value
+        return out
 
 
 @dataclass(frozen=True)
@@ -127,6 +169,8 @@ class ReferenceCandidate:
     source_trust: float = 0.0
     verified: bool = False        # 是否人工核验（本地库 manifest）
     priority: int = 0
+    role: str = ROLE_IDENTITY
+    integrity_ok: bool = True
     visual_score: float | None = None
     identity_score: float | None = None
     issue: str = ""
@@ -177,6 +221,11 @@ def load_manifest(config: Any, profile: CharacterProfile) -> CharacterManifest |
     )
 
 
+def sha256_of(raw: bytes) -> str:
+    """图的指纹。导入、比对、防替换都用它。"""
+    return hashlib.sha256(raw).hexdigest()
+
+
 def _looks_like_image(raw: bytes) -> bool:
     """按文件头判断是不是真图。
 
@@ -217,8 +266,55 @@ def count_verified_references(config: Any, profile: CharacterProfile) -> int:
     )
 
 
+def _role_preference(user_request: str) -> tuple[str, ...]:
+    """按用户话里的构图线索排个序（极简规则，不做智能选择）。
+
+    头像/半身 → 肖像图更合适；全身/立绘 → 全身图更合适。
+    都没有线索就按 identity 优先、其余按 priority 排。
+    """
+    text = user_request or ""
+    if re.search(r"头像|肖像|半身|胸像|portrait|headshot", text, re.I):
+        return (ROLE_PORTRAIT, ROLE_IDENTITY, ROLE_FULLBODY)
+    if re.search(r"全身|立绘|站姿|全身像|full", text, re.I):
+        return (ROLE_FULLBODY, ROLE_IDENTITY, ROLE_PORTRAIT)
+    return (ROLE_IDENTITY, ROLE_FULLBODY, ROLE_PORTRAIT)
+
+
+def verify_reference_integrity(
+    directory: Path, entry: ReferenceEntry
+) -> tuple[bool, str, bytes | None]:
+    """校验一张参考图是否还是清单里那一张。返回 (ok, issue, bytes)。
+
+    为什么必须校验：manifest 说 verified=true 只证明「当初」核验过。
+    文件被换成另一张图（手滑覆盖、同步冲突、误放同人图）后，清单是不会变脸的，
+    于是系统会拿着未核实的图继续喂 images.edit。hash 比对是唯一的防线。
+    """
+    path = directory / entry.file
+    if not path.is_file():
+        return False, "file_missing", None
+    try:
+        raw = path.read_bytes()
+    except Exception as exc:  # noqa: BLE001
+        return False, f"unreadable:{type(exc).__name__}", None
+    if len(raw) > _MAX_BYTES:
+        return False, "too_large", None
+    if not _looks_like_image(raw):
+        return False, "not_an_image", None
+    if entry.sha256:
+        actual = sha256_of(raw)
+        if actual != entry.sha256:
+            # 这条日志的字符串是契约的一部分：trace 会原样记录 reference_integrity_failed
+            return False, "reference_integrity_failed", None
+    return True, "", raw
+
+
 def resolve_library_reference(
-    config: Any, profile: CharacterProfile, *, require_verified: bool = True
+    config: Any,
+    profile: CharacterProfile,
+    *,
+    require_verified: bool = True,
+    user_request: str = "",
+    diagnostics: list[str] | None = None,
 ) -> ReferenceCandidate | None:
     """取本地库里最优先的一张可用参考图。
 
@@ -248,22 +344,22 @@ def resolve_library_reference(
             return None
         entries = [ReferenceEntry(file=p.name, verified=False) for p in loose]
 
+    # 角色偏好排序：同样的 priority 下，构图匹配的那张先上
+    pref = _role_preference(user_request)
+    entries = sorted(
+        entries,
+        key=lambda e: (pref.index(e.role) if e.role in pref else len(pref), -e.priority),
+    )
+
     for entry in entries:
-        path = directory / entry.file
-        if not path.is_file():
+        ok, issue, raw = verify_reference_integrity(directory, entry)
+        if not ok or raw is None:
             logger.warning(
-                f"dl_senpai character reference missing file character={profile.canonical_name} "
-                f"file={entry.file}"
+                f"dl_senpai character reference unusable character={profile.canonical_name} "
+                f"file={entry.file} issue={issue}"
             )
-            continue
-        try:
-            raw = path.read_bytes()
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(f"dl_senpai character reference unreadable path={path}: {exc}")
-            continue
-        if not _looks_like_image(raw):
-            # 后缀对但内容不是图（改名过的截图、占位文件），跳过
-            logger.warning(f"dl_senpai character reference not an image path={path}")
+            if diagnostics is not None:
+                diagnostics.append(f"{entry.file}:{issue}")
             continue
         candidate = ReferenceCandidate(
             filename=entry.file,
@@ -272,6 +368,8 @@ def resolve_library_reference(
             source_trust=1.0 if entry.verified else 0.5,
             verified=entry.verified,
             priority=entry.priority,
+            role=entry.role,
+            integrity_ok=True,
         )
         logger.info(
             f"dl_senpai character reference from library character={profile.canonical_name} "
@@ -444,7 +542,216 @@ def validate_character_profile(
     return issues
 
 
+# ---------------- 图库导入与清单写回 ----------------
+#
+# 只由 scripts/character_reference.py 调用（人工导入流程）。运行时**只读**：
+# 生图链路永远不该往图库里写东西，否则会出现「搜到一张同人图 → 自动入库 →
+# 下次当成已验证参考图」这种自我污染。
+
+_MAX_NAME_SEQ = 99
+
+
+def _manifest_path(config: Any, profile: CharacterProfile) -> Path:
+    return profile_dir(config, profile) / _MANIFEST_NAME
+
+
+def _load_raw_manifest(path: Path) -> dict[str, Any]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except FileNotFoundError:
+        return {}
+    except Exception as exc:  # noqa: BLE001 — 清单坏了，让调用方决定是否重建
+        raise ValueError(f"manifest 无法解析: {exc}") from exc
+
+
+def _save_raw_manifest(path: Path, data: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = Path(str(path) + ".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    tmp.replace(path)
+
+
+def _next_filename(directory: Path, prefix: str, role: str, suffix: str) -> str:
+    """挑一个没被占用的编号文件名。不覆盖、不猜。"""
+    for seq in range(1, _MAX_NAME_SEQ + 1):
+        candidate = f"{prefix}_{role}_{seq:02d}{suffix}"
+        if not (directory / candidate).exists():
+            return candidate
+    raise ValueError(f"{directory} 里 {prefix}_{role}_* 编号用尽了（>{_MAX_NAME_SEQ}）")
+
+
+def add_reference_to_library(
+    config: Any,
+    profile: CharacterProfile,
+    raw: bytes,
+    *,
+    original_name: str = "",
+    role: str = ROLE_IDENTITY,
+    priority: int = 100,
+    verified: bool = False,
+    method: str = "",
+    source_url: str = "",
+    source_type: str = "",
+    notes: str = "",
+    at: str = "",
+) -> tuple[bool, str]:
+    """把一张本地图导入参考库并登记进 manifest。返回 (ok, 说明)。
+
+    拒绝的三种情况，都是踩过的坑：
+    - 不是真图片（改名的截图、占位文件）→ 会在 images.edit 处 400；
+    - 超过 8MB → 读进内存拖慢整条链路；
+    - sha256 已存在 → 同一张图被编号成 ref_01/ref_02/ref_03，清单越来越长
+      但信息量没变，还会让优先级排序失去意义。
+    """
+    if not raw:
+        return False, "文件是空的"
+    if len(raw) > _MAX_BYTES:
+        return False, f"文件过大: {len(raw)} bytes > {_MAX_BYTES}"
+    if not _looks_like_image(raw):
+        return False, "不是有效图片（只认 PNG/JPEG/WEBP 文件头）"
+    if role not in _KNOWN_ROLES:
+        return False, f"未知 reference_role: {role}（可用: {', '.join(_KNOWN_ROLES)}）"
+
+    directory = profile_dir(config, profile)
+    manifest_path = _manifest_path(config, profile)
+    data = _load_raw_manifest(manifest_path)
+    entries = [x for x in data.get("references") or [] if isinstance(x, dict)]
+
+    digest = sha256_of(raw)
+    for item in entries:
+        if str(item.get("sha256") or "").strip().lower() == digest:
+            return False, f"reference already exists: {item.get('file')}（sha256 相同）"
+
+    suffix = Path(original_name).suffix.lower()
+    if suffix not in _REF_SUFFIXES:
+        suffix = ".png"
+    prefix = "official" if (source_type or "").strip().lower() == SOURCE_OFFICIAL else "ref"
+    try:
+        filename = _next_filename(directory, prefix, role, suffix)
+    except ValueError as exc:
+        return False, str(exc)
+
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / filename).write_bytes(raw)
+
+    entry = {
+        "file": filename,
+        "type": (f"official_{role}" if prefix == "official" else "verified_reference"),
+        "verified": bool(verified),
+        "priority": int(priority),
+        "reference_role": role,
+        "sha256": digest,
+    }
+    if verified:
+        entry["verification_method"] = (method or "human_review").strip()
+        if at:
+            entry["verified_at"] = at.strip()
+    if source_type:
+        entry["source_type"] = source_type.strip()
+    if source_url:
+        entry["source_url"] = source_url.strip()
+    if notes:
+        entry["notes"] = notes.strip()
+
+    entries.append(entry)
+    data.setdefault("character", profile.canonical_name)
+    data.setdefault("localized_name", profile.localized_names[0] if profile.localized_names else "")
+    data.setdefault("franchise", profile.franchise)
+    data["references"] = entries
+    # 顶层 verified 只在「至少一张图核验过」时为真，别让它跟条目状态脱节
+    data["verified"] = any(bool(x.get("verified")) for x in entries)
+    _save_raw_manifest(manifest_path, data)
+    state = "verified=true" if verified else "verified=false（导入但未核验，不会被用于 images.edit）"
+    return True, f"{filename} → {state} sha256={digest[:12]}…"
+
+
+def set_reference_verified(
+    config: Any,
+    profile: CharacterProfile,
+    filename: str,
+    *,
+    verified: bool,
+    method: str = "",
+    note: str = "",
+    at: str = "",
+) -> tuple[bool, str]:
+    """人工核验/撤销某张参考图。撤销不删文件，只把 verified 打回 false。"""
+    manifest_path = _manifest_path(config, profile)
+    data = _load_raw_manifest(manifest_path)
+    entries = [x for x in data.get("references") or [] if isinstance(x, dict)]
+    target = None
+    for item in entries:
+        if str(item.get("file") or "") == filename:
+            target = item
+            break
+    if target is None:
+        return False, f"manifest 里没有 {filename}"
+
+    if verified:
+        path = profile_dir(config, profile) / filename
+        if not path.is_file():
+            return False, f"文件不存在: {filename}"
+        raw = path.read_bytes()
+        if not _looks_like_image(raw):
+            return False, f"不是有效图片: {filename}"
+        digest = sha256_of(raw)
+        # 核验即锁指纹：以后文件被换掉，sha256 对不上会被拒绝使用
+        if target.get("sha256") and str(target["sha256"]).lower() != digest:
+            return False, f"文件与清单里的 sha256 不一致（文件被改过）: {filename}"
+        target["sha256"] = digest
+        target["verification_method"] = (method or "human_review").strip()
+        if at:
+            target["verified_at"] = at.strip()
+    else:
+        target.pop("verified_at", None)
+        target["verification_method"] = ""
+    target["verified"] = bool(verified)
+    if note:
+        target["notes"] = note.strip()
+
+    data["references"] = entries
+    data["verified"] = any(bool(x.get("verified")) for x in entries)
+    _save_raw_manifest(manifest_path, data)
+    return True, f"{filename} → verified={str(bool(verified)).lower()}"
+
+
+def reference_integrity_report(config: Any, profile: CharacterProfile) -> list[dict[str, Any]]:
+    """逐条检查图库：文件在不在、头对不对、大小、sha256 是否一致。
+
+    给 CLI 用，也给排查用。返回每条的检查结果，不修改任何文件。
+    """
+    directory = profile_dir(config, profile)
+    manifest = load_manifest(config, profile)
+    if manifest is None:
+        return []
+    report: list[dict[str, Any]] = []
+    for entry in manifest.references:
+        ok, issue, raw = verify_reference_integrity(directory, entry)
+        report.append(
+            {
+                "file": entry.file,
+                "verified": entry.verified,
+                "role": entry.role,
+                "priority": entry.priority,
+                "sha256": entry.sha256[:12],
+                "size": len(raw) if raw else 0,
+                "ok": ok,
+                "issue": issue,
+            }
+        )
+    return report
+
+
 __all__ = [
+    "ROLE_FULLBODY",
+    "ROLE_IDENTITY",
+    "ROLE_PORTRAIT",
+    "add_reference_to_library",
+    "reference_integrity_report",
+    "set_reference_verified",
+    "sha256_of",
+    "verify_reference_integrity",
     "SOURCE_DATABASE",
     "SOURCE_FAN_ART",
     "SOURCE_OFFICIAL",

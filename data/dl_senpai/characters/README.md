@@ -8,24 +8,51 @@
 | verified | Prompt 里的档位 | 措辞 |
 |---|---|---|
 | true | Level A | 「已验证的身份约束，必须保留，不得违背」 |
-| false | Level B | 「支撑性提示，与已验证约束/参考图冲突时以它们为准」 |
+| false | Level A 外 | supporting hints（参考性质，冲突时以已验证项/参考图为准） |
 | 空值 | Level C | 完全不写（**未知 ≠ 没有**） |
 
-`profile_status` 三档语义：
+## 谁来写 verified
 
-- `draft`：几乎没有人工核验 → 全部走 supporting hints
-- `partial_verified`：至少部分核心字段人工确认
-- `verified`：核心字段 + 参考图都已核验
+只有一个入口：`scripts/character_verify.py`。
 
-## 怎么升级
+程序、视觉模型、生图结果**都不能**把 `verified` 从 false 改成 true。
+把生成结果学回档案，等于让模型自己给自己出题再自己判卷。
 
-1. 拿官方设定集 / 官方立绘核对某一条，例如「角：一对弯曲的羊角，深色带纹理」；
-2. 把该字段改成 `{"value": "...", "verified": true}`；
-3. 至少 face / hair / horns / eyes / clothing 里核验到 4 项，再把 `profile_status` 改成 `verified`；
-4. 同时往 `data/dl_senpai/character_references/<作品>/<角色>/` 放官方立绘并写 `manifest.json`（字段 `verified: true`）。
+## 流程
+
+```powershell
+# 看现状
+python scripts/character_verify.py show 艾雅法拉
+
+# 补/改描述（只改文案，不动核验状态）
+python scripts/character_verify.py set-value 艾雅法拉 palette "银白与浅紫为主调…"
+
+# 人工确认一个字段
+python scripts/character_verify.py verify-field 艾雅法拉 horns --method human_review
+
+# 发现核验错了：撤销（描述保留）
+python scripts/character_verify.py unverify-field 艾雅法拉 clothing --note "认错了"
+```
+
+## profile_status 不手写
+
+状态永远由字段推导：
+
+```
+必核 = hair + clothing + palette + 该角色确实有值的族属特征（horns/ears/body_features）
+       （不足 4 项时用 eyes/accessories/silhouette 里真有值的补足）
+必核全中 → verified
+命中任意一项 → partial_verified
+一项都没有 → draft
+```
+
+`face` **不在必核里**：脸的身份基本无法用「圆脸/柔和五官」这种自然语言可靠表达，
+硬编一段描述反而会让生图模型重新设计人物。脸交给已验证参考图。
+
+显式写 `draft` 仍然有效——那是保守方向的人工锁定。反方向的升级一律看字段。
 
 ## 禁止
 
-- 不要把 AI 生成结果的视觉描述抄回这里当设定（生成结果只能用于质量评估）；
+- 不要把 AI 生成结果的视觉描述抄回这里当设定；
 - 不要把「不知道」写成 `{"value": "无", "verified": true}`；
-- 不要未核对就把 `profile_status` 改成 `verified`。
+- 不要未核对就写 `--method human_review`。

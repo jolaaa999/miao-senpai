@@ -130,17 +130,22 @@ def stub_generate(monkeypatch, tmp_path):
 
 
 def test_case1_draft_profile_never_authoritative() -> None:
-    """未人工核验的档案不能出现权威措辞——写错时会稳定地画错。"""
-    profile = CharacterRegistry.load().resolve("艾雅法拉")
+    """未核验的档案不能出现权威措辞——写错时会稳定地画错。
+
+    样本用凯尔希：她至今没有核验任何字段。艾雅法拉在本阶段已核验，
+    不再适合当"未核验"的例子（这正是流程该有的样子：数据变了，测试跟着换样本）。
+    """
+    profile = CharacterRegistry.load().resolve("凯尔希")
     assert profile.effective_status() == "draft"
+    assert profile.verified_fields() == ()
     built = ImagePromptBuilder().build(
-        user_request="画一张艾雅法拉", draft_prompt="艾雅法拉", resolution=_resolution(profile)
+        user_request="画一张凯尔希", draft_prompt="凯尔希", resolution=_resolution(profile)
     )
     low = built.text.lower()
     for banned in ("authoritative", "do not contradict", "canonical visual identity"):
         assert banned not in low, f"draft 档案不该出现 {banned!r}"
     # 但身份锚点和支撑性提示必须还在：不能因为降级就把信息丢了
-    assert "Eyjafjalla" in built.text and "Arknights" in built.text
+    assert "Kal'tsit" in built.text and "Arknights" in built.text
     assert "supporting identity hints" in low
     assert built.profile_status == "draft"
     assert built.verified_fields == ()
@@ -346,7 +351,7 @@ def test_case6_evaluator_skips_unverified_fields() -> None:
 @pytest.mark.asyncio
 async def test_case6_no_basis_returns_not_evaluated(monkeypatch) -> None:
     """没有已验证字段也没有已验证参考图时，一次视觉调用都不许发。"""
-    profile = CharacterRegistry.load().resolve("艾雅法拉")
+    profile = CharacterRegistry.load().resolve("凯尔希")
 
     async def _chat_must_not_run(*a, **kw):
         raise AssertionError("没有依据就不该调用视觉模型")
@@ -466,16 +471,17 @@ def test_validate_character_profile_reports_missing_manifest(tmp_path) -> None:
 
 
 def test_validate_character_profile_reports_verified_images_with_draft_profile(tmp_path) -> None:
+    """有已核验参考图、档案却还是 draft：结构上应该被提示出来。"""
     ref_dir = tmp_path / "refs"
-    char_dir = ref_dir / "arknights" / "eyjafjalla"
+    char_dir = ref_dir / "arknights" / "kal-tsit"
     char_dir.mkdir(parents=True)
     (char_dir / "ref_01.png").write_bytes(PNG)
     (char_dir / "manifest.json").write_text(
-        json.dumps({"character": "Eyjafjalla", "franchise": "Arknights", "verified": True,
+        json.dumps({"character": "Kal'tsit", "franchise": "Arknights", "verified": True,
                     "references": [{"file": "ref_01.png", "verified": True, "priority": 10}]}),
         encoding="utf-8",
     )
-    profile = CharacterRegistry.load().resolve("艾雅法拉")
+    profile = CharacterRegistry.load().resolve("凯尔希")
     issues = validate_character_profile(_Cfg(character_reference_dir=str(ref_dir)), profile)
     assert any("draft" in i for i in issues)
 

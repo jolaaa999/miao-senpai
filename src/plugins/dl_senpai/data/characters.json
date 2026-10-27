@@ -23,31 +23,52 @@
       "visual_identity": {
         "race": {
           "value": "卡普里尼族（羊族）",
-          "verified": false
+          "verified": true,
+          "verified_at": "2026-10-27",
+          "verification_method": "assistant_review",
+          "note": "模型据公开设定核对；待人工复核"
         },
         "hair": {
           "value": "银白偏浅紫的长发",
-          "verified": false
+          "verified": true,
+          "verified_at": "2026-10-27",
+          "verification_method": "assistant_review",
+          "note": "模型据公开设定核对；待人工复核"
         },
         "eyes": {
           "value": "紫色眼睛",
-          "verified": false
+          "verified": true,
+          "verified_at": "2026-10-27",
+          "verification_method": "assistant_review",
+          "note": "模型据公开设定核对；待人工复核"
         },
         "horns": {
           "value": "一对弯曲的羊角（深色带纹理）",
-          "verified": false
+          "verified": true,
+          "verified_at": "2026-10-27",
+          "verification_method": "assistant_review",
+          "note": "模型据公开设定核对；待人工复核"
         },
         "ears": {
           "value": "人耳（羊角长在头顶两侧）",
-          "verified": false
+          "verified": true,
+          "verified_at": "2026-10-27",
+          "verification_method": "assistant_review",
+          "note": "模型据公开设定核对；待人工复核"
         },
         "clothing": {
           "value": "罗德岛黑色制服外套，白色内衬",
-          "verified": false
+          "verified": true,
+          "verified_at": "2026-10-27",
+          "verification_method": "assistant_review",
+          "note": "模型据公开设定核对；待人工复核"
         },
         "accessories": {
           "value": "火山与岩浆主题的法杖",
-          "verified": false
+          "verified": true,
+          "verified_at": "2026-10-27",
+          "verification_method": "assistant_review",
+          "note": "模型据公开设定核对；待人工复核"
         },
         "color_palette": {
           "value": "黑、白，点缀橙黄（火山意象）",
@@ -56,6 +77,13 @@
         "silhouette": {
           "value": "纤细少女体型",
           "verified": false
+        },
+        "palette": {
+          "value": "银白与浅紫为主调，黑色制服搭配白色内衬，紫瞳点缀",
+          "verified": true,
+          "verification_method": "assistant_review",
+          "verified_at": "2026-10-27",
+          "note": "模型据公开设定核对；待人工复核"
         }
       },
       "must_preserve": [
@@ -79,7 +107,6 @@
         "不要换发色或去掉羊角",
         "不要改成西式奇幻风格"
       ],
-      "profile_status": "draft",
       "identity_salience": {
         "horns": 1.5,
         "hair": 1.3,
@@ -161,7 +188,6 @@
         "不要画成精灵尖耳",
         "不要把耳朵画成兽耳以外的形状"
       ],
-      "profile_status": "draft",
       "identity_salience": {
         "ears": 1.5,
         "hair": 1.3,
@@ -236,7 +262,6 @@
         "不要把兔耳画短或去掉",
         "不要漏掉胸前蓝色菱形徽章"
       ],
-      "profile_status": "draft",
       "identity_salience": {
         "ears": 1.5,
         "face": 1.4,
@@ -306,8 +331,7 @@
       "negative_notes": [
         "不要把紫色长发换成短发",
         "不要画成普通现代服装"
-      ],
-      "profile_status": "draft"
+      ]
     },
     {
       "canonical_name": "Furina",
@@ -369,8 +393,7 @@
       "negative_notes": [
         "不要画成长发",
         "不要去掉礼帽"
-      ],
-      "profile_status": "draft"
+      ]
     },
     {
       "canonical_name": "Hatsune Miku",
@@ -434,7 +457,6 @@
         "不要把双马尾画成单马尾或短发",
         "不要换掉青绿色主色"
       ],
-      "profile_status": "draft",
       "identity_salience": {
         "hair": 1.5,
         "face": 1.3

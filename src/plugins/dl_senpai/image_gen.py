@@ -752,7 +752,15 @@ async def build_image_segment(
     archive_scene: str = "",
     reference_images: list[str] | None = None,
     auto_reference: bool = False,
+    reference_policy: str = "default",
 ) -> MessageSegment | None:
+    """生成一张图并返回可发送的消息段。
+
+    reference_policy 只给基准测试用，用来控制变量：
+      default    现行为（用户图 > 本地核验库 > 网图按策略）
+      text_only  完全不使用任何自动参考图（A 组）
+      local_only 只用本地核验库，不联网搜图（B 组）
+    """
     cfg = config or get_config()
     if not cfg.draw_enable or interrupt:
         return None
@@ -803,10 +811,18 @@ async def build_image_segment(
         # 参考图优先级：用户图 > 本地**已核验**库 > 网图（按策略）。
         # 为什么本地库要求 manifest 里 verified=true：来源不明的图等于用一个未知角色
         # 锚定身份，实测正是它把艾雅法拉画成了棕发精灵耳。
-        if reference is None:
+        want_local = reference_policy in ("default", "local_only")
+        if reference is None and want_local:
             from .character_references import resolve_library_reference
 
-            library_ref = resolve_library_reference(cfg, resolution.profile)
+            # diagnostics 收起来：文件被换、hash 不符、清单里没核验过，
+            # 是三种完全不同的问题，只有把原因带进 trace 才查得动。
+            library_diag: list[str] = []
+            library_ref = resolve_library_reference(
+                cfg, resolution.profile, user_request=user_request, diagnostics=library_diag
+            )
+            if library_diag:
+                trace.extra["reference_integrity_failed"] = library_diag[:5]
             if library_ref is not None:
                 reference = library_ref.as_pair()
                 trace.reference_mode = "local_verified"
@@ -821,7 +837,10 @@ async def build_image_segment(
 
     # 网图：普通图沿用原行为（找一张当参考）；已知角色按 web_reference_mode 决定用途。
     web_mode = _web_reference_mode(cfg) if resolution.is_known else "enabled"
-    if reference is None and auto_reference and cfg.draw_find_reference and web_mode != "off":
+    # local_only / text_only 是基准测试用来控制变量的：这两种模式下**不许**联网，
+    # 否则「只用本地库」那组会偷偷被网图补上，A/B 就失去意义了。
+    want_web = reference_policy == "default"
+    if reference is None and auto_reference and want_web and cfg.draw_find_reference and web_mode != "off":
         from .draw_reference import find_reference_image
 
         found = await find_reference_image(

@@ -1,0 +1,21 @@
+{
+  "character": "Eyjafjalla",
+  "localized_name": "艾雅法拉",
+  "franchise": "Arknights",
+  "verified": true,
+  "references": [
+    {
+      "file": "official_fullbody_01.png",
+      "type": "official_fullbody",
+      "verified": true,
+      "priority": 100,
+      "reference_role": "fullbody",
+      "sha256": "（导入时自动写入，人工不要手填）",
+      "verification_method": "human_review",
+      "verified_at": "2026-10-27",
+      "source_type": "official",
+      "source_url": "https://example.invalid/…",
+      "notes": "官方立绘全身，用于身份锚定"
+    }
+  ]
+}

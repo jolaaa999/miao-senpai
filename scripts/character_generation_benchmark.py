@@ -1,25 +1,27 @@
 #!/usr/bin/env python
-"""角色生图 A/B 基准：比较不同参考策略的身份一致性。
+"""角色生图 A/B 基准：参考图到底有没有用？
 
-用法（默认**只评估已有图片**，不花钱）：
+固定场景，只改一个变量（reference strategy），其余全部相同：
+同 prompt、同模型、同尺寸、同 quality、同档案、同参考图策略之外的参数。
 
-    python scripts/character_generation_benchmark.py \
-        --prompt "画一张艾雅法拉站在火山前" \
-        --images data/dl_senpai/bench/ --character 艾雅法拉
+三种模式：
 
-目录里按策略前缀放图，例如：
+    # 1) dry-run（默认，不花钱）：只打印将要执行的配置 + Prompt 分层预览
+    python scripts/character_generation_benchmark.py
 
-    data/dl_senpai/bench/text_only_01.png
-    data/dl_senpai/bench/local_verified_01.png
-    data/dl_senpai/bench/web_verified_01.png
+    # 2) 评估已有图片（不花钱）
+    python scripts/character_generation_benchmark.py --evaluate data/dl_senpai/bench
 
-要真实生成必须显式开两个闸（缺一不可）：
-
+    # 3) 真实生成（必须双闸同时打开，且最多 2 次）
     set ALLOW_PAID_IMAGE_BENCHMARK=true
-    python scripts/character_generation_benchmark.py --allow-paid ...
+    python scripts/character_generation_benchmark.py --run-paid --allow-paid
 
-为什么默认不生成：一次 1536x2048 大约 130 秒、要花钱。基准是拿来做判断的，
-不是拿来自动烧预算的。
+为什么要双闸：一次 1536x2048 要 1~2 分钟和真金白银。基准是用来做判断的，
+不是拿来自动烧预算的。两次也够——A 一次 B 一次，不许"再抽一张挑好看的"，
+那会让对比失去意义。
+
+盲评：评估阶段只把「待评图片 + 身份依据」交给视觉模型，**不告诉它哪张用了
+参考图**。否则模型会顺着提示夸reference 版。
 """
 
 from __future__ import annotations
@@ -31,81 +33,217 @@ import os
 import sys
 import time
 from pathlib import Path
+from urllib.parse import unquote, urlparse
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "src"))
 sys.path.insert(0, str(REPO))
 
-STRATEGIES = ("text_only", "local_verified", "web_verified")
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+
+# 固定实验场景。为什么不让人自由输入：变量越少越能说明问题。
+SCENARIO = {
+    "character": "艾雅法拉",
+    "prompt": "画一张艾雅法拉站在火山前，半身构图，自然表情",
+    # 场景要求显式列出：reference-guided 生成可能"人更像、场景更差"，必须一起量
+    "scene_checks": ("火山/熔岩背景", "半身构图（腰部以上）", "自然表情"),
+}
+
+# 两组。策略名会出现在报告里，别改。
+STRATEGIES: dict[str, dict[str, object]] = {
+    "text_only": {"reference_policy": "text_only", "auto_reference": False, "label": "无参考图"},
+    "local_verified_1": {"reference_policy": "local_only", "auto_reference": True, "label": "1 张本地核验图"},
+}
+
+# 硬上限：本阶段最多 2 次真实生图。超过就拒绝执行，不静默加。
+MAX_PAID_CALLS = 2
+_ENV_FLAG = "ALLOW_PAID_IMAGE_BENCHMARK"
 
 
 def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="角色生图参考策略基准")
-    parser.add_argument("--prompt", default="画一张艾雅法拉站在火山前", help="用户原话")
-    parser.add_argument("--character", default="艾雅法拉", help="角色名（用于解析档案）")
-    parser.add_argument("--images", default="data/dl_senpai/bench", help="已有图片目录")
-    parser.add_argument("--strategies", default=",".join(STRATEGIES), help="逗号分隔的策略名")
-    parser.add_argument("--allow-paid", action="store_true", help="允许真实调用生图 API")
-    parser.add_argument("--json", action="store_true", help="输出 JSON 而不是表格")
-    return parser.parse_args()
+    ap = argparse.ArgumentParser(description="角色生图参考策略 A/B 基准")
+    ap.add_argument("--character", default=SCENARIO["character"])
+    ap.add_argument("--prompt", default=SCENARIO["prompt"])
+    ap.add_argument("--strategies", default="text_only,local_verified_1")
+    ap.add_argument("--run-paid", action="store_true", help="真实生成（还需环境变量闸）")
+    ap.add_argument("--allow-paid", action="store_true", help="第二个付费闸")
+    ap.add_argument("--evaluate", default="", help="只评估该目录下已有图片")
+    ap.add_argument("--json", action="store_true", help="输出 JSON")
+    return ap.parse_args()
 
 
 def _paid_allowed(args: argparse.Namespace) -> bool:
-    """两个闸都开才允许花钱：显式参数 + 显式环境变量。"""
-    env = str(os.environ.get("ALLOW_PAID_IMAGE_BENCHMARK", "")).strip().lower()
+    """两个闸都开才算允许花钱。缺一个都不行。"""
+    env = str(os.environ.get(_ENV_FLAG, "")).strip().lower()
     return bool(args.allow_paid) and env in ("1", "true", "yes", "on")
 
 
-async def _evaluate_existing(cfg, profile, strategy: str, image_dir: Path) -> dict:
+def _strategies_of(args: argparse.Namespace) -> list[str]:
+    names = [s.strip() for s in args.strategies.split(",") if s.strip()]
+    unknown = [n for n in names if n not in STRATEGIES]
+    if unknown:
+        raise SystemExit(f"未知策略: {', '.join(unknown)}（可用: {', '.join(STRATEGIES)}）")
+    if len(names) > MAX_PAID_CALLS:
+        raise SystemExit(f"策略数 {len(names)} 超过付费上限 {MAX_PAID_CALLS}")
+    return names
+
+
+def _segment_path(seg) -> Path | None:
+    """从 MessageSegment 里挖出本地文件路径。"""
+    try:
+        uri = str(seg.data.get("file") or "")
+    except Exception:  # noqa: BLE001
+        return None
+    if uri.startswith("file:"):
+        return Path(unquote(urlparse(uri).path.lstrip("/"))) if os.name == "nt" else Path(unquote(urlparse(uri).path))
+    return None
+
+
+async def _evaluate_image(cfg, profile, image: bytes, scene_checks: tuple[str, ...]) -> dict:
+    """盲评：只给图片和依据，不给策略名。"""
     from plugins.dl_senpai.character_references import count_verified_references
     from plugins.dl_senpai.identity_eval import CharacterIdentityEvaluator
+    from plugins.dl_senpai.scene_eval import SceneComplianceEvaluator
 
-    matches = sorted(image_dir.glob(f"{strategy}*.png")) if image_dir.is_dir() else []
-    if not matches:
-        return {"strategy": strategy, "status": "no_image", "identity_score": None,
-                "duration": 0.0, "success": None, "issues": []}
-
-    evaluator = CharacterIdentityEvaluator(
+    identity = await CharacterIdentityEvaluator(
         profile, verified_reference_count=count_verified_references(cfg, profile)
-    )
-    rows = []
-    for path in matches:
-        started = time.monotonic()
-        score = await evaluator.evaluate(cfg, path.read_bytes())
-        rows.append({
-            "strategy": strategy,
-            "image": path.name,
-            "status": "evaluated",
-            "identity_score": None if score.overall is None else round(score.overall, 3),
-            "verdict": score.verdict,
-            "dimensions": {k: (None if v is None else round(v, 3)) for k, v in score.dimensions.items()},
-            "duration": round(time.monotonic() - started, 2),
-            "success": True,
-            "issues": list(score.issues),
-        })
-    return rows
+    ).evaluate(cfg, image)
+    scene = await SceneComplianceEvaluator(scene_checks).evaluate(cfg, image)
+    return {
+        "identity_score": None if identity.overall is None else round(identity.overall, 3),
+        "identity_verdict": identity.verdict,
+        "identity_dimensions": {
+            k: (None if v is None else round(v, 3)) for k, v in identity.dimensions.items()
+        },
+        "scene_score": None if scene.overall is None else round(scene.overall, 3),
+        "scene_checks": {
+            k: (None if v is None else round(v, 3)) for k, v in scene.checks.items()
+        },
+        "issues": list(identity.issues) + list(scene.issues),
+    }
 
 
-async def _generate(cfg, strategy: str, prompt: str) -> dict:
-    """真实生成（仅在双闸都开时调用）。"""
+async def _generate_one(cfg, name: str, spec: dict, prompt: str, scene_checks) -> dict:
     from plugins.dl_senpai.image_gen import build_image_segment
 
     started = time.monotonic()
-    segment = await build_image_segment(
-        resolved_prompt="",
+    seg = await build_image_segment(
+        marker_prompt="",
         user_request=prompt,
         config=cfg,
-        auto_reference=strategy != "text_only",
-        archive_session_id="",
+        auto_reference=bool(spec["auto_reference"]),
+        reference_policy=str(spec["reference_policy"]),
+        archive_session_id=f"bench-{name}",
     )
-    return {
-        "strategy": strategy,
-        "status": "generated" if segment else "no_image",
-        "identity_score": None,
-        "duration": round(time.monotonic() - started, 1),
-        "success": segment is not None,
-        "issues": [],
+    spent = round(time.monotonic() - started, 1)
+    if seg is None:
+        return {"strategy": name, "status": "no_image", "duration": spent, "success": False}
+
+    path = _segment_path(seg)
+    row = {
+        "strategy": name,
+        "status": "generated",
+        "duration": spent,
+        "success": True,
+        "image": str(path) if path else "",
     }
+    if path and path.is_file():
+        row.update(await _evaluate_image(cfg, _profile(cfg), path.read_bytes(), scene_checks))
+    return row
+
+
+def _profile(cfg):
+    from plugins.dl_senpai.character_registry import CharacterRegistry
+
+    registry = CharacterRegistry.load(cfg)
+    profile = registry.resolve(SCENARIO["character"])
+    if profile is None:
+        raise SystemExit("内置数据里没有艾雅法拉")
+    return profile
+
+
+async def _dry_run(cfg, names: list[str], prompt: str) -> int:
+    """不生成任何图片：把两组会实际发生的事情摊开给人看。"""
+    from plugins.dl_senpai.character_references import (
+        count_references,
+        count_verified_references,
+        reference_integrity_report,
+    )
+    from plugins.dl_senpai.character_resolver import resolve_character
+    from plugins.dl_senpai.image_prompt_builder import ImagePromptBuilder
+
+    profile = _profile(cfg)
+    resolution = resolve_character(prompt, config=cfg)
+    built = ImagePromptBuilder().build(user_request=prompt, draft_prompt=prompt, resolution=resolution)
+    verified_n = count_verified_references(cfg, profile)
+    web_mode = str(getattr(cfg, "character_web_reference_mode", "verify_only"))
+
+    print("=== 场景 ===")
+    print(f"  character : {profile.canonical_name} / {profile.localized_names[:1]}")
+    print(f"  prompt    : {prompt}")
+    print(f"  scene     : {', '.join(SCENARIO['scene_checks'])}")
+    print("=== 档案 ===")
+    print(f"  profile_status : {profile.effective_status()}")
+    print(f"  verified_fields: {', '.join(profile.verified_fields()) or '-'}")
+    print(f"  hint_fields    : {', '.join(profile.hint_fields()) if hasattr(profile, 'hint_fields') else ', '.join(profile.unverified_fields())}")
+    print(f"  required       : {', '.join(profile.required_fields())}")
+    print("=== 参考图 ===")
+    print(f"  files            : {count_references(cfg, profile)}")
+    print(f"  verified         : {verified_n}")
+    print(f"  web_reference    : {web_mode}")
+    for row in reference_integrity_report(cfg, profile):
+        print(f"  - {row['file']} ok={row['ok']} issue={row['issue'] or '-'}")
+    print("=== Prompt 分层 ===")
+    low = built.text.lower()
+    print(f"  has_verified_section : {'verified canonical identity constraints' in low}")
+    print(f"  has_hint_section     : {'supporting identity hints' in low}")
+    print(f"  hard fields          : {', '.join(built.verified_fields) or '-'}")
+    print(f"  hint fields          : {', '.join(built.hint_fields) or '-'}")
+    print("--- identity block ---")
+    print(built.identity_block)
+    print("=== 将执行的策略 ===")
+    for name in names:
+        spec = STRATEGIES[name]
+        ref_mode = "local_verified" if spec["reference_policy"] == "local_only" else "none"
+        if ref_mode == "local_verified" and verified_n == 0:
+            ref_mode = "none（无核验图，实际会退化成 text_only）"
+        print(f"  {name:<18} policy={spec['reference_policy']:<10} ref={ref_mode}")
+    print()
+    print("未生成任何图片（dry-run）。要真实跑：--run-paid --allow-paid 且环境变量 "
+          f"{_ENV_FLAG}=true")
+    return 0
+
+
+async def _evaluate_dir(cfg, directory: Path) -> list[dict]:
+    from plugins.dl_senpai.scene_eval import SceneComplianceEvaluator  # noqa: F401
+
+    profile = _profile(cfg)
+    rows: list[dict] = []
+    for name in STRATEGIES:
+        for path in sorted(directory.glob(f"{name}*.png")):
+            row = {"strategy": name, "image": path.name, "status": "evaluated",
+                   "duration": 0.0, "success": True}
+            row.update(await _evaluate_image(cfg, profile, path.read_bytes(), SCENARIO["scene_checks"]))
+            rows.append(row)
+    return rows
+
+
+def _print_table(rows: list[dict]) -> None:
+    print()
+    print("| Strategy | Identity | Scene | Time | Reference | Main Issues |")
+    print("|---|---:|---:|---:|---|---|")
+    for row in rows:
+        ident = row.get("identity_score")
+        scene = row.get("scene_score")
+        issues = "; ".join(row.get("issues") or [])[:60] or "-"
+        ref = "verified" if row.get("strategy") == "local_verified_1" else "none"
+        print(
+            f"| {row['strategy']} | "
+            f"{('n/a' if ident is None else f'{ident:.2f}')} | "
+            f"{('n/a' if scene is None else f'{scene:.2f}')} | "
+            f"{row.get('duration', 0)} s | {ref} | {issues} |"
+        )
 
 
 async def main() -> int:
@@ -115,46 +253,36 @@ async def main() -> int:
     logger.remove()
     logger.add(sys.stderr, level="WARNING")
 
-    from plugins.dl_senpai.character_registry import CharacterRegistry
     from plugins.dl_senpai.config import get_config
 
     cfg = get_config()
-    registry = CharacterRegistry.load(cfg)
-    profile = registry.resolve(args.character)
-    if profile is None:
-        print(f"未找到角色: {args.character}（可先用 character_registry 确认名字）", file=sys.stderr)
-        return 2
-
-    strategies = [s.strip() for s in args.strategies.split(",") if s.strip()]
-    image_dir = Path(args.images)
+    names = _strategies_of(args)
     paid = _paid_allowed(args)
 
-    rows: list[dict] = []
-    for strategy in strategies:
-        if paid:
-            rows.append(await _generate(cfg, strategy, args.prompt))
+    if args.evaluate:
+        rows = await _evaluate_dir(cfg, Path(args.evaluate))
+        if args.json:
+            print(json.dumps(rows, ensure_ascii=False, indent=2))
         else:
-            result = await _evaluate_existing(cfg, profile, strategy, image_dir)
-            rows.extend(result if isinstance(result, list) else [result])
-
-    if args.json:
-        print(json.dumps(rows, ensure_ascii=False, indent=2))
+            _print_table(rows)
         return 0
 
-    print(f"\n角色: {profile.display_name}  策略: {','.join(strategies)}  付费: {paid}")
-    print(f"{'strategy':<16}{'score':<8}{'verdict':<16}{'duration':<10}{'success':<8}issues")
-    for row in rows:
-        score = row.get("identity_score")
-        print(
-            f"{row['strategy']:<16}"
-            f"{('n/a' if score is None else f'{score:.2f}'):<8}"
-            f"{row.get('verdict', row['status']):<16}"
-            f"{row['duration']:<10}"
-            f"{str(row.get('success')):<8}"
-            f"{'; '.join(row.get('issues') or [])[:40]}"
-        )
+    if not args.run_paid:
+        return await _dry_run(cfg, names, args.prompt)
+
     if not paid:
-        print("\n（未开启付费生成：以上仅评估 --images 目录里已有的图）")
+        print(f"拒绝：真实生成需要 --allow-paid 且环境变量 {_ENV_FLAG}=true", file=sys.stderr)
+        return 2
+
+    rows: list[dict] = []
+    for name in names:
+        rows.append(await _generate_one(cfg, name, STRATEGIES[name], args.prompt, SCENARIO["scene_checks"]))
+    if args.json:
+        print(json.dumps(rows, ensure_ascii=False, indent=2))
+    else:
+        _print_table(rows)
+        print()
+        print(f"样本量：{len(rows)} 张（单样本，不构成统计结论）")
     return 0
 
 
