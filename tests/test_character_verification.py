@@ -429,6 +429,8 @@ def test_case8_paid_requires_both_gates(monkeypatch) -> None:
     bench = _bench_module()
 
     class Args:
+        # 三处闸门：--run-paid、--allow-paid、环境变量。少一个都不许花钱。
+        run_paid = True
         allow_paid = True
 
     monkeypatch.delenv(bench._ENV_FLAG, raising=False)
@@ -438,6 +440,7 @@ def test_case8_paid_requires_both_gates(monkeypatch) -> None:
     assert bench._paid_allowed(Args()) is True
 
     class Args2:
+        run_paid = True
         allow_paid = False
 
     assert bench._paid_allowed(Args2()) is False, "只有环境变量也不够"

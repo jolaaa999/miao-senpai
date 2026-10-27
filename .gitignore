@@ -160,3 +160,6 @@ data/dl_senpai/bili_memory.json
 data/dl_senpai/bili_browse_schedule.json
 # 临时比较文件
 /.tmp_*
+
+# 生图 A/B 实验产物（含第三方角色图，只在运行环境）
+benchmark/
