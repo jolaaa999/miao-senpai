@@ -304,6 +304,41 @@ async def execute_voice(context: Any, call: ToolCall) -> ToolResult:
 # ================================================================
 
 
+# 每会话的上一次派单时刻（session_id → time.monotonic()）。
+# 放内存是有意的：draw_cooldown 只为挡「同一会话连刷」——作业队列吃不下
+# 第二张图时，第二张注定超时。重启后清零没关系。
+_last_draw_at: dict[str, float] = {}
+
+
+def _draw_cooldown_key(context: Any) -> str:
+    """冷却按会话算：群里两个人先后要图不该互相挡，同一会话要挡。"""
+    sid = str(getattr(context, "session_id", "") or "")
+    if sid:
+        return sid
+    return f"{getattr(context, 'group_id', '')}:{getattr(context, 'user_id', '')}"
+
+
+def _draw_cooldown_left(context: Any) -> int:
+    """还要等几秒才能再画（0 = 可以画）。
+
+    `draw_cooldown` 之前是个只存在于配置里的死项（从没被读过），
+    这里把它接上：>0 才生效，默认 0 表示不限制。
+    """
+    cfg = getattr(context, "config", None)
+    cooldown = int(getattr(cfg, "draw_cooldown", 0) or 0)
+    if cooldown <= 0:
+        return 0
+    last = _last_draw_at.get(_draw_cooldown_key(context))
+    if last is None:
+        return 0
+    return max(0, int(cooldown - (time.monotonic() - last)))
+
+
+def reset_draw_cooldown() -> None:
+    """清空冷却表（测试与热重载用）。"""
+    _last_draw_at.clear()
+
+
 async def execute_draw(context: Any, call: ToolCall) -> ToolResult:
     """生图。
 
@@ -319,6 +354,42 @@ async def execute_draw(context: Any, call: ToolCall) -> ToolResult:
             tool_name="draw", tool_call_id=call.id, success=False,
             error="没有绘图提示", error_type="empty_prompt",
         )
+
+    # 冷却：刚画过就直说还要等几秒，别让作业队列排队到超时。
+    # 返回 success=False + 明确的 error，模型才知道「不是不能画，是刚画过」。
+    cooldown_left = _draw_cooldown_left(context)
+    if cooldown_left > 0:
+        log_event(
+            "draw.cooldown",
+            level="info",
+            left_sec=cooldown_left,
+            session=str(getattr(context, "session_id", ""))[:60],
+        )
+        return ToolResult(
+            tool_name="draw", tool_call_id=call.id, success=False,
+            error=f"刚画过一张，还要等 {cooldown_left} 秒才能再画",
+            error_type="draw_cooldown",
+        )
+
+    # 默认派给后台作业（子 agent）：出图要 30~120 秒，同步跑会把整轮回复卡住，
+    # 连她「先说的那句话」都发不出去。作业自己发图，这里只返回 job_id。
+    if bool(getattr(cfg, "draw_async", True)):
+        from ...draw_worker import submit_draw_job
+
+        try:
+            job_id = submit_draw_job(context, prompt)
+        except Exception as exc:  # noqa: BLE001 — 派单失败退回同步，别让这轮完全没图
+            log_event(
+                "draw.submit_failed",
+                level="warning",
+                error=f"{type(exc).__name__}: {exc}",
+            )
+        else:
+            _last_draw_at[_draw_cooldown_key(context)] = time.monotonic()
+            return ToolResult(
+                tool_name="draw", tool_call_id=call.id, success=True,
+                data={"job_id": job_id, "prompt": prompt},
+            )
 
     try:
         segment = await build_image_segment(

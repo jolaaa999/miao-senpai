@@ -140,3 +140,23 @@ data/dl_senpai/_archive_*/
 data/dl_senpai/heybox_*.json
 data/dl_senpai/heybox_*.jsonl
 data/dl_senpai/bili_*.jsonl
+
+# ===== 角色生图：运行数据与版权素材（2026-10-27）=====
+# 生图 trace：含用户原话与完整提示词，属调试产物，只在本地
+data/dl_senpai/draw_traces.jsonl
+# 参考图库只入库规范（README / manifest.json），图片本身不入库：
+# 官方立绘有版权，且体积大；换机器时按 manifest 自行补齐
+data/dl_senpai/character_references/**/*.png
+data/dl_senpai/character_references/**/*.jpg
+data/dl_senpai/character_references/**/*.jpeg
+data/dl_senpai/character_references/**/*.webp
+# 网图候选暂存区：没人工确认过的图一律不进仓库
+data/dl_senpai/character_references/_inbox/
+# 清理前的备份（含历史聊天/记忆原文）
+data/dl_senpai/_backup_*/
+# 日记与浏览记忆：隐私数据，只留本地
+data/dl_senpai/diary/
+data/dl_senpai/bili_memory.json
+data/dl_senpai/bili_browse_schedule.json
+# 临时比较文件
+/.tmp_*

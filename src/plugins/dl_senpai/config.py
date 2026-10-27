@@ -894,6 +894,58 @@ class PluginConfig(BaseSettings):
     knowledge_prompt_header: str = Field(
         default="【知识库检索结果】",
         alias="DL_SENPAI_KNOWLEDGE_PROMPT_HEADER",
+    # 生图甩到后台跑（子 agent 作业）：一张图 30~120 秒，同步跑会把整轮回复卡住，
+    # 连她「先说的那句话」都要等图出来才发出去。关掉则退回同步老路。
+    draw_async: bool = Field(default=True, alias="DL_SENPAI_DRAW_ASYNC")
+    draw_job_max: int = Field(
+        default=2, alias="DL_SENPAI_DRAW_JOB_MAX",
+        description="同时在跑的生图作业上限（群里连刷时别把上游打满）",
+    )
+    draw_job_timeout: float = Field(default=300.0, alias="DL_SENPAI_DRAW_JOB_TIMEOUT")
+    # 用户没给参考图时，派子 agent 上网找一张：不给参考图时模型只能凭记忆编设定
+    # （实测把凯尔希画成精灵耳）。找图失败不影响出图，退化成纯文生图。
+    draw_find_reference: bool = Field(default=True, alias="DL_SENPAI_DRAW_FIND_REFERENCE")
+    draw_reference_steps: int = Field(
+        default=4, alias="DL_SENPAI_DRAW_REFERENCE_STEPS",
+        description="找参考图的子 agent 最多走几步（每步一次模型调用）",
+    )
+    draw_reference_timeout: float = Field(
+        default=75.0, alias="DL_SENPAI_DRAW_REFERENCE_TIMEOUT"
+    )
+    # 单次搜图超时：image_find 抓页面实测 32~33 秒，给 18 秒等于每次都超时
+    draw_reference_query_timeout: float = Field(
+        default=35.0, alias="DL_SENPAI_DRAW_REFERENCE_QUERY_TIMEOUT"
+    )
+
+    # -- 角色身份管线（已知 IP 角色别画成泛化路人） --
+    # 为什么需要：纯文生图下「画一张艾雅法拉」只能靠模型记忆，出来的往往是
+    # 一张泛二次元羊角少女。识别名字 + 身份档案 + 参考图是把身份钉住的唯一办法。
+    character_enable: bool = Field(default=True, alias="DL_SENPAI_CHARACTER_ENABLE")
+    # 低于这个置信度就当没认出来：宁可走普通生图，也不许猜发型猜服装
+    character_min_confidence: float = Field(
+        default=0.8, alias="DL_SENPAI_CHARACTER_MIN_CONFIDENCE"
+    )
+    # 用户自定义角色档案目录（同 characters.json 结构，同名覆盖内置）
+    character_dir: str = Field(
+        default="data/dl_senpai/characters", alias="DL_SENPAI_CHARACTER_DIR"
+    )
+    # 本地角色参考图库：<franchise>/<character>/ref_01.png
+    character_reference_dir: str = Field(
+        default="data/dl_senpai/character_references",
+        alias="DL_SENPAI_CHARACTER_REFERENCE_DIR",
+    )
+    # 生图调试模式：整条 trace（脱敏后）落盘，用来回答「为什么画得不像」
+    # 网图当参考图前先让视觉模型验一遍设定是否一致：实测同人图会带进
+    # 「棕发 + 精灵耳」这类错设定，图生图照搬后比不给参考图还差
+    character_verify_reference: bool = Field(
+        default=True, alias="DL_SENPAI_CHARACTER_VERIFY_REFERENCE"
+    )
+    image_debug: bool = Field(default=False, alias="DL_SENPAI_IMAGE_DEBUG")
+    image_trace_file: str = Field(
+        default="data/dl_senpai/draw_traces.jsonl",
+        alias="DL_SENPAI_IMAGE_TRACE_FILE",
+    )
+
     )
     # 本地 Markdown 知识库。与 RAGFlow **互相独立**：
     # 它不需要地址/密钥，服务端挂了也照常工作，所以单独一个开关，

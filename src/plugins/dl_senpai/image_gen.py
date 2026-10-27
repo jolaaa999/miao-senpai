@@ -740,10 +740,18 @@ async def build_image_segment(
     archive_source_user_id: str = "",
     archive_scene: str = "",
     reference_images: list[str] | None = None,
+    auto_reference: bool = False,
 ) -> MessageSegment | None:
     cfg = config or get_config()
     if not cfg.draw_enable or interrupt:
         return None
+
+    # 一次生图一条 trace：出图「不像」时要能一眼看出断在哪个环节
+    # （没识别出角色 / 参考图没加载 / 提示词被改写丢了身份 / 模型漂移）。
+    from .image_trace import new_trace, write_debug_dump
+
+    trace = new_trace(cfg, original_prompt=user_request or marker_prompt or resolved_prompt)
+
     prompt = (resolved_prompt or "").strip()
     if not prompt:
         prompt = resolve_draw_prompt(
@@ -753,6 +761,7 @@ async def build_image_segment(
             max_chars=cfg.draw_max_prompt_chars,
         )
     if not prompt:
+        trace.finish("skipped", error="empty_prompt").log()
         return None
     # 只在本轮确实带图、且对方的话里明确指向那张图时才当参考图用。
     # 不加这层判断的话，顺手发张图再聊别的也会被误当成「按图改」。
@@ -763,33 +772,126 @@ async def build_image_segment(
             timeout=max(30.0, float(cfg.draw_timeout)),
         )
         if reference is not None:
+            trace.reference_mode = "user_image"
+            trace.reference_count = 1
             logger.info(f"dl_senpai draw reference attached bytes={len(reference[1])}")
 
-    # 角色卡先取出来：增强环节也要用它纠正草稿里的错误设定
-    # （实测聊天模型会凭记忆把凯尔希写成「精灵耳、紫瞳」，只靠末尾压一句
-    #  官方设定不够——扩写会把错误描述留在同一段提示词里，前后打架）
-    from .draw_cards import augment_prompt, match_character_card
+    # ---- 角色身份识别（已知 IP 角色） ----
+    # 这是「画一张艾雅法拉」与「画一只猫」的分岔口：认出来走身份管线，
+    # 认不出来一个字都不加，普通生图链路原样保留。
+    from .character_resolver import resolve_character
+    from .image_prompt_builder import ImagePromptBuilder
 
-    card = match_character_card(prompt, user_request)
+    resolution = resolve_character(user_request, draft_prompt=prompt, config=cfg)
+    if resolution.is_known and resolution.profile is not None:
+        trace.intent = "known_character_generation"
+        trace.character = resolution.profile.canonical_name
+        trace.franchise = resolution.profile.franchise
+        trace.character_confidence = resolution.confidence
+        trace.character_reason = resolution.reason
+        # 本地角色库优先于上网搜：那张图是你确认过的，网图可能同人/带水印
+        if reference is None:
+            from .character_references import find_library_reference
 
-    # 提示词增强：本中转的生图模型不做任何改写（实测 revised_prompt 原样返回），
-    # 一句短描述直接进模型，等于让模型自己去猜构图和画风，这里把这一层补上。
-    if cfg.draw_enhance:
-        from .draw_enhance import enhance_prompt
+            library_ref = find_library_reference(cfg, resolution.profile)
+            if library_ref is not None:
+                reference = library_ref
+                trace.reference_mode = "character_library"
+                trace.reference_count = 1
+    else:
+        trace.character_reason = resolution.reason
 
-        prompt = await enhance_prompt(
+    # 用户没给图（或没说要「按这张」）时，派子 agent 上网找一张。
+    # 为什么要找：没有参考图时模型只能凭记忆编设定，实测把凯尔希的猫耳画成精灵耳。
+    # 自拍/换装类在 find_reference_image 内部被排除（她的外观有固定 prompt）。
+    if reference is None and auto_reference and cfg.draw_find_reference:
+        from .draw_reference import find_reference_image
+
+        reference = await find_reference_image(
             cfg,
             prompt=prompt,
             user_request=user_request,
-            reference=reference,
-            card_spec=card.spec if card is not None else "",
+            # 认得出来就带上规范英文名，搜索召回明显更好（艾雅法拉 → Eyjafjalla）
+            character=(
+                resolution.profile.canonical_name
+                if resolution.is_known and resolution.profile is not None
+                else ""
+            ),
         )
+        if reference is not None and trace.reference_mode == "none":
+            trace.reference_mode = "web_search"
+            trace.reference_count = 1
 
-    # 官方设定仍然要压在最前面（截断之前拼，否则被截掉就等于没加）：
-    # 增强只是「尽量按设定改写」，不是保证，最后这一道才是硬约束
-    prompt = _truncate_prompt(
-        augment_prompt(prompt, user_request), cfg.draw_max_prompt_chars
-    )
+        # 网图当参考图之前先验设定。实测证据（2026-10-27）：同一个「画一张艾雅法拉」，
+        # 纯文本那张被判定「可识别为艾雅法拉」，而用了 deviantart 同人图做图生图的那张
+        # 变成「棕发 + 精灵耳，野生二创」——图生图会把参考图的错设定原样搬过来，
+        # 比不给参考图更差。所以已知角色的网图必须过校验；本地库/用户图不校验。
+        if (
+            reference is not None
+            and resolution.is_known
+            and resolution.profile is not None
+            and trace.reference_mode == "web_search"
+            and bool(getattr(cfg, "character_verify_reference", True))
+        ):
+            from .character_references import verify_reference
+
+            trusted, issue = await verify_reference(cfg, resolution.profile, reference[1])
+            if not trusted:
+                trace.reference_mode = "web_search_rejected"
+                trace.reference_count = 0
+                trace.extra["reference_issue"] = issue[:120] or "设定不一致"
+                reference = None
+
+    card = None
+    identity_requirements = ""
+
+    if resolution.is_known and resolution.profile is not None:
+        # 已知角色：身份段落完全由档案决定，**不走 enhance**。
+        # 为什么跳过扩写：那一步是让另一个模型重写提示词，实测它会把专有名词
+        # 同义化（艾雅法拉 → 羊角少女、凯尔希 → 精灵耳医生），正是身份管线要防的事。
+        # 代价是画风/光影少了点润色，但身份一致性优先——这是本次改造的核心取舍。
+        built = ImagePromptBuilder().build(
+            user_request=user_request,
+            draft_prompt=prompt,
+            resolution=resolution,
+        )
+        # 已知角色提示词更长（身份条款 + 场景），上限单独放宽，
+        # 否则身份写全了、场景会被尾部截断，出现「场景丢失」的新问题。
+        prompt = _truncate_prompt(
+            built.text, max(int(cfg.draw_max_prompt_chars), 1800)
+        )
+        identity_requirements = built.identity_block
+        if built.negatives:
+            identity_requirements += "\n禁止：" + "；".join(built.negatives)
+        trace.extra["enhance_skipped"] = "known_character"
+        trace.extra["identity_priority"] = built.identity_priority
+    else:
+        # 普通图：维持原有链路，行为与改动前完全一致（不许被角色管线污染）
+        from .draw_cards import augment_prompt, match_character_card
+
+        card = match_character_card(prompt, user_request)
+
+        # 提示词增强：本中转的生图模型不做任何改写（实测 revised_prompt 原样返回），
+        # 一句短描述直接进模型，等于让模型自己去猜构图和画风，这里把这一层补上。
+        if cfg.draw_enhance:
+            from .draw_enhance import enhance_prompt
+
+            prompt = await enhance_prompt(
+                cfg,
+                prompt=prompt,
+                user_request=user_request,
+                reference=reference,
+                card_spec=card.spec if card is not None else "",
+            )
+
+        # 官方设定仍然要压在最前面（截断之前拼，否则被截掉就等于没加）
+        prompt = _truncate_prompt(
+            augment_prompt(prompt, user_request), cfg.draw_max_prompt_chars
+        )
+        identity_requirements = card.spec if card is not None else ""
+
+    trace.final_prompt = prompt
+    trace.generation_mode = "edit" if reference is not None else "text_only"
     logger.info(f"dl_senpai draw final prompt={prompt[:180]!r}")
 
     path = await generate_image_file(prompt, cfg, reference=reference)
@@ -799,7 +901,7 @@ async def build_image_segment(
     if path is not None and cfg.draw_verify and cfg.draw_max_retry > 0:
         from .draw_enhance import judge_image
 
-        requirements = ((card.spec if card is not None else "") + "\n用户要求：" + (user_request or "")).strip()
+        requirements = (identity_requirements + "\n用户要求：" + (user_request or "")).strip()
         ok, issue = await judge_image(cfg, path, requirements=requirements)
         attempts = 0
         while not ok and attempts < cfg.draw_max_retry:
@@ -815,6 +917,8 @@ async def build_image_segment(
             path, prompt = retry_path, retry_prompt
             ok, issue = await judge_image(cfg, path, requirements=requirements)
     if path is None:
+        trace.finish("no_image").log()
+        write_debug_dump(cfg, trace)
         return None
     send_path = path
     if archive_session_id:
@@ -833,4 +937,6 @@ async def build_image_segment(
         )
         if archived is not None:
             send_path = archived
+    trace.finish("success").log()
+    write_debug_dump(cfg, trace)
     return MessageSegment.image(file=send_path.resolve().as_uri())

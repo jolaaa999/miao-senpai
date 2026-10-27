@@ -1,0 +1,293 @@
+{
+  "version": 1,
+  "note": "角色身份锚点数据。只写**确定**的特征——写错比不写更糟，它会被当成事实拼进提示词。verified=false 表示尚未人工逐条核对。",
+  "characters": [
+    {
+      "canonical_name": "Eyjafjalla",
+      "localized_names": [
+        "艾雅法拉"
+      ],
+      "aliases": [],
+      "weak_aliases": [
+        "小羊"
+      ],
+      "franchise": "Arknights",
+      "franchise_localized": "明日方舟",
+      "franchise_aliases": [
+        "明日方舟",
+        "arknights",
+        "方舟"
+      ],
+      "identity_priority": "HIGH",
+      "confidence": 0.95,
+      "verified": false,
+      "visual_identity": {
+        "race": "卡普里尼族（羊族）",
+        "hair": "银白偏浅紫的长发",
+        "eyes": "紫色眼睛",
+        "horns": "一对弯曲的羊角（深色带纹理）",
+        "ears": "人耳（羊角长在头顶两侧）",
+        "clothing": "罗德岛黑色制服外套，白色内衬",
+        "accessories": "火山与岩浆主题的法杖",
+        "color_palette": "黑、白，点缀橙黄（火山意象）",
+        "silhouette": "纤细少女体型"
+      },
+      "must_preserve": [
+        "facial identity",
+        "hairstyle and hair color",
+        "horn shape and placement",
+        "signature outfit structure",
+        "signature accessories",
+        "canonical color palette",
+        "overall silhouette"
+      ],
+      "creative_freedom": [
+        "pose",
+        "background",
+        "lighting",
+        "camera_angle",
+        "expression"
+      ],
+      "negative_notes": [
+        "不要画成泛化的「羊角少女」",
+        "不要换发色或去掉羊角",
+        "不要改成西式奇幻风格"
+      ]
+    },
+    {
+      "canonical_name": "Kal'tsit",
+      "localized_names": [
+        "凯尔希"
+      ],
+      "aliases": [
+        "kaltsit",
+        "kal tsit"
+      ],
+      "weak_aliases": [],
+      "franchise": "Arknights",
+      "franchise_localized": "明日方舟",
+      "franchise_aliases": [
+        "明日方舟",
+        "arknights",
+        "方舟"
+      ],
+      "identity_priority": "HIGH",
+      "confidence": 0.97,
+      "verified": true,
+      "visual_identity": {
+        "race": "菲林族（猫科）",
+        "hair": "很长很直的浅绿/银绿色头发",
+        "eyes": "绿色眼睛",
+        "ears": "头顶一对猫耳",
+        "body_features": "身后有猫尾（绝不是精灵尖耳）",
+        "clothing": "白色医生长外套，黑色高领内衬，黑色腰带",
+        "accessories": "肩上有罗德岛标志",
+        "color_palette": "白色为主，黑色内衬，浅绿点缀",
+        "silhouette": "高挑清瘦，神情冷淡克制"
+      },
+      "must_preserve": [
+        "facial identity",
+        "hairstyle and hair color",
+        "cat ears and tail",
+        "signature white doctor coat",
+        "canonical color palette"
+      ],
+      "creative_freedom": [
+        "pose",
+        "background",
+        "lighting",
+        "camera_angle",
+        "expression"
+      ],
+      "negative_notes": [
+        "不要画成精灵尖耳",
+        "不要把耳朵画成兽耳以外的形状"
+      ]
+    },
+    {
+      "canonical_name": "Amiya",
+      "localized_names": [
+        "阿米娅"
+      ],
+      "aliases": [],
+      "weak_aliases": [],
+      "franchise": "Arknights",
+      "franchise_localized": "明日方舟",
+      "franchise_aliases": [
+        "明日方舟",
+        "arknights",
+        "方舟"
+      ],
+      "identity_priority": "HIGH",
+      "confidence": 0.97,
+      "verified": true,
+      "visual_identity": {
+        "race": "卡特斯族（兔族）",
+        "hair": "深棕色中长发",
+        "eyes": "蓝绿色眼睛",
+        "ears": "头顶一对很长的兔耳",
+        "clothing": "黑色连帽外套配白色内衬，深色短裤",
+        "accessories": "胸前蓝色菱形源石徽章，黑色手套",
+        "color_palette": "黑色外套、白色内衬、蓝色徽章",
+        "silhouette": "少年少女体型，个子不高"
+      },
+      "must_preserve": [
+        "facial identity",
+        "hairstyle and hair color",
+        "long rabbit ears",
+        "blue diamond originium badge",
+        "canonical color palette"
+      ],
+      "creative_freedom": [
+        "pose",
+        "background",
+        "lighting",
+        "camera_angle",
+        "expression"
+      ],
+      "negative_notes": [
+        "不要把兔耳画短或去掉",
+        "不要漏掉胸前蓝色菱形徽章"
+      ]
+    },
+    {
+      "canonical_name": "Raiden Shogun",
+      "localized_names": [
+        "雷电将军",
+        "雷电影"
+      ],
+      "aliases": [
+        "raiden shogun",
+        "raiden"
+      ],
+      "weak_aliases": [
+        "影"
+      ],
+      "franchise": "Genshin Impact",
+      "franchise_localized": "原神",
+      "franchise_aliases": [
+        "原神",
+        "genshin"
+      ],
+      "identity_priority": "HIGH",
+      "confidence": 0.9,
+      "verified": false,
+      "visual_identity": {
+        "hair": "紫色长发，编成粗辫子搭在身前",
+        "eyes": "紫色眼睛",
+        "clothing": "紫色和服式战斗装，肩部与腰间有铠甲部件",
+        "accessories": "紫色发饰与雷元素装饰",
+        "color_palette": "紫色与深紫，金色点缀",
+        "silhouette": "高挑，气质威严"
+      },
+      "must_preserve": [
+        "facial identity",
+        "purple braided hair",
+        "purple kimono-armor outfit",
+        "canonical color palette"
+      ],
+      "creative_freedom": [
+        "pose",
+        "background",
+        "lighting",
+        "camera_angle",
+        "expression"
+      ],
+      "negative_notes": [
+        "不要把紫色长发换成短发",
+        "不要画成普通现代服装"
+      ]
+    },
+    {
+      "canonical_name": "Furina",
+      "localized_names": [
+        "芙宁娜"
+      ],
+      "aliases": [
+        "furina"
+      ],
+      "weak_aliases": [],
+      "franchise": "Genshin Impact",
+      "franchise_localized": "原神",
+      "franchise_aliases": [
+        "原神",
+        "genshin"
+      ],
+      "identity_priority": "HIGH",
+      "confidence": 0.9,
+      "verified": false,
+      "visual_identity": {
+        "hair": "浅蓝白短发，两侧有卷翘发尾",
+        "eyes": "蓝色系眼睛（左右深浅不同）",
+        "clothing": "蓝白色西装式礼装，短裤与长袜",
+        "accessories": "蓝色礼帽",
+        "color_palette": "蓝、白，金色点缀",
+        "silhouette": "娇小少女体型"
+      },
+      "must_preserve": [
+        "facial identity",
+        "short blue-white hair",
+        "blue-white formal outfit",
+        "top hat",
+        "canonical color palette"
+      ],
+      "creative_freedom": [
+        "pose",
+        "background",
+        "lighting",
+        "camera_angle",
+        "expression"
+      ],
+      "negative_notes": [
+        "不要画成长发",
+        "不要去掉礼帽"
+      ]
+    },
+    {
+      "canonical_name": "Hatsune Miku",
+      "localized_names": [
+        "初音未来",
+        "初音"
+      ],
+      "aliases": [
+        "hatsune miku",
+        "miku"
+      ],
+      "weak_aliases": [],
+      "franchise": "Vocaloid",
+      "franchise_localized": "Vocaloid",
+      "franchise_aliases": [
+        "vocaloid",
+        "初音"
+      ],
+      "identity_priority": "HIGH",
+      "confidence": 0.95,
+      "verified": true,
+      "visual_identity": {
+        "hair": "青绿色（葱绿）超长双马尾，发梢很长",
+        "eyes": "青绿色眼睛",
+        "clothing": "灰色无袖上衣配青绿色领带，黑色短裙，青绿色袖套",
+        "accessories": "方形发饰，耳机式麦克风",
+        "color_palette": "青绿与灰黑",
+        "silhouette": "纤细少女体型"
+      },
+      "must_preserve": [
+        "facial identity",
+        "teal twin-tails",
+        "gray sleeveless top with teal tie",
+        "canonical color palette"
+      ],
+      "creative_freedom": [
+        "pose",
+        "background",
+        "lighting",
+        "camera_angle",
+        "expression"
+      ],
+      "negative_notes": [
+        "不要把双马尾画成单马尾或短发",
+        "不要换掉青绿色主色"
+      ]
+    }
+  ]
+}
