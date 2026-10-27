@@ -9,10 +9,22 @@
 
 所以这里的职责很明确：
 1. 已知角色 —— 身份段落由 CharacterProfile 提供，**英文锚点（canonical name +
-   franchise）必须原样出现**，并显式声明 identity preservation 优先、禁止改设计；
-   场景部分只负责姿势/环境/光线/镜头，不许染指身份。
+   franchise）必须原样出现**；场景部分只负责姿势/环境/光线/镜头，不许染指身份。
 2. 普通图 —— 原样返回草稿，一个字都不加。这条是硬要求：不能为了修角色生图，
    把「画一只猫」也拖进角色管线。
+
+**三档可信度**（2026-10-27 修正）：
+
+上一版不分青红皂白写「Canonical visual identity (authoritative, do not contradict)」，
+把未经人工核对的设定当成权威。这是错的——资料写错时，越强的措辞越稳定地画错。
+现在按字段可信度分层：
+
+    Level A 已验证字段  → 硬约束（must be preserved / do not contradict）
+    Level B 未验证非空  → supporting hints（只作参考，不许用权威措辞）
+    Level C 空 / 未知   → 完全不写（未知 ≠ 没有）
+
+只有 Level A 为空时才允许出现 supporting 分支里的"未人工核验"声明——否则
+模型会把提示当权威，等于回到老问题。
 """
 
 from __future__ import annotations
@@ -21,7 +33,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-from .character_registry import CharacterProfile
+from .character_registry import CharacterProfile, VisualIdentity
 from .character_resolver import CharacterResolution
 
 # 请求里的动作词/客套词：从用户原话里剥出"场景"时用。
@@ -47,15 +59,15 @@ class ImagePrompt:
     franchise: str = ""
     identity_priority: str = ""
     creative_freedom: tuple[str, ...] = ()
+    # 可信度快照：trace 与评估器都要知道这段提示词里哪些是硬约束
+    profile_status: str = ""
+    verified_fields: tuple[str, ...] = ()
+    hint_fields: tuple[str, ...] = ()
     notes: tuple[str, ...] = field(default_factory=tuple)
 
 
 class ImagePromptBuilder:
-    """身份优先的提示词构建器。
-
-    用法只有一句：build(user_request=..., draft_prompt=..., resolution=...)，
-    返回的 .text 直接交给图片模型。
-    """
+    """身份优先的提示词构建器。"""
 
     def build(
         self,
@@ -90,12 +102,18 @@ class ImagePromptBuilder:
         identity = self._identity_block(profile)
         scene = self._scene_block(profile=profile, user_request=user_request, draft_prompt=draft_prompt)
         negatives = self._negatives(profile)
+        tiers = profile.identity_tiers()
 
         parts = [identity]
         if scene:
             parts.append(f"Scene / composition (the only part that may change):\n{scene}")
         if negatives:
-            parts.append("Do not:\n" + "\n".join(f"- {n}" for n in negatives))
+            header = (
+                "Avoid (verified constraints and any supplied reference image win if they conflict):"
+                if tiers["verified"]
+                else "Avoid if possible (these notes are not verified; a supplied reference wins):"
+            )
+            parts.append(header + "\n" + "\n".join(f"- {n}" for n in negatives))
         text = "\n\n".join(parts)
 
         return ImagePrompt(
@@ -108,49 +126,79 @@ class ImagePromptBuilder:
             franchise=profile.franchise,
             identity_priority=profile.identity_priority,
             creative_freedom=profile.creative_freedom,
-            notes=(
-                ("profile_unverified",) if not profile.verified else ()
-            ),
+            profile_status=profile.effective_status(),
+            verified_fields=tuple(key for key, _ in tiers["verified"]),
+            hint_fields=tuple(key for key, _ in tiers["hints"]),
+            notes=(f"profile_{profile.effective_status()}",),
         )
 
     def _identity_block(self, profile: CharacterProfile) -> str:
-        """身份段落：英文锚点 + 中文可见特征 + 硬约束。
+        """身份段落：分档输出，权威性只给已验证字段。
 
-        为什么英文锚点必须原样出现：图片模型对角色名的联想是按拉丁字母建立的，
-        只给中文名时它会退化成按形容词作画（"羊角 + 银发 + 火山"）。
-        同时保留中文名，是为了让模型把两条命名指向同一个人。
+        英文锚点（canonical name + franchise）始终保留：图片模型对角色名的联想
+        是按拉丁字母建立的，只给中文名时它会退化成按形容词作画。
         """
         localized = profile.localized_names[0] if profile.localized_names else ""
         names = profile.canonical_name + (f" ({localized})" if localized else "")
         franchise = profile.franchise + (
             f" ({profile.franchise_localized})" if profile.franchise_localized else ""
         )
+        tiers = profile.identity_tiers()
+        verified, hints = tiers["verified"], tiers["hints"]
+        hard_items, soft_items = profile.split_preserve()
 
         lines = [
             f"Depict {names} from {franchise}.",
             "",
             "Character identity preservation is the highest priority.",
-            "Preserve the canonical character identity, including:",
         ]
-        for item in profile.must_preserve or ("facial identity", "signature outfit", "canonical color palette"):
-            lines.append(f"- {item}")
 
-        visual = profile.visual_identity.lines()
-        if visual:
+        # ---- Level A：硬约束 ----
+        if verified:
             lines.append("")
-            lines.append("Canonical visual identity (authoritative, do not contradict):")
-            lines.extend(f"- {v}" for v in visual)
+            lines.append("Verified canonical identity constraints:")
+            for key, value in verified:
+                lines.append(f"- {profile.visual_identity.label(key)}：{value}")
+            if hard_items:
+                lines.append("Preserve these verified identity items: " + ", ".join(hard_items) + ".")
+            lines.append("These verified features must be preserved. Do not contradict them.")
+
+        # ---- Level B：支撑性提示（不许使用权威措辞）----
+        if hints:
+            lines.append("")
+            if verified:
+                lines.append(
+                    "Supporting identity hints (not independently verified — follow them only "
+                    "where they stay consistent with the verified constraints above and with any "
+                    "supplied reference image, and never let them override those):"
+                )
+            else:
+                # 全档都是 hints：先明确"这份档案还没被人工核验"，避免提示词自己造权威
+                lines.append(
+                    "Supporting identity hints (this profile has NOT been human-verified yet; "
+                    "treat them as guidance only rather than recorded facts, and prefer any "
+                    "supplied reference image wherever they differ):"
+                )
+            for key, value in hints:
+                lines.append(f"- {profile.visual_identity.label(key)}：{value}")
+            if soft_items:
+                lines.append(
+                    "Prefer preserving, where the reference and scene allow: "
+                    + ", ".join(soft_items)
+                    + "."
+                )
 
         lines.append("")
         lines.append(
             f"The result must be immediately recognizable as {names} from {profile.franchise}."
         )
-        lines.append("Do not redesign the character into a generic fantasy girl.")
-        if profile.visual_identity.race:
-            lines.append(
-                "Do not replace her canonical design with a generic "
-                f"{profile.visual_identity.race} anime girl."
-            )
+        lines.append("Do not redesign the character into a generic fantasy character.")
+        # 这一条不引用任何具体字段（未验证的字段不该被写成硬约束）：
+        # 只说"别用一个两个特征拼出来的泛化角色顶替她"，正好针对「羊角少女」这类退化。
+        lines.append(
+            "Do not replace the canonical design with a generic anime character that merely "
+            "shares one or two of her traits (such as horns or hair color)."
+        )
         allowed = ", ".join(profile.creative_freedom) or "pose, background, lighting, camera_angle, expression"
         lines.append(f"Allowed to change: {allowed}.")
         return "\n".join(lines)
@@ -192,11 +240,13 @@ class ImagePromptBuilder:
         return "；".join(dict.fromkeys(parts))
 
     def _negatives(self, profile: CharacterProfile) -> tuple[str, ...]:
-        """禁止项：profile 自带的负向备注 + 两条通用护栏。"""
-        out = list(profile.negative_notes)
-        out.append("do not change hair color, horn/ear design or signature outfit structure")
-        out.append("do not add or remove signature accessories")
-        return tuple(dict.fromkeys(out))
+        """禁止项：只输出档案自带的负向备注。
+
+        为什么不在这里加「do not change hair color」这类生成式硬禁止：
+        那些约束必须以「该字段已验证」为前提，否则又变成把未验证信息写成硬规则。
+        已验证字段的硬约束由 Level A 段声明，这里不重复。
+        """
+        return tuple(dict.fromkeys(profile.negative_notes))
 
 
 __all__ = ["ImagePrompt", "ImagePromptBuilder"]

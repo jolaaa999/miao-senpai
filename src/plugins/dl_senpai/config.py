@@ -940,6 +940,18 @@ class PluginConfig(BaseSettings):
     character_verify_reference: bool = Field(
         default=True, alias="DL_SENPAI_CHARACTER_VERIFY_REFERENCE"
     )
+    # 网图参考策略：off 完全不用；verify_only（默认）只用来校验档案、绝不送
+    # images.edit；enabled 才在「来源可信 + 视觉一致」双达标时用于图生图。
+    # 默认保守：实测同人图 + 图生图 比纯文本档案更不像。
+    character_web_reference_mode: str = Field(
+        default="verify_only", alias="DL_SENPAI_CHARACTER_WEB_REFERENCE_MODE"
+    )
+    # enabled 模式下网图来源可信度门槛（official=1.0 / wiki=0.8 / 同人站=0.2）
+    character_web_reference_min_trust: float = Field(
+        default=0.7, alias="DL_SENPAI_CHARACTER_WEB_REFERENCE_MIN_TRUST"
+    )
+    # 身份评分：每次已知角色生图后打一次分（一次视觉调用），只记录不重画
+    identity_eval: bool = Field(default=True, alias="DL_SENPAI_IDENTITY_EVAL")
     image_debug: bool = Field(default=False, alias="DL_SENPAI_IMAGE_DEBUG")
     image_trace_file: str = Field(
         default="data/dl_senpai/draw_traces.jsonl",

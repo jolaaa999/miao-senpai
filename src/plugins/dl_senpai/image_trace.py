@@ -89,8 +89,20 @@ class ImageGenerationTrace:
     franchise: str = ""
     character_confidence: float = 0.0
     character_reason: str = ""         # 凭什么认出/没认出
-    reference_mode: str = "none"       # user_image / character_library / web_search / none
+    reference_mode: str = "none"       # user_image / local_verified / web_verified / web_probe_only / web_rejected / none
     reference_count: int = 0
+    reference_source: str = ""         # 例如 character_library / web:deviantart.com
+    reference_verified: bool = False   # 这张参考图是否人工核验过（本地库 manifest）
+    reference_source_trust: float = 0.0
+    # 档案可信度快照：提示词里的硬约束是不是有依据，看这两个字段
+    character_profile_status: str = ""
+    verified_fields: tuple[str, ...] = ()
+    hint_fields: tuple[str, ...] = ()
+    # 身份评分（只测量，不触发重画）
+    identity_score: float | None = None
+    identity_dimensions: dict[str, float | None] = field(default_factory=dict)
+    identity_issues: tuple[str, ...] = ()
+    identity_verdict: str = ""
     configured_model: str = ""
     resolved_model: str = "unknown"    # 中转站 alias 无法确认真实后端
     provider: str = ""
@@ -123,6 +135,17 @@ class ImageGenerationTrace:
             "character_reason": self.character_reason or None,
             "reference_mode": self.reference_mode,
             "reference_count": self.reference_count,
+            "reference_source": self.reference_source or None,
+            "reference_verified": self.reference_verified or None,
+            "reference_source_trust": round(self.reference_source_trust, 2) or None,
+            "character_profile_status": self.character_profile_status or None,
+            "verified_fields": list(self.verified_fields) or None,
+            "hint_fields": list(self.hint_fields) or None,
+            "identity_score": round(self.identity_score, 3) if self.identity_score is not None else None,
+            "identity_dimensions": {k: (round(v, 3) if isinstance(v, (int, float)) else v)
+                                    for k, v in self.identity_dimensions.items()} or None,
+            "identity_issues": list(self.identity_issues) or None,
+            "identity_verdict": self.identity_verdict or None,
             "configured_model": self.configured_model or None,
             "resolved_model": self.resolved_model,
             "provider": self.provider or None,

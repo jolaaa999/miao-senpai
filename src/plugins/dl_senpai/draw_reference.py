@@ -127,7 +127,8 @@ async def _direct_search(
     per_query_timeout: float | None = None,
     max_parallel: int = 3,
     download_budget: float = 45.0,
-) -> tuple[str, bytes] | None:
+    return_candidate: bool = False,
+) -> Any:
     """代码自己搜一轮，成功返回 (文件名, 字节)。
 
     为什么要这一层：2026-10-27 07:46 的日志里，子 agent 拿到工具清单后
@@ -206,6 +207,11 @@ async def _direct_search(
             url=url[:200],
             bytes=len(loaded[1]),
         )
+        if return_candidate:
+            # 带上来源信息：调用方要按“官方/wiki/同人站”决定能不能进 images.edit
+            from .character_references import candidate_from_url
+
+            return candidate_from_url(url, loaded[0], loaded[1])
         return loaded
     return None
 
@@ -217,7 +223,14 @@ async def find_reference_image(
     user_request: str,
     timeout: float | None = None,
     character: str = "",
-) -> tuple[str, bytes] | None:
+    with_meta: bool = False,
+) -> Any:
+    """找一张参考图。with_meta=True 时返回 ReferenceCandidate（带来源域名/类型/可信度），
+    否则返回旧的 (文件名, 字节) 二元组。
+
+    为什么要来源信息：同样是「一张艾雅法拉」，官网立绘和 deviantart 同人图对身份
+    的价值完全相反。只看图不看来源，就只能事后被视觉校验兜住，代价是白跑一遍 edit。
+    """
     """跑一遍参考图子 agent，成功则返回 (文件名, 原始字节)。
 
     任何失败都返回 None：参考图只是增强项，不能因为它把整次生图拖垮——
@@ -246,6 +259,7 @@ async def find_reference_image(
                 prompt=prompt,
                 user_request=user_request,
                 character=subject_name,
+                return_candidate=with_meta,
             ),
             timeout=min(80.0, float(timeout or 80.0)),
         )
@@ -253,8 +267,11 @@ async def find_reference_image(
         logger.debug(f"dl_senpai draw reference direct search failed: {exc}")
         direct = None
     if direct is not None:
+        # direct 可能是 (文件名, 字节)，也可能是 ReferenceCandidate（with_meta=True）：
+        # 两种情况都要能把字节数打出来，别想着下标通用。
+        direct_pair = direct.as_pair() if hasattr(direct, "as_pair") else direct
         logger.info(
-            f"dl_senpai draw reference (direct) bytes={len(direct[1])}"
+            f"dl_senpai draw reference (direct) bytes={len(direct_pair[1])}"
         )
         return direct
     logger.info("dl_senpai draw reference: 直搜没拿到，交给子 agent 换策略")
@@ -320,4 +337,8 @@ async def find_reference_image(
         f"steps={answer.steps}"
     )
     log_event("draw.reference_found", url=url[:200], bytes=len(loaded[1]), steps=answer.steps)
+    if with_meta:
+        from .character_references import candidate_from_url
+
+        return candidate_from_url(url, loaded[0], loaded[1])
     return loaded

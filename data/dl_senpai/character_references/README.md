@@ -1,23 +1,57 @@
-# 角色参考图库
+# 角色参考图库（V1）
 
-放「确认过」的角色官方立绘，生图时优先用图生图，比纯文本提示词稳得多。
+## 目录约定
 
-目录约定：
+```
+data/dl_senpai/character_references/
+  arknights/
+    eyjafjalla/
+      manifest.json
+      official_fullbody_01.png
+```
 
-    <作品英文>/<角色英文>/
-      ref_01.png
-      ref_02.png
+路径是 `<franchise slug>/<character slug>`，slug 由 CharacterProfile.slug 生成
+（全小写、非字母数字转 `-`）。
 
-例如：
+## manifest.json
 
-    arknights/eyjafjalla/ref_01.png
-    arknights/eyjafjalla/ref_02.png
-    arknights/kaltsit/ref_01.png
+**没有清单的图不算参考图。** 代码只认清单里 `verified: true` 的条目：
 
-说明：
+```json
+{
+  "character": "Eyjafjalla",
+  "localized_name": "艾雅法拉",
+  "franchise": "Arknights",
+  "verified": true,
+  "references": [
+    {
+      "file": "official_fullbody_01.png",
+      "type": "official_fullbody",
+      "verified": true,
+      "priority": 100,
+      "notes": "官方立绘，全身"
+    }
+  ]
+}
+```
 
-- 目录名取 `CharacterProfile.slug`（作品小写去空格 + 角色小写去空格），
-  可在调试日志的 character 字段里核对。
-- 只读不写：程序**不会**把网上搜到的图偷偷存进来——那等于用未核实的图污染参考库。
-- 支持 .png / .jpg / .jpeg，单张上限 8MB；会校验文件头，改名过的非图片文件会被跳过。
-- 同一个角色按文件名排序取第一张（所以 ref_00/ref_01 是最优先的）。
+字段说明：
+
+| 字段 | 作用 |
+|---|---|
+| `verified` | 只有 true 才会被用于 `images.edit` |
+| `type` | 没确认官方来源就写 `verified_reference`，不要写 `official_*` |
+| `priority` | 越大越优先，多张图时按序取第一张可用 |
+| `notes` | 出处、版本、注意事项 |
+
+## 只读
+
+这里**只读**。运行时不会把网上搜到的图写进来——那等于用未核实的素材污染库。
+要收图请人工下载、核对、再补 manifest。
+
+## 校验
+
+```python
+from plugins.dl_senpai.character_references import validate_character_profile
+issues = validate_character_profile(config, profile)   # 结构性冲突清单
+```

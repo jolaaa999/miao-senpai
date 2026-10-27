@@ -58,6 +58,31 @@ class _Cfg:
         return True
 
 
+def _write_manifest(directory: Path, *, verified: bool = True, priority: int = 100) -> None:
+    """写一个最小可用的参考图 manifest（参考图库 V1 的入口）。
+
+    为什么测试也必须有 manifest：没有清单的图来源不可追踪，按新策略不算
+    「已验证参考图」，不会进 images.edit——这正是上一阶段事故的教训。
+    """
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "manifest.json").write_text(
+        json.dumps(
+            {
+                "character": "Eyjafjalla",
+                "localized_name": "艾雅法拉",
+                "franchise": "Arknights",
+                "verified": verified,
+                "references": [
+                    {"file": "ref_01.png", "type": "verified_reference",
+                     "verified": verified, "priority": priority},
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+
 @pytest.fixture(autouse=True)
 def _clean_registry() -> None:
     # 注册表是单例：不清掉的话，前一个用例改的用户目录会漏到下一个
@@ -76,7 +101,7 @@ def test_registry_loads_builtin_characters() -> None:
     assert eyja.franchise == "Arknights"
     assert eyja.slug == "arknights/eyjafjalla"
     # 身份特征不能是空的，否则提示词里没有任何可比对的硬信息
-    assert eyja.visual_identity.horns
+    assert eyja.visual_identity.get("horns")
     assert "facial identity" in eyja.must_preserve
 
 
@@ -205,7 +230,7 @@ async def test_case5_user_reference_wins(monkeypatch, stub_generate) -> None:
         raise AssertionError("用户已经给了图，不该再上网搜")
 
     monkeypatch.setattr(image_gen, "_load_reference_image", _fake_load)
-    monkeypatch.setattr("dl_senpai.character_references.find_library_reference", _library_must_not_run)
+    monkeypatch.setattr("dl_senpai.character_references.resolve_library_reference", _library_must_not_run)
     monkeypatch.setattr("dl_senpai.draw_reference.find_reference_image", _web_must_not_run)
 
     await image_gen.build_image_segment(
@@ -224,8 +249,10 @@ async def test_case5_user_reference_wins(monkeypatch, stub_generate) -> None:
 async def test_known_character_uses_library_before_web(monkeypatch, stub_generate, tmp_path) -> None:
     """本地角色库排在联网搜图之前：库里的图是自己确认过的，网图可能是同人。"""
     ref_dir = tmp_path / "refs"
-    (ref_dir / "arknights" / "eyjafjalla").mkdir(parents=True)
-    (ref_dir / "arknights" / "eyjafjalla" / "ref_01.png").write_bytes(b"\x89PNG\r\n\x1a\nlib")
+    char_dir = ref_dir / "arknights" / "eyjafjalla"
+    char_dir.mkdir(parents=True)
+    (char_dir / "ref_01.png").write_bytes(b"\x89PNG\r\n\x1a\nlib")
+    _write_manifest(char_dir)
 
     async def _web_must_not_run(*a, **kw):
         raise AssertionError("本地库有图时不该上网搜")
@@ -271,7 +298,8 @@ async def test_untrusted_web_reference_is_rejected(monkeypatch, stub_generate, t
 
     async def _reject(config, profile, raw):
         assert profile.canonical_name == "Eyjafjalla"
-        return False, "头发呈棕色，出现官方设定里没有的尖长精灵耳"
+        # verify_reference 现在返回 (ok, issue, score)
+        return False, "头发呈棕色，出现官方设定里没有的尖长精灵耳", 0.2
 
     monkeypatch.setattr("dl_senpai.draw_reference.find_reference_image", _fake_find)
     monkeypatch.setattr("dl_senpai.character_references.verify_reference", _reject)
@@ -285,7 +313,7 @@ async def test_untrusted_web_reference_is_rejected(monkeypatch, stub_generate, t
     )
     assert stub_generate[0]["reference"] is None, "被拒的网图不能再传给图片模型"
     record = json.loads(trace_file.read_text(encoding="utf-8").strip().splitlines()[-1])
-    assert record["reference_mode"] == "web_search_rejected"
+    assert record["reference_mode"] == "web_rejected"
     assert record["generation_mode"] == "text_only"
     assert record["extra"]["reference_issue"]
 
@@ -294,8 +322,10 @@ async def test_untrusted_web_reference_is_rejected(monkeypatch, stub_generate, t
 async def test_library_reference_is_not_verified(monkeypatch, stub_generate, tmp_path) -> None:
     """本地库的图是人工确认过的，不该再去问视觉模型（省一次调用、省一份抖动）。"""
     ref_dir = tmp_path / "refs"
-    (ref_dir / "arknights" / "eyjafjalla").mkdir(parents=True)
-    (ref_dir / "arknights" / "eyjafjalla" / "ref_01.png").write_bytes(b"\x89PNG\r\n\x1a\nlib")
+    char_dir = ref_dir / "arknights" / "eyjafjalla"
+    char_dir.mkdir(parents=True)
+    (char_dir / "ref_01.png").write_bytes(b"\x89PNG\r\n\x1a\nlib")
+    _write_manifest(char_dir)
 
     async def _verify_must_not_run(*args, **kwargs):
         raise AssertionError("本地库参考图不该被校验")
@@ -366,6 +396,7 @@ def test_library_reference_ignores_non_images(tmp_path) -> None:
     (target / "ref_01.png").write_bytes(b"not really a png")
 
     profile = CharacterRegistry.load().resolve("艾雅法拉")
+    # 没有 manifest：来源不可追踪，一律不采信（哪怕是真图）
     assert find_library_reference(_Cfg(character_reference_dir=str(ref_dir)), profile) is None
 
 

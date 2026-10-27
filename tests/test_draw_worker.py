@@ -152,7 +152,7 @@ async def test_direct_search_hit_skips_llm_agent(monkeypatch) -> None:
     """
     from dl_senpai import draw_reference as dr
 
-    async def _direct(config, *, prompt, user_request, character="", per_query_timeout=18.0):
+    async def _direct(config, *, prompt, user_request, character="", per_query_timeout=18.0, **kw):
         assert character == "" or isinstance(character, str)
         return ("direct.png", b"\x89PNG\r\n\x1a\ndirect")
 
@@ -164,6 +164,36 @@ async def test_direct_search_hit_skips_llm_agent(monkeypatch) -> None:
 
     got = await find_reference_image(_config(), prompt="橘猫", user_request="画只猫")
     assert got is not None and got[0] == "direct.png"
+
+
+@pytest.mark.asyncio
+async def test_direct_search_hit_with_meta_returns_candidate(monkeypatch) -> None:
+    """with_meta=True 时直搜要返回 ReferenceCandidate，不能在下标访问上炸。
+
+    这条是线上实测踩出来的：构造 candidate 之后调用方还在用 [1] 取字节，
+    结果真实生图直接抛 TypeError。
+    """
+    from dl_senpai import draw_reference as dr
+    from dl_senpai.character_references import ReferenceCandidate
+
+    async def _direct(config, *, prompt, user_request, character="", **kw):
+        return ReferenceCandidate(
+            filename="direct.png",
+            raw=b"\x89PNG\r\n\x1a\ndirect",
+            source_url="https://prts.wiki/a.png",
+            source_type="wiki",
+            source_trust=0.8,
+        )
+
+    monkeypatch.setattr(dr, "_direct_search", _direct)
+
+    async def _should_not_run(*a, **kw):
+        raise AssertionError("直搜命中了就不该再派子 agent")
+
+    monkeypatch.setattr(dr, "run_llm_agent", _should_not_run)
+    got = await find_reference_image(_config(), prompt="艾雅法拉", user_request="画一张艾雅法拉", with_meta=True)
+    assert isinstance(got, ReferenceCandidate)
+    assert got.filename == "direct.png" and got.source_type == "wiki"
 
 
 @pytest.mark.asyncio

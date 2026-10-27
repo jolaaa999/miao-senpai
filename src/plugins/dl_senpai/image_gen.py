@@ -727,6 +727,17 @@ async def generate_image_file(
     return None
 
 
+def _web_reference_mode(cfg: Any) -> str:
+    """网图参考策略：off / verify_only / enabled。
+
+    默认 verify_only —— 实测证据摆在那里：同人图 + images.edit 出来的成品
+    被视觉模型判为「棕发精灵耳、野生二创」，比纯文本档案还差。所以网图默认
+    只用来校验档案、记录来源，不许直接进图生图。
+    """
+    raw = str(getattr(cfg, "character_web_reference_mode", "verify_only") or "").strip().lower()
+    return raw if raw in ("off", "verify_only", "enabled") else "verify_only"
+
+
 async def build_image_segment(
     *,
     marker_prompt: str = "",
@@ -789,25 +800,31 @@ async def build_image_segment(
         trace.franchise = resolution.profile.franchise
         trace.character_confidence = resolution.confidence
         trace.character_reason = resolution.reason
-        # 本地角色库优先于上网搜：那张图是你确认过的，网图可能同人/带水印
+        # 参考图优先级：用户图 > 本地**已核验**库 > 网图（按策略）。
+        # 为什么本地库要求 manifest 里 verified=true：来源不明的图等于用一个未知角色
+        # 锚定身份，实测正是它把艾雅法拉画成了棕发精灵耳。
         if reference is None:
-            from .character_references import find_library_reference
+            from .character_references import resolve_library_reference
 
-            library_ref = find_library_reference(cfg, resolution.profile)
+            library_ref = resolve_library_reference(cfg, resolution.profile)
             if library_ref is not None:
-                reference = library_ref
-                trace.reference_mode = "character_library"
+                reference = library_ref.as_pair()
+                trace.reference_mode = "local_verified"
                 trace.reference_count = 1
+                trace.reference_verified = library_ref.verified
+                trace.reference_source = "character_library"
+                trace.reference_source_trust = library_ref.source_trust
+                trace.extra["reference_priority"] = library_ref.priority
+                trace.extra["reference_file"] = library_ref.filename
     else:
         trace.character_reason = resolution.reason
 
-    # 用户没给图（或没说要「按这张」）时，派子 agent 上网找一张。
-    # 为什么要找：没有参考图时模型只能凭记忆编设定，实测把凯尔希的猫耳画成精灵耳。
-    # 自拍/换装类在 find_reference_image 内部被排除（她的外观有固定 prompt）。
-    if reference is None and auto_reference and cfg.draw_find_reference:
+    # 网图：普通图沿用原行为（找一张当参考）；已知角色按 web_reference_mode 决定用途。
+    web_mode = _web_reference_mode(cfg) if resolution.is_known else "enabled"
+    if reference is None and auto_reference and cfg.draw_find_reference and web_mode != "off":
         from .draw_reference import find_reference_image
 
-        reference = await find_reference_image(
+        found = await find_reference_image(
             cfg,
             prompt=prompt,
             user_request=user_request,
@@ -817,30 +834,49 @@ async def build_image_segment(
                 if resolution.is_known and resolution.profile is not None
                 else ""
             ),
+            # 已知角色要来源画像（域名/类型/可信度），普通图不需要
+            with_meta=bool(resolution.is_known),
         )
-        if reference is not None and trace.reference_mode == "none":
-            trace.reference_mode = "web_search"
-            trace.reference_count = 1
+        web_meta = found if hasattr(found, "as_pair") else None
+        web_pair = found.as_pair() if web_meta is not None else found
 
-        # 网图当参考图之前先验设定。实测证据（2026-10-27）：同一个「画一张艾雅法拉」，
-        # 纯文本那张被判定「可识别为艾雅法拉」，而用了 deviantart 同人图做图生图的那张
-        # 变成「棕发 + 精灵耳，野生二创」——图生图会把参考图的错设定原样搬过来，
-        # 比不给参考图更差。所以已知角色的网图必须过校验；本地库/用户图不校验。
-        if (
-            reference is not None
-            and resolution.is_known
-            and resolution.profile is not None
-            and trace.reference_mode == "web_search"
-            and bool(getattr(cfg, "character_verify_reference", True))
-        ):
-            from .character_references import verify_reference
+        if web_pair is not None and resolution.is_known and resolution.profile is not None:
+            # 已知角色的网图：先验设定，再按策略决定能不能进 images.edit
+            ok, issue, score = True, "", None
+            if bool(getattr(cfg, "character_verify_reference", True)):
+                from .character_references import verify_reference
 
-            trusted, issue = await verify_reference(cfg, resolution.profile, reference[1])
-            if not trusted:
-                trace.reference_mode = "web_search_rejected"
+                ok, issue, score = await verify_reference(cfg, resolution.profile, web_pair[1])
+            trust = float(getattr(web_meta, "source_trust", 0.0) or 0.0) if web_meta is not None else 0.0
+            source_type = getattr(web_meta, "source_type", "unknown") if web_meta is not None else "unknown"
+            source_domain = getattr(web_meta, "source_domain", "") if web_meta is not None else ""
+            trace.reference_source = f"web:{source_domain or 'unknown'}"
+            trace.reference_source_trust = trust
+            trace.extra["web_reference"] = {
+                "source_type": source_type,
+                "source_domain": source_domain,
+                "source_trust": round(trust, 2),
+                "visual_score": score,
+                "issue": (issue or "")[:80],
+            }
+            min_trust = float(getattr(cfg, "character_web_reference_min_trust", 0.7) or 0.7)
+            if web_mode == "enabled" and ok and trust >= min_trust:
+                reference = web_pair
+                trace.reference_mode = "web_verified"
+                trace.reference_count = 1
+                trace.reference_verified = False
+            else:
+                # verify_only（默认）或未达标：只留证据，绝不送进图生图
+                trace.reference_mode = "web_probe_only" if ok else "web_rejected"
                 trace.reference_count = 0
-                trace.extra["reference_issue"] = issue[:120] or "设定不一致"
-                reference = None
+                if not ok:
+                    trace.extra["reference_issue"] = (issue or "设定不一致")[:120]
+        elif web_pair is not None:
+            # 普通图：维持原行为（有参考图就用）
+            reference = web_pair
+            if trace.reference_mode == "none":
+                trace.reference_mode = "web_search"
+                trace.reference_count = 1
 
     card = None
     identity_requirements = ""
@@ -865,6 +901,11 @@ async def build_image_segment(
             identity_requirements += "\n禁止：" + "；".join(built.negatives)
         trace.extra["enhance_skipped"] = "known_character"
         trace.extra["identity_priority"] = built.identity_priority
+        # 把「这段提示词里的哪些约束有依据」记下来：以后怀疑画错时，
+        # 第一个要查的就是这次到底是硬约束还是软提示。
+        trace.character_profile_status = built.profile_status
+        trace.verified_fields = built.verified_fields
+        trace.hint_fields = built.hint_fields
     else:
         # 普通图：维持原有链路，行为与改动前完全一致（不许被角色管线污染）
         from .draw_cards import augment_prompt, match_character_card
@@ -916,6 +957,30 @@ async def build_image_segment(
                 break
             path, prompt = retry_path, retry_prompt
             ok, issue = await judge_image(cfg, path, requirements=requirements)
+    # 身份评分：只测量记录，绝不触发重画（重画策略要单独设计，否则费用失控）
+    if (
+        path is not None
+        and resolution.is_known
+        and resolution.profile is not None
+        and bool(getattr(cfg, "identity_eval", True))
+    ):
+        try:
+            from .character_references import count_verified_references
+            from .identity_eval import CharacterIdentityEvaluator
+
+            evaluator = CharacterIdentityEvaluator(
+                resolution.profile,
+                verified_reference_count=count_verified_references(cfg, resolution.profile),
+            )
+            score = await evaluator.evaluate(cfg, path.read_bytes())
+            trace.identity_score = score.overall
+            trace.identity_dimensions = dict(score.dimensions)
+            trace.identity_issues = score.issues
+            trace.identity_verdict = score.verdict
+            trace.extra["identity_basis"] = score.basis
+        except Exception as exc:  # noqa: BLE001 — 评分失败不能让出图失败
+            logger.debug(f"dl_senpai identity eval skipped: {type(exc).__name__}: {exc}")
+
     if path is None:
         trace.finish("no_image").log()
         write_debug_dump(cfg, trace)
