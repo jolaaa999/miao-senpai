@@ -61,9 +61,13 @@ def _kill_app() -> None:
     它是 Electron 系的多进程结构（主进程 + 若干渲染进程），
     只杀主进程会留下孤儿渲染进程占着单实例锁。
     """
+    from .winproc import no_window_kwargs
+
     subprocess.run(
         ["taskkill", "/F", "/IM", _APP_PROCESS + ".exe", "/T"],
         capture_output=True, check=False,
+        # taskkill 也是控制台程序，不加这个会闪一下
+        **no_window_kwargs(),
     )
     # 单实例锁释放需要一点时间，立刻重启会被判定为「已有一个实例」而直接退出
     time.sleep(4.0)
@@ -80,7 +84,11 @@ def _launch_app() -> None:
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         close_fds=True,
-        creationflags=0x00000008 | 0x00000200,  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+        # DETACHED_PROCESS 本身就没有控制台；仍然叠上 NO_WINDOW，
+        # 免得以后有人改 flag 组合时又把窗口放出来
+        **no_window_kwargs(
+            0x00000008 | 0x00000200  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+        ),
     )
 
 

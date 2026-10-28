@@ -217,8 +217,11 @@ async def handle_reset_command(ctx: Any, match: Any) -> None:
 
     config = _config_of(ctx)
     if not PermissionService(config).is_admin(ctx):
-        # 拒绝时不透露配置结构，只说没有权限
-        await _reply(bot, event, "这个只有管理员能用呢。")
+        # 拒绝时**不回话**：回一句「只有管理员能用」等于向全群复述谁有权限。
+        # 抛 CommandPermissionDenied 让 Router 静默跳过（且不 consume），
+        # 消息继续交给 AI —— 非管理员发「喵/reset」不该像石沉大海。
+        from .core.commands.models import CommandPermissionDenied
+
         log_event(
             "reset.denied",
             level="warning",
@@ -226,8 +229,7 @@ async def handle_reset_command(ctx: Any, match: Any) -> None:
             actor=str(getattr(ctx, "user_id", "") or ""),
             scope=scope,
         )
-        return
-
+        raise CommandPermissionDenied("reset")
     removed: dict[str, list[str]] = {}
     if scope in ("history", "all"):
         removed["history"] = _clean_history(config, target.history_key)

@@ -99,10 +99,11 @@ def _build_briefs(
 
     # 长度纪律。干跑的价值有一半在这里：能立刻看出这条规则压不压得住
     try:
-        from .brevity import build_brevity_hint
+        from .brevity import build_brevity_hint, is_explain_request
 
         if bool(getattr(cfg, "reply_brevity_enable", True)):
-            hint = build_brevity_hint(True)
+            # 跟线上同一条判定：干跑要量的是真实档位，不是最宽松的那种
+            hint = build_brevity_hint(True, explain=is_explain_request(question))
             if hint:
                 extra["brevity_hint"] = hint
     except Exception as exc:  # noqa: BLE001
@@ -222,7 +223,46 @@ def _build_briefs(
     return extra
 
 
-def _build_system_prompt(cfg: Any, extra: dict[str, str], *, private: bool) -> str:
+def _visible_tools(cfg: Any, *, interrupt: bool = False, group_id: str = "") -> list[Any]:
+    """按配置筛出这一轮可见的工具，喂给 PromptBuilder。
+
+    为什么要这段：提示词里的工具说明段（【生图能力】【禁言能力】…）来自注册表
+    的 prompt_text。不传 visible_tools 时干跑看到的人设是残缺的——实测问
+    「画一张凯尔希的图片」，干跑回「我无法生成图片——我没有绘图能力」，
+    跟线上完全不是一个人，等于拿假象去调提示词。
+    """
+    from .agent.tools.builtin import build_production_tools
+    from .group_features import is_feature_enabled
+
+    class _Ctx:
+        """最小的上下文：只需要 config / interrupt / feature()。"""
+
+        def __init__(self) -> None:
+            self.config = cfg
+            self.interrupt = interrupt
+            self.group_id = group_id
+
+        def feature(self, key: str, default: bool = True) -> bool:
+            try:
+                return is_feature_enabled(cfg, self.group_id or None, key)
+            except Exception:  # noqa: BLE001
+                return default
+
+    ctx = _Ctx()
+    visible: list[Any] = []
+    for tool in build_production_tools():
+        check = getattr(tool, "visibility", None)
+        try:
+            if check is None or check(ctx):
+                visible.append(tool)
+        except Exception:  # noqa: BLE001 — 单个工具判定失败不该拖垮整段装配
+            continue
+    return visible
+
+
+def _build_system_prompt(
+    cfg: Any, extra: dict[str, str], *, private: bool, interrupt: bool = False
+) -> str:
     """用 PromptBuilder 拼系统提示词，与 AgentRuntime 走同一个实现。"""
     from .agent.prompt.builder import PromptBuilder, PromptRequest
 
@@ -232,6 +272,9 @@ def _build_system_prompt(cfg: Any, extra: dict[str, str], *, private: bool) -> s
         diary_brief=extra.get("diary_brief", ""),
         brevity_hint=extra.get("brevity_hint", ""),
         tone_hint=extra.get("tone_hint", ""),
+        # 人设卡：干跑要能看出「这个群现在用的是哪张卡」，否则改了卡跑 dryrun
+        # 还是一模一样的输出，人会以为卡没生效。extra 里没有就照旧用 persona.py。
+        persona_body=extra.get("persona_body", ""),
         recent_chat_brief=extra.get("recent_chat_brief", ""),
         cross_chat_brief=extra.get("cross_chat_brief", ""),
         group_style_brief=extra.get("group_style_brief", ""),
@@ -239,6 +282,9 @@ def _build_system_prompt(cfg: Any, extra: dict[str, str], *, private: bool) -> s
         # 掉回助手腔——实测问一句「在吗」，它回「有什么需要我帮忙的？」，
         # 正好是人设【绝对不要说的】那一条。
         fewshot_enable=bool(getattr(cfg, "fewshot_enable", True)),
+        interrupt=interrupt,
+        # 工具说明段（生图/禁言/搜索…）必须和线上一致，否则干跑的「人设」是残缺的
+        visible_tools=_visible_tools(cfg, interrupt=interrupt),
     )
     return PromptBuilder().build(request).text
 
@@ -319,6 +365,10 @@ async def run_once(
             min_chars=int(getattr(cfg, "bubble_min_chars", 40) or 0),
             prefer_chars=int(getattr(cfg, "bubble_prefer_chars", 120) or 0),
             max_bubbles=int(getattr(cfg, "bubble_max", 1) or 1),
+            # 必须跟线上一致：线上开着 bubble_require_newline，只按换行拆。
+            # 这里不传的话干跑会按标点硬切，出现「）」单独一条这种线上根本不会有的气泡——
+            # 冒烟看的东西跟线上不是一回事，那这个工具就白做了。
+            require_newline=bool(getattr(cfg, "bubble_require_newline", False)),
         )
         result.typing_ms = _estimate_typing_ms(cfg, result.bubbles)
 

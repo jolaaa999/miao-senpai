@@ -332,6 +332,19 @@ def _html_to_text(html: str) -> tuple[str, str]:
         return title, re.sub(r"\s+", " ", stripped).strip()
 
 
+def _home_of(url: str) -> str:
+    """站点首页：用来做"从站内点进去"的预热跳转。"""
+    try:
+        from urllib.parse import urlparse
+
+        parsed = urlparse(url)
+        if not parsed.scheme or not parsed.netloc:
+            return ""
+        return f"{parsed.scheme}://{parsed.netloc}/"
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 async def _browser_render(url: str, cfg: Any) -> tuple[str, str]:
     """SPA 兜底：真开一次浏览器，把渲染后的 innerText 拿回来。"""
     from .browser_agent import _with_page
@@ -358,7 +371,24 @@ async def _browser_render(url: str, cfg: Any) -> tuple[str, str]:
     )
 
     async def _work(page: Any) -> None:
-        await page.goto(url, wait_until="domcontentloaded", timeout=25000)
+        # 先到站点首页停一下，再从站内走进正文。
+        # 直接 goto 详情页时 referer 是空的，一眼就是"外部脚本打开的"；
+        # 站内跳转 + 进去乱滚两下，才像人从 feed 里点进来的。
+        from .browser_stealth import human_touch
+
+        humanize = bool(getattr(cfg, "browser_humanize_enable", True))
+        home = _home_of(url)
+        if humanize and home:
+            try:
+                await page.goto(home, wait_until="domcontentloaded", timeout=20000)
+                await human_touch(page, scrolls=(1, 3))
+                await page.goto(url, wait_until="domcontentloaded", timeout=25000, referer=home)
+            except Exception:  # noqa: BLE001 — 预热失败就直接开，不能因此读不到
+                await page.goto(url, wait_until="domcontentloaded", timeout=25000)
+        else:
+            await page.goto(url, wait_until="domcontentloaded", timeout=25000)
+        if humanize:
+            await human_touch(page)
         # 先等常用正文容器（有就快），再按"文字长度够不够"轮询。
         # 为什么不能固定 sleep：小黑盒这类站的正文是 XHR 回来才挂上 DOM 的，
         # 等 1.2 秒只拿得到导航和备案号（曾把页脚当正文，见 _looks_like_chrome）。

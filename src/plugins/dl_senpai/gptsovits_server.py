@@ -108,7 +108,12 @@ async def start_gptsovits_server(cfg: PluginConfig) -> bool:
         "stderr": subprocess.STDOUT,
     }
     if sys.platform == "win32":
-        popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+        from .winproc import no_window_kwargs
+
+        # 进程组要留着（停止服务时要用它），但绝不能开窗
+        popen_kwargs.update(
+            no_window_kwargs(getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200))
+        )
 
     _process = subprocess.Popen(cmd, **popen_kwargs)
     _managed_by_bot = True

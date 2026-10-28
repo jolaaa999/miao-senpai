@@ -531,7 +531,16 @@ def build_production_tools() -> list[ToolDefinition]:
             parameter_schema={
                 "type": "object",
                 "properties": {
-                    "prompt": {"type": "string", "description": "画面描述，越具体越好"},
+                    # 对已知角色来说「越具体越好」是错的：模型凭记忆写的外貌经常是错的，
+                    # 写进去反而会覆盖角色档案里的正确设定（实测把艾雅法拉写成深紫褐色短发）。
+                    "prompt": {
+                        "type": "string",
+                        "description": (
+                            "画面描述。写场景/动作/构图/光影/画风即可。"
+                            "如果用户点名了已知角色，必须原样保留角色名，不要自己描述该角色的"
+                            "发色/瞳色/服装/配饰——系统会用角色档案补全身份，编造的外貌描述会覆盖正确设定。"
+                        ),
+                    },
                     "force": {"type": "boolean", "description": "是否强制出图"},
                 },
                 "required": ["prompt"],

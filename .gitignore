@@ -163,3 +163,26 @@ data/dl_senpai/bili_browse_schedule.json
 
 # 生图 A/B 实验产物（含第三方角色图，只在运行环境）
 benchmark/
+
+# 通用实体解析缓存（模型生成，可 TTL 重建，不进库）
+src/plugins/dl_senpai/data/entity_cache.json
+src/plugins/dl_senpai/data/reference_blocklist.json
+# 人设卡：卡(*.md)要进版本库，绑定的运行时状态不要
+data/dl_senpai/personas/bindings.json
+
+# ===== 2026-10-28 分批上传前加固 =====
+# 浏览器 profile：Chrome 的用户态文件（1146 个），既是隐私也体积大
+data/dl_senpai/browser_profiles/
+# 生图输出目录：.gitignore 只忽略了 data/dl_senpai/draw/，根目录 files/ 一直在漏
+/files/
+# 身份一致性 A/B 实验产物（含第三方角色图与完整提示词，只在运行环境）
+/bench-*.json
+# 抖音浏览运行时状态（与已忽略的 bili_*.jsonl 同类）
+data/dl_senpai/douyin_*.json
+data/dl_senpai/douyin_*.jsonl
+data/dl_senpai/bili_actions.json
+# 管理员警告记录：含真实 QQ 号与处罚原因，属个人数据
+data/dl_senpai/admin/warn.json
+# 学姐自拍图（图片不入库，README 说明保留）
+data/dl_senpai/self/*.png
+data/dl_senpai/self/*.jpg

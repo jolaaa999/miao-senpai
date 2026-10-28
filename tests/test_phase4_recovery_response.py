@@ -116,7 +116,7 @@ def test_recovery_builds_history_like_legacy() -> None:
     history = [{"role": "user", "content": "旧"}]
     hist2 = policy.build_history(history, "小明", "改名片", "已经改好啦")
     assert hist2[0] == {"role": "user", "content": "旧"}
-    assert hist2[-2] == {"role": "user", "content": "小明：改名片"}
+    assert hist2[-2] == {"role": "user", "content": "[小明] 说：改名片"}
     assert hist2[-1] == {"role": "assistant", "content": "已经改好啦"}
 
 

@@ -433,6 +433,22 @@ async def tick(bot: Any, *, now: datetime | None = None) -> str:
     if not due:
         return ""
 
+    # 沉睡前观察闸门：群里刚刚还有人说话（还在对话中）就别主动冒泡。
+    # 对应 qq-bridge 的「想开口/想收尾前先观察 5 分钟没人说话」——反过来用在
+    # 冒泡上就是「别人正聊着，别硬插一句」，那是最容易被群友记成机器人的动作。
+    # 失败一律放行：闸门本身绝不能成为「她再也不说话」的原因。
+    try:
+        from .presence import get_presence_gate
+
+        remaining = get_presence_gate().pre_sleep_remaining_ms()
+        if remaining > 0:
+            logger.info(
+                f"dl_senpai own_life held: dialog still warm ({remaining}ms left)"
+            )
+            return ""
+    except Exception:  # noqa: BLE001 — 闸门出错就按原逻辑走
+        pass
+
     today = clock.strftime("%Y-%m-%d")
 
     # 首次启用只记基线，不当场叫醒。

@@ -760,8 +760,18 @@ def build_diary_brief(store: DiaryStore, n: int = 3, mood_word: str = "") -> str
     为什么挂在「读」上而不是定时任务：定时任务要靠别人记得开，而读是每轮都会
     发生的事；惰性结算漏不掉，也不需要额外进程。
     """
+    # 日记关掉也照样让她知道自己在刷什么：影响渠道不该被日记开关连带关死
+    def _influence() -> str:
+        try:
+            from .browse_influence import build_browse_brief
+            from .config import get_config
+
+            return build_browse_brief(get_config())
+        except Exception:  # noqa: BLE001 — 这条挂不上也不许挡聊天
+            return ""
+
     if n <= 0:
-        return ""
+        return _influence()
     try:
         # 到期的先清掉，再渲染——否则这一轮还会把已经该忘的东西塞进去
         store.expire()
@@ -782,6 +792,11 @@ def build_diary_brief(store: DiaryStore, n: int = 3, mood_word: str = "") -> str
             store.mark_warned(due)
         except Exception:  # noqa: BLE001
             pass
+    # 为什么挂在这里：diary_brief 是唯一一个「每轮都进 prompt、又不与并发改动
+    # 冲突」的通道。刷到的东西跟着日记一起进去，她才真的会被看到的内容影响。
+    influence = _influence()
+    if influence:
+        body = (body + chr(10) + influence).strip() if body else influence
     return body
 
 

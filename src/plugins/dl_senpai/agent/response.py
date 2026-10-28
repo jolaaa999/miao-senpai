@@ -7,6 +7,8 @@
         ↓ ResponsePipeline
     polish（style.polish_reply）          ← 复用，不改语义
         ↓
+    出站整形（tone.shape_for_send）        ← 口语化：空格断句/去破折号/清空行
+        ↓
     media（sticker / voice / image）      ← 复用现有构建函数
         ↓
     send（reply_send.send_text_reply）    ← 复用
@@ -141,10 +143,44 @@ class ResponsePipeline:
         except Exception:  # noqa: BLE001 — 润色失败时保留原文
             pass
 
+        # 出站整形：agent 这条链原来只有 polish_reply（删污染），
+        # 口语化那几道工序（空格断句、去破折号、清空行）全在 llm.chat 那条路上，
+        # 而线上 100% 走 agent（2026-10-28 日志 19/19 条 agent.entry）。
+        # 结果就是干跑看着像人、群里发出去的全是逗号句号破折号齐全的完整句。
+        # 整形失败不挡发送：它只负责「更像人」，不负责「能不能发」。
+        try:
+            from ..tone import is_casual_prompt, shape_for_send
+
+            user_text = getattr(context, "user_text", "") or ""
+            casual = is_casual_prompt(user_text)
+            plan.text, shaped = shape_for_send(
+                plan.text,
+                casual=casual,
+                space_split=bool(
+                    getattr(getattr(context, "config", None), "casual_space_split", True)
+                ),
+            )
+            if any(shaped.values()):
+                log_event(
+                    "llm.shape_for_send",
+                    session_id=context.session_id or None,
+                    casual=casual,
+                    chars=len(plan.text),
+                    **shaped,
+                )
+        except Exception as exc:  # noqa: BLE001 — 整形失败也要把话发出去
+            log_event(
+                "llm.shape_for_send_failed",
+                level="warning",
+                error=f"{type(exc).__name__}: {exc}"[:120],
+            )
+
         # extra 优先：显式写入者（legacy 兼容分支 / 测试）语义保持不变；
         # 取不到再回落到工具结果 —— 只有这样 RUNTIME 模式才真带得出媒体。
         plan.sticker = context.extra.get("sticker_segment") or _first(
-            _media_from_tools(result, "sticker")
+            # emoji（表情本子）发的也是表情段：跟 sticker 一起取，
+            # 谁先谁后无所谓——一轮里本来就只该发一张表情
+            _media_from_tools(result, "sticker") + _media_from_tools(result, "emoji")
         )
         plan.voice = context.extra.get("voice_segment") or _first(
             _media_from_tools(result, "voice")
@@ -154,8 +190,10 @@ class ResponsePipeline:
             plan.image = extra_image
         else:
             # 生图优先于浏览截图：用户要的是那张画，截图只是旁证
-            images = _media_from_tools(result, "draw") + _media_from_tools(
-                result, "browse"
+            images = (
+                _media_from_tools(result, "draw")
+                + _media_from_tools(result, "browse")
+                + _media_from_tools(result, "self_image")
             )
             plan.image = _first(images)
             plan.extra_images = images[1:]

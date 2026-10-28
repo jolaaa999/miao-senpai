@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 from dl_senpai.memory import ChatMemory, session_id_for_group, session_id_for_private
@@ -16,8 +17,12 @@ def test_append_and_trim() -> None:
     base.mkdir(parents=True, exist_ok=True)
     mem_dir = base / "trim"
     if mem_dir.exists():
-        for p in mem_dir.glob("*"):
-            p.unlink()
+        # 记忆目录下现在还会长出子目录（.stamps 时间轴），按文件删会抛 WinError 5
+        for item in mem_dir.glob("*"):
+            if item.is_dir():
+                shutil.rmtree(item, ignore_errors=True)
+            else:
+                item.unlink()
     else:
         mem_dir.mkdir(parents=True, exist_ok=True)
 

@@ -8,8 +8,16 @@ from __future__ import annotations
 
 import pytest
 
+from dl_senpai.core.commands.builtin import build_builtin_commands
 from dl_senpai.core.plugins.builtin import PLUGIN_COMMANDS, PLUGIN_OBSERVERS
 from dl_senpai.core.runtime import Runtime
+
+# 命令数量从注册表推导，不钉死数字。
+# 钉死的下场和观察者那边一样：每加一条命令（人设卡就是这么来的）都要回来
+# 改四个 5，改完还是测不出任何真实回归。这里真正要守的是
+# 「插件持有的 Command 就是注册表里那批」+「停用后一条不剩」。
+EXPECTED_COMMANDS = {cmd.name for cmd in build_builtin_commands()}
+EXPECTED_COUNT = len(EXPECTED_COMMANDS)
 
 
 @pytest.fixture
@@ -27,13 +35,28 @@ def test_builtin_commands_plugin_owns_real_commands(runtime: Runtime) -> None:
     """内置命令插件必须持有**真实的** Command 对象，否则 disable 清理不到。"""
     plugin = runtime.plugins.get(PLUGIN_COMMANDS)
     assert plugin is not None
-    assert len(plugin.commands) == 5
+    assert len(plugin.commands) == EXPECTED_COUNT
     names = {c.name for c in plugin.commands}
-    assert names == {"verify", "checkin", "affection", "reset", "shop"}
+    assert names == EXPECTED_COMMANDS
+    # 这几条是老底线，单独钉一次：真被删掉时要报「少了谁」，而不是只报数量不对
+    assert {"verify", "checkin", "affection", "reset", "shop"} <= names
+
+
+def _command_names(runtime: Runtime) -> set[str]:
+    return {cmd.name for cmd in runtime.commands.list()}
 
 
 def test_builtin_commands_owner_is_plugin_id(runtime: Runtime) -> None:
-    for cmd in runtime.commands.list():
+    """内置命令的 owner 必须是内置插件，否则停用时清理不掉。
+
+    只查内置插件持有的这一批，不查 registry 里的全部：2026-10 起还有别的
+    插件注册自己的命令（admin_commands 等），「所有命令的 owner 都必须等于
+    builtin_commands」从那一刻起就是个错误断言——它会把别人的命令也算到
+    内置插件头上，加一条新命令就红一片。
+    """
+    plugin = runtime.plugins.get(PLUGIN_COMMANDS)
+    assert plugin is not None
+    for cmd in plugin.commands:
         assert cmd.owner == PLUGIN_COMMANDS
 
 
@@ -43,10 +66,13 @@ def test_builtin_observers_owned_by_observer_plugin(runtime: Runtime) -> None:
 
 
 def test_disable_builtin_commands_removes_all(runtime: Runtime) -> None:
-    """真实能力验证：停用插件 → 内置命令全部消失。"""
-    assert len(runtime.commands) == 5
+    """真实能力验证：停用插件 → 内置命令全部消失，别人的命令不受牵连。"""
+    assert EXPECTED_COMMANDS <= _command_names(runtime)
+    others = _command_names(runtime) - EXPECTED_COMMANDS
     assert runtime.plugins.disable(PLUGIN_COMMANDS) is True
-    assert len(runtime.commands) == 0
+    assert not (EXPECTED_COMMANDS & _command_names(runtime)), "内置命令没被清理干净"
+    # owner 隔离：停用内置命令不能顺手把别的插件注册的命令带走
+    assert others <= _command_names(runtime)
 
 
 def test_disable_commands_does_not_touch_observers(runtime: Runtime) -> None:
@@ -65,20 +91,22 @@ def test_disable_commands_does_not_touch_observers(runtime: Runtime) -> None:
 def test_reenable_restores_commands(runtime: Runtime) -> None:
     runtime.plugins.disable(PLUGIN_COMMANDS)
     runtime.plugins.enable(PLUGIN_COMMANDS)
-    assert len(runtime.commands) == 5
+    assert EXPECTED_COMMANDS <= _command_names(runtime)
 
 
 def test_repeated_reload_does_not_duplicate(runtime: Runtime) -> None:
     """核心验收：reload 多次后命令数不变。"""
+    before = _command_names(runtime)
     for _ in range(5):
         runtime.plugins.reload(PLUGIN_COMMANDS)
-    assert len(runtime.commands) == 5
+    # 比集合而不是比数字：多一个命令不该让这条测试红，重复注册才该红
+    assert _command_names(runtime) == before
 
 
 def test_reload_disabled_stays_disabled(runtime: Runtime) -> None:
     runtime.plugins.disable(PLUGIN_COMMANDS)
     runtime.plugins.reload(PLUGIN_COMMANDS)
-    assert len(runtime.commands) == 0
+    assert not (EXPECTED_COMMANDS & _command_names(runtime))
 
 
 def test_build_is_idempotent() -> None:

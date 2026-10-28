@@ -223,6 +223,36 @@ class PluginConfig(BaseSettings):
     # agent_admin_qq 为空时 → 高风险工具对**所有人**都不可见。
     # 这个默认是有意为之：管理员没配置就当作没开通，而不是当作人人可用。
     agent_admin_qq: str = Field(default="", alias="DL_SENPAI_AGENT_ADMIN_QQ")
+
+    # ---- 管理员（喵指令）----
+    #
+    # 群里的管理动作（禁言/撤回/改名片/静默…）全部走 admin_commands.py，
+    # 鉴权只认这里的 QQ 号，**可以配多个**（逗号/分号/空格分隔）。
+    #
+    # 为什么不复用 agent_admin_qq：那个字段的语义是「谁能碰本机的文件与命令」。
+    # 群里可以多一个人帮忙看群，但绝不能因为「帮忙看群」就顺手拿到 shell。
+    # 两个名单分开配，才能做到「群管权限给出去、机器权限不给」。
+    # 为空时**回退**到 agent_admin_qq 与 owner_ids（老配置继续生效），
+    # 三个都为空 = 谁都不是管理员（默认关闭，而不是默认全开）。
+    admin_qq: str = Field(default="", alias="DL_SENPAI_ADMIN_QQ")
+    # 是否允许 QQ 群原生管理员/群主也用管理指令（sender.role）。
+    # 默认关：群主 ≠ bot 的主人，把「谁能在群里管她」交给 QQ 群角色判定，
+    # 等于把一部分控制权交给群里的任意管理员。
+    admin_allow_group_admin: bool = Field(
+        default=False, alias="DL_SENPAI_ADMIN_ALLOW_GROUP_ADMIN"
+    )
+    # 静默状态（喵闭嘴/喵醒）的落盘路径。留空 = data/dl_senpai/admin/silence.json。
+    # 做成可配是为了让控制台或测试把它重定向到别处。
+    admin_silence_path: str = Field(default="", alias="DL_SENPAI_ADMIN_SILENCE_PATH")
+    # 警告与黑名单的落盘路径。留空 = data/dl_senpai/admin/warn.json / blacklist.json。
+    # 与静默一样做成可配：控制台和测试都需要把它们挪走，不能共用生产文件。
+    admin_warn_path: str = Field(default="", alias="DL_SENPAI_ADMIN_WARN_PATH")
+    admin_blacklist_path: str = Field(default="", alias="DL_SENPAI_ADMIN_BLACKLIST_PATH")
+    # 词库与定时消息的落盘路径。留空 = data/dl_senpai/admin/words.json / schedule.json。
+    admin_words_path: str = Field(default="", alias="DL_SENPAI_ADMIN_WORDS_PATH")
+    admin_schedule_path: str = Field(default="", alias="DL_SENPAI_ADMIN_SCHEDULE_PATH")
+    # 违禁词表。留空 = data/dl_senpai/admin/badwords.json。
+    admin_badwords_path: str = Field(default="", alias="DL_SENPAI_ADMIN_BADWORDS_PATH")
     # 工具总开关。关掉它，7 个高风险工具一起消失，不用逐个改。
     agent_tools_enable: bool = Field(
         default=True, alias="DL_SENPAI_AGENT_TOOLS_ENABLE"
@@ -322,6 +352,11 @@ class PluginConfig(BaseSettings):
     bubble_require_newline: bool = Field(
         default=True, alias="DL_SENPAI_BUBBLE_REQUIRE_NEWLINE"
     )
+    # 闲聊里把逗号换成空格、去掉句末句号（帖子原话：逗号一多就书面，空格一多就网上）。
+    # 只管 casual 分支，技术答疑不动：那里逗号是语义分隔。
+    casual_space_split: bool = Field(
+        default=True, alias="DL_SENPAI_CASUAL_SPACE_SPLIT"
+    )
 
     # -- 发送闸门：熔断 + 频率上限（搬自 ai-companion-kit 第十三章防风控）--
     # 腾讯判断机器人最看的不是你打几个字，而是「失败之后还一直重试」。
@@ -369,6 +404,150 @@ class PluginConfig(BaseSettings):
     silence_prob_group: float = Field(
         default=0.1, alias="DL_SENPAI_SILENCE_PROB_GROUP"
     )
+
+    # -- 在场状态：等下文 / 先听一会儿 / 潜水（搬自 qq-bridge 二代仿真）--
+    # 这一组管的不是「这条要不要回」，而是「她现在在不在场」。
+    # 逐条独立掷骰子只能得到「随机的客服」；真人有一份连续的在场状态：
+    # 刚说完先听、对方没说完就等、散场了才走、被点名立刻回来。
+    presence_enable: bool = Field(default=True, alias="DL_SENPAI_PRESENCE_ENABLE")
+    # 对方明显没说完（「我跟你讲」「…但是」「然后」「等一下」）时等多久再回。
+    # 关掉就退回合并窗口（2~3 秒）。真人这时本来不会抢答——抢答的代价是被
+    # 第二句打脸，然后只能补一句「哦」。
+    pending_wait_enable: bool = Field(
+        default=True, alias="DL_SENPAI_PENDING_WAIT_ENABLE"
+    )
+    pending_wait_ms: int = Field(default=45000, alias="DL_SENPAI_PENDING_WAIT_MS")
+    # 等下文的上限：再长就不像在等，像掉线了。
+    pending_wait_max_ms: int = Field(
+        default=120000, alias="DL_SENPAI_PENDING_WAIT_MAX_MS"
+    )
+    # 说完话之后先听多久（这段时间不随机插嘴）。真人刚说完不会马上再补一条。
+    presence_observe_ms: int = Field(
+        default=90000, alias="DL_SENPAI_PRESENCE_OBSERVE_MS"
+    )
+    # 潜水：观察期满、群里也没人说话，就进入一段「普通消息叫不醒」的状态；
+    # 期间只有 @ / 召唤词 / 主人能叫醒。等价于 qq-bridge 的 qq_set_wake_config。
+    # 默认 3~10 分钟：qq-bridge 推荐 5~120 分钟，但 QQ 群对话密度更高，
+    # 睡太久会显得不在服务区。
+    presence_dive_enable: bool = Field(
+        default=True, alias="DL_SENPAI_PRESENCE_DIVE_ENABLE"
+    )
+    presence_dive_min_ms: int = Field(
+        default=180000, alias="DL_SENPAI_PRESENCE_DIVE_MIN_MS"
+    )
+    presence_dive_max_ms: int = Field(
+        default=600000, alias="DL_SENPAI_PRESENCE_DIVE_MAX_MS"
+    )
+    # 沉睡前观察：想收尾 / 想主动冒泡之前，群必须已经安静这么久。
+    # 对应 qq-bridge 的「每次设置潜水前先 qq_wait_for_messages(300000)」，
+    # 作用是防「别人正聊着，她插一句然后跑了」。
+    presence_pre_sleep_enable: bool = Field(
+        default=True, alias="DL_SENPAI_PRESENCE_PRE_SLEEP_ENABLE"
+    )
+    presence_pre_sleep_ms: int = Field(
+        default=300000, alias="DL_SENPAI_PRESENCE_PRE_SLEEP_MS"
+    )
+    # 同一个话题里她主动开口的上限（没人接就放下）。0 = 不限。
+    presence_topic_poke_max: int = Field(
+        default=2, alias="DL_SENPAI_PRESENCE_TOPIC_POKE_MAX"
+    )
+    # 超过这个时长算换了话题，计数清零。
+    presence_topic_window_ms: int = Field(
+        default=600000, alias="DL_SENPAI_PRESENCE_TOPIC_WINDOW_MS"
+    )
+    # 「在场与节奏」那段提示词。机制与措辞必须一致：否则模型会写出和节奏
+    # 相反的话（比如刚潜水上岸就说「我一直在的」）。
+    presence_hint_enable: bool = Field(
+        default=True, alias="DL_SENPAI_PRESENCE_HINT_ENABLE"
+    )
+
+    # -- 出站质检：气泡断点 / 中文空格（搬自 qq-bridge 的发送前软提醒）--
+    # 「这是哪个番的」+「表情包？」这种被拆开的半句话，以及「好的 我看下」
+    # 里的中文空格，是 QQ 上最显眼的两种机器味。qq-bridge 是提醒模型自己改，
+    # 这边没有第二稿机会，所以出站时就地修。
+    bubble_lint_enable: bool = Field(
+        default=True, alias="DL_SENPAI_BUBBLE_LINT_ENABLE"
+    )
+    cjk_space_fix_enable: bool = Field(
+        default=True, alias="DL_SENPAI_CJK_SPACE_FIX_ENABLE"
+    )
+    # 合并两条气泡后的字符上限：再长就不像一句话了，宁可留两条发。
+    bubble_merge_max_chars: int = Field(
+        default=160, alias="DL_SENPAI_BUBBLE_MERGE_MAX_CHARS"
+    )
+
+    # -- 拍一拍（搬自 qq-bridge 的 qq_send_poke）--
+    # 极轻的社交动作：逗熟人、催回复、表示「我看见你了」。之前连「被戳」
+    # 都收不到（notice 只接了入群/退群），所以这一组同时管主动戳与回拍。
+    poke_enable: bool = Field(default=True, alias="DL_SENPAI_POKE_ENABLE")
+    # 同一个人 90 秒内不重复戳：戳人比说话更烦人，配额要严一个量级。
+    poke_cooldown_sec: int = Field(default=90, alias="DL_SENPAI_POKE_COOLDOWN_SEC")
+    poke_max_per_hour: int = Field(default=8, alias="DL_SENPAI_POKE_MAX_PER_HOUR")
+    # 被戳时回拍一下（不说话，只回动作）。真人被戳最常见的反应就是这个。
+    poke_back_enable: bool = Field(default=True, alias="DL_SENPAI_POKE_BACK_ENABLE")
+    poke_back_probability: float = Field(
+        default=0.65, alias="DL_SENPAI_POKE_BACK_PROBABILITY"
+    )
+    # 回拍冷却：不回拍可以很快再回，否则两边会来回戳个没完。
+    poke_back_cooldown_sec: int = Field(
+        default=20, alias="DL_SENPAI_POKE_BACK_COOLDOWN_SEC"
+    )
+
+    # -- 群黑话词表（搬自 qq-bridge 的 qq_slang_query / qq_slang_submit）--
+    # 群里换梗她只能按字面瞎猜。改成「她自己遇到不懂的才记」：
+    # 中文 2~4 字重复串里绝大多数是常用词，纯统计挖词全是噪声。
+    slang_enable: bool = Field(default=True, alias="DL_SENPAI_SLANG_ENABLE")
+    # 已确认的词表注入提示词；待确认（她自己记下但没人确认）的**不注入**，
+    # 半懂的释义混进人设比不认识这个词更糟。
+    slang_brief_enable: bool = Field(default=True, alias="DL_SENPAI_SLANG_BRIEF_ENABLE")
+    slang_dir: str = Field(default="data/dl_senpai/slang", alias="DL_SENPAI_SLANG_DIR")
+
+    # -- 反馈记录（搬自 qq-bridge 的 qq_report_feedback）--
+    # 她自评「这句不像人 / 这次没答上来」，落 jsonl，供人看趋势。
+    # 只写不判：让程序按自评自动调参，最后只会收紧成客服。
+    feedback_enable: bool = Field(default=True, alias="DL_SENPAI_FEEDBACK_ENABLE")
+    feedback_dir: str = Field(
+        default="data/dl_senpai/feedback", alias="DL_SENPAI_FEEDBACK_DIR"
+    )
+
+    # -- 表情本子（对应 qq-bridge 的 list_stickers / collect_sticker / sticker_note）--
+    # 只会自动收集、只能按关键词碰运气挑，等于库里几百张图她一张都看不见。
+    sticker_book_enable: bool = Field(
+        default=True, alias="DL_SENPAI_STICKER_BOOK_ENABLE"
+    )
+
+    # -- 自画像（对应 qq-bridge 的 qq_get_self_image）--
+    # 素材放 self_image_dir；留空且 self_character 配了角色名时，回落到
+    # character_references 里已核验的参考图（跟生图共用一套素材）。
+    self_image_enable: bool = Field(default=True, alias="DL_SENPAI_SELF_IMAGE_ENABLE")
+    self_image_dir: str = Field(
+        default="data/dl_senpai/self", alias="DL_SENPAI_SELF_IMAGE_DIR"
+    )
+    self_character: str = Field(default="", alias="DL_SENPAI_SELF_CHARACTER")
+
+    # -- 人设卡（对应 qq-bridge 的 roles/<name>.md）--
+    # 把人设从 persona.py 搬到 data 目录：一张卡一个 md，按会话绑定。
+    # 没卡/没绑定/开关关掉时继续用 persona.py，行为与改造前逐字一致。
+    persona_card_enable: bool = Field(
+        default=True, alias="DL_SENPAI_PERSONA_CARD_ENABLE"
+    )
+    persona_card_dir: str = Field(
+        default="data/dl_senpai/personas", alias="DL_SENPAI_PERSONA_CARD_DIR"
+    )
+    # 没绑定的会话用哪张卡。留空 = 不设全局默认（推荐：卡要显式绑定才生效，
+    # 否则放进目录一张卡就等于换了所有人的她）
+    persona_card_default: str = Field(
+        default="", alias="DL_SENPAI_PERSONA_CARD_DEFAULT"
+    )
+
+    # -- 出站 / 入站图片归一化（对应 qq-bridge 的 media-normalize）--
+    # 长边 1280、1.5MB：视觉模型吃不下更大的图，中转站按字节计费还会 400；
+    # 动图会被抽帧拼成网格，否则模型只看得到第一帧。
+    media_normalize_enable: bool = Field(
+        default=True, alias="DL_SENPAI_MEDIA_NORMALIZE_ENABLE"
+    )
+    media_max_side: int = Field(default=1280, alias="DL_SENPAI_MEDIA_MAX_SIDE")
+    media_max_bytes: int = Field(default=1500000, alias="DL_SENPAI_MEDIA_MAX_BYTES")
 
     inner_state_enable: bool = Field(default=True, alias="DL_SENPAI_INNER_STATE_ENABLE")
     inner_state_dir: str = Field(
@@ -677,8 +856,13 @@ class PluginConfig(BaseSettings):
         default=180.0, alias="DL_SENPAI_GPTSOVITS_STARTUP_TIMEOUT"
     )
 
-    # 群名片：需机器人是群管；对方要求可改，聊到改名时可偶尔主动改
+    # 群名片：需机器人是群管；**只有对方明确要求时才改**（见 card_require_request）
     card_enable: bool = Field(default=True, alias="DL_SENPAI_CARD_ENABLE")
+    # 关掉这个开关会退回旧行为：她自己觉得好玩也能改（playful）。默认严格，
+    # 因为改名片是"改别人看得见的东西"，宁可少改一次也不要乱改。
+    card_require_request: bool = Field(
+        default=True, alias="DL_SENPAI_CARD_REQUIRE_REQUEST"
+    )
     card_max_len: int = Field(default=16, alias="DL_SENPAI_CARD_MAX_LEN")
     card_playful_cooldown: int = Field(default=600, alias="DL_SENPAI_CARD_PLAYFUL_COOLDOWN")
     card_allow_on_interrupt: bool = Field(
@@ -786,9 +970,9 @@ class PluginConfig(BaseSettings):
     draw_base_url: str = Field(default="", alias="DL_SENPAI_DRAW_BASE_URL")
     draw_size: str = Field(default="1024x1024", alias="DL_SENPAI_DRAW_SIZE")
     draw_quality: str = Field(default="", alias="DL_SENPAI_DRAW_QUALITY")
-    draw_timeout: float = Field(default=120.0, alias="DL_SENPAI_DRAW_TIMEOUT")
+    draw_timeout: float = Field(default=180.0, alias="DL_SENPAI_DRAW_TIMEOUT")
     draw_cooldown: int = Field(default=0, alias="DL_SENPAI_DRAW_COOLDOWN")
-    draw_max_prompt_chars: int = Field(default=800, alias="DL_SENPAI_DRAW_MAX_PROMPT_CHARS")
+    draw_max_prompt_chars: int = Field(default=2000, alias="DL_SENPAI_DRAW_MAX_PROMPT_CHARS")
     # 画质增强三件套（对应网页版那套「内部改写 + 自检」体验）：
     # 本中转的 gpt-image-* 实测 revised_prompt 原样返回，完全不做提示词改写，
     # 也不会自己检查画得对不对，所以在外面补一层。
@@ -816,6 +1000,81 @@ class PluginConfig(BaseSettings):
     draw_dir: str = Field(default="data/dl_senpai/draw", alias="DL_SENPAI_DRAW_DIR")
     draw_allow_on_interrupt: bool = Field(
         default=False, alias="DL_SENPAI_DRAW_ALLOW_ON_INTERRUPT"
+    )
+
+    # 生图甩到后台跑（子 agent 作业）：一张图 30~120 秒，同步跑会把整轮回复卡住，
+    # 连她「先说的那句话」都要等图出来才发出去。关掉则退回同步老路。
+    draw_async: bool = Field(default=True, alias="DL_SENPAI_DRAW_ASYNC")
+    draw_job_max: int = Field(
+        default=2, alias="DL_SENPAI_DRAW_JOB_MAX",
+        description="同时在跑的生图作业上限（群里连刷时别把上游打满）",
+    )
+    # 420 秒：找 3 张参考图要 10~25 秒，生成 60~120 秒，再留出重试余量
+    draw_job_timeout: float = Field(default=900.0, alias="DL_SENPAI_DRAW_JOB_TIMEOUT")
+    # 用户没给参考图时，派子 agent 上网找一张：不给参考图时模型只能凭记忆编设定
+    # （实测把凯尔希画成精灵耳）。找图失败不影响出图，退化成纯文生图。
+    draw_find_reference: bool = Field(default=True, alias="DL_SENPAI_DRAW_FIND_REFERENCE")
+    # 普通图是否也联网找参考图。默认 False：通用生图的默认策略是 text-first，
+    # 多一次搜索就多几秒延迟和一份翻车风险，而大多数「画一只猫」根本不需要参考图。
+    # 参考图流水线：先找 3 张、交叉核对、只送最像的 1 张进 images.edit。
+    # 关掉就退回旧的「只找 1 张」逻辑（出问题时用来对照）。
+    draw_reference_pipeline: bool = Field(
+        default=True, alias="DL_SENPAI_DRAW_REFERENCE_PIPELINE"
+    )
+    draw_web_reference_for_general: bool = Field(
+        default=False, alias="DL_SENPAI_DRAW_WEB_REFERENCE_FOR_GENERAL"
+    )
+    draw_reference_steps: int = Field(
+        default=4, alias="DL_SENPAI_DRAW_REFERENCE_STEPS",
+        description="找参考图的子 agent 最多走几步（每步一次模型调用）",
+    )
+    draw_reference_timeout: float = Field(
+        default=75.0, alias="DL_SENPAI_DRAW_REFERENCE_TIMEOUT"
+    )
+    # 单次搜图超时：image_find 抓页面实测 32~33 秒，给 18 秒等于每次都超时
+    draw_reference_query_timeout: float = Field(
+        default=35.0, alias="DL_SENPAI_DRAW_REFERENCE_QUERY_TIMEOUT"
+    )
+
+    # -- 角色身份管线（已知 IP 角色别画成泛化路人） --
+    # 为什么需要：纯文生图下「画一张艾雅法拉」只能靠模型记忆，出来的往往是
+    # 一张泛二次元羊角少女。识别名字 + 身份档案 + 参考图是把身份钉住的唯一办法。
+    character_enable: bool = Field(default=True, alias="DL_SENPAI_CHARACTER_ENABLE")
+    # 低于这个置信度就当没认出来：宁可走普通生图，也不许猜发型猜服装
+    character_min_confidence: float = Field(
+        default=0.8, alias="DL_SENPAI_CHARACTER_MIN_CONFIDENCE"
+    )
+    # 用户自定义角色档案目录（同 characters.json 结构，同名覆盖内置）
+    character_dir: str = Field(
+        default="data/dl_senpai/characters", alias="DL_SENPAI_CHARACTER_DIR"
+    )
+    # 本地角色参考图库：<franchise>/<character>/ref_01.png
+    character_reference_dir: str = Field(
+        default="data/dl_senpai/character_references",
+        alias="DL_SENPAI_CHARACTER_REFERENCE_DIR",
+    )
+    # 生图调试模式：整条 trace（脱敏后）落盘，用来回答「为什么画得不像」
+    # 网图当参考图前先让视觉模型验一遍设定是否一致：实测同人图会带进
+    # 「棕发 + 精灵耳」这类错设定，图生图照搬后比不给参考图还差
+    character_verify_reference: bool = Field(
+        default=True, alias="DL_SENPAI_CHARACTER_VERIFY_REFERENCE"
+    )
+    # 网图参考策略：off 完全不用；verify_only（默认）只用来校验档案、绝不送
+    # images.edit；enabled 才在“来源可信 + 视觉一致”双达标时用于图生图。
+    # 默认保守：实测同人图 + 图生图 比纯文本档案更不像。
+    character_web_reference_mode: str = Field(
+        default="verify_only", alias="DL_SENPAI_CHARACTER_WEB_REFERENCE_MODE"
+    )
+    # enabled 模式下网图来源可信度门槛（official=1.0 / wiki=0.8 / 同人站=0.2）
+    character_web_reference_min_trust: float = Field(
+        default=0.7, alias="DL_SENPAI_CHARACTER_WEB_REFERENCE_MIN_TRUST"
+    )
+    # 身份评分：每次已知角色生图后打一次分（一次视觉调用），只记录不重画
+    identity_eval: bool = Field(default=True, alias="DL_SENPAI_IDENTITY_EVAL")
+    image_debug: bool = Field(default=False, alias="DL_SENPAI_IMAGE_DEBUG")
+    image_trace_file: str = Field(
+        default="data/dl_senpai/draw_traces.jsonl",
+        alias="DL_SENPAI_IMAGE_TRACE_FILE",
     )
 
     # 浏览器逛网站：Playwright 截图 / 淘宝搜商品 / Pixiv 搜图
@@ -894,70 +1153,6 @@ class PluginConfig(BaseSettings):
     knowledge_prompt_header: str = Field(
         default="【知识库检索结果】",
         alias="DL_SENPAI_KNOWLEDGE_PROMPT_HEADER",
-    # 生图甩到后台跑（子 agent 作业）：一张图 30~120 秒，同步跑会把整轮回复卡住，
-    # 连她「先说的那句话」都要等图出来才发出去。关掉则退回同步老路。
-    draw_async: bool = Field(default=True, alias="DL_SENPAI_DRAW_ASYNC")
-    draw_job_max: int = Field(
-        default=2, alias="DL_SENPAI_DRAW_JOB_MAX",
-        description="同时在跑的生图作业上限（群里连刷时别把上游打满）",
-    )
-    draw_job_timeout: float = Field(default=300.0, alias="DL_SENPAI_DRAW_JOB_TIMEOUT")
-    # 用户没给参考图时，派子 agent 上网找一张：不给参考图时模型只能凭记忆编设定
-    # （实测把凯尔希画成精灵耳）。找图失败不影响出图，退化成纯文生图。
-    draw_find_reference: bool = Field(default=True, alias="DL_SENPAI_DRAW_FIND_REFERENCE")
-    draw_reference_steps: int = Field(
-        default=4, alias="DL_SENPAI_DRAW_REFERENCE_STEPS",
-        description="找参考图的子 agent 最多走几步（每步一次模型调用）",
-    )
-    draw_reference_timeout: float = Field(
-        default=75.0, alias="DL_SENPAI_DRAW_REFERENCE_TIMEOUT"
-    )
-    # 单次搜图超时：image_find 抓页面实测 32~33 秒，给 18 秒等于每次都超时
-    draw_reference_query_timeout: float = Field(
-        default=35.0, alias="DL_SENPAI_DRAW_REFERENCE_QUERY_TIMEOUT"
-    )
-
-    # -- 角色身份管线（已知 IP 角色别画成泛化路人） --
-    # 为什么需要：纯文生图下「画一张艾雅法拉」只能靠模型记忆，出来的往往是
-    # 一张泛二次元羊角少女。识别名字 + 身份档案 + 参考图是把身份钉住的唯一办法。
-    character_enable: bool = Field(default=True, alias="DL_SENPAI_CHARACTER_ENABLE")
-    # 低于这个置信度就当没认出来：宁可走普通生图，也不许猜发型猜服装
-    character_min_confidence: float = Field(
-        default=0.8, alias="DL_SENPAI_CHARACTER_MIN_CONFIDENCE"
-    )
-    # 用户自定义角色档案目录（同 characters.json 结构，同名覆盖内置）
-    character_dir: str = Field(
-        default="data/dl_senpai/characters", alias="DL_SENPAI_CHARACTER_DIR"
-    )
-    # 本地角色参考图库：<franchise>/<character>/ref_01.png
-    character_reference_dir: str = Field(
-        default="data/dl_senpai/character_references",
-        alias="DL_SENPAI_CHARACTER_REFERENCE_DIR",
-    )
-    # 生图调试模式：整条 trace（脱敏后）落盘，用来回答「为什么画得不像」
-    # 网图当参考图前先让视觉模型验一遍设定是否一致：实测同人图会带进
-    # 「棕发 + 精灵耳」这类错设定，图生图照搬后比不给参考图还差
-    character_verify_reference: bool = Field(
-        default=True, alias="DL_SENPAI_CHARACTER_VERIFY_REFERENCE"
-    )
-    # 网图参考策略：off 完全不用；verify_only（默认）只用来校验档案、绝不送
-    # images.edit；enabled 才在「来源可信 + 视觉一致」双达标时用于图生图。
-    # 默认保守：实测同人图 + 图生图 比纯文本档案更不像。
-    character_web_reference_mode: str = Field(
-        default="verify_only", alias="DL_SENPAI_CHARACTER_WEB_REFERENCE_MODE"
-    )
-    # enabled 模式下网图来源可信度门槛（official=1.0 / wiki=0.8 / 同人站=0.2）
-    character_web_reference_min_trust: float = Field(
-        default=0.7, alias="DL_SENPAI_CHARACTER_WEB_REFERENCE_MIN_TRUST"
-    )
-    # 身份评分：每次已知角色生图后打一次分（一次视觉调用），只记录不重画
-    identity_eval: bool = Field(default=True, alias="DL_SENPAI_IDENTITY_EVAL")
-    image_debug: bool = Field(default=False, alias="DL_SENPAI_IMAGE_DEBUG")
-    image_trace_file: str = Field(
-        default="data/dl_senpai/draw_traces.jsonl",
-        alias="DL_SENPAI_IMAGE_TRACE_FILE",
-    )
-
     )
     # 本地 Markdown 知识库。与 RAGFlow **互相独立**：
     # 它不需要地址/密钥，服务端挂了也照常工作，所以单独一个开关，
@@ -1338,10 +1533,32 @@ class PluginConfig(BaseSettings):
         default=10800, alias="DL_SENPAI_HEYBOX_BROWSE_INTERVAL_MAX_SEC"
     )
     # 刷到想说的东西之后，真正评论的概率（0~1）。别调到 1：全都评等于刷屏。
+    # 每天最多"逛"几次：频率提高后必须有个总量闸，否则夜里也会越刷越多
+    # 硬上限：每两小时必须刷一篇（基础间隔再大也不许超过这个）
+    heybox_browse_max_gap_sec: int = Field(
+        default=7200, alias="DL_SENPAI_HEYBOX_BROWSE_MAX_GAP_SEC"
+    )
+    heybox_browse_daily_max: int = Field(default=14, alias="DL_SENPAI_HEYBOX_BROWSE_DAILY_MAX")
+    # 偶发连刷的概率（人真的会"刚放下手机又点开"）
+    heybox_browse_burst_probability: float = Field(
+        default=0.12, alias="DL_SENPAI_HEYBOX_BROWSE_BURST_PROBABILITY"
+    )
+    # 撞上人机验证后冷静多久（默认 3 小时）：越试越死
+    heybox_captcha_backoff_sec: int = Field(
+        default=10800, alias="DL_SENPAI_HEYBOX_CAPTCHA_BACKOFF_SEC"
+    )
+    heybox_browse_schedule_file: str = Field(
+        default="data/dl_senpai/heybox_browse_schedule.json",
+        alias="DL_SENPAI_HEYBOX_BROWSE_SCHEDULE_FILE",
+    )
     heybox_browse_comment_probability: float = Field(
         default=0.35, alias="DL_SENPAI_HEYBOX_BROWSE_COMMENT_PROBABILITY"
     )
     # 两次"开浏览器"之间的最小间隔。太密会被小黑盒判成脚本（实测 show_captcha）
+    # 轻档间隔：读正文/看信息流/看留言之间最少隔这么久（重档写操作仍走 session_gap）
+    heybox_request_gap_sec: int = Field(
+        default=45, alias="DL_SENPAI_HEYBOX_REQUEST_GAP_SEC"
+    )
     heybox_session_gap_sec: int = Field(default=240, alias="DL_SENPAI_HEYBOX_SESSION_GAP_SEC")
     # 别人回她的留言，她要不要自己接话（默认接：留言是对话，不是刷屏）
     heybox_browse_reply_enable: bool = Field(
@@ -1370,6 +1587,157 @@ class PluginConfig(BaseSettings):
         default=1800, alias="DL_SENPAI_BILI_INBOX_INTERVAL_SEC"
     )
     bili_inbox_max_per_tick: int = Field(default=2, alias="DL_SENPAI_BILI_INBOX_MAX_PER_TICK")
+    # ---- 自主刷B站（看视频、读字幕、点赞、偶尔收藏；评论等 Lv2）----
+    bili_browse_enable: bool = Field(default=False, alias="DL_SENPAI_BILI_BROWSE_ENABLE")
+    # 主人的要求是"像真人一直刷"：真人刷B站十几分钟一个视频很正常。
+    # 原来 90~240 分钟太稀，一天只跑 6~8 次。现在 20~60 分钟一次，
+    # 夜间（3~8 点）仍然静默，所以实际不会真的一直刷。
+    # 最近这么多小时内刷过的视频不再重挑（热榜不动，她会一直点同一行）
+    bili_browse_dedupe_hours: float = Field(
+        default=12.0, alias="DL_SENPAI_BILI_BROWSE_DEDUPE_HOURS"
+    )
+    bili_browse_interval_min_sec: int = Field(
+        default=1200, alias="DL_SENPAI_BILI_BROWSE_INTERVAL_MIN_SEC"
+    )
+    bili_browse_interval_max_sec: int = Field(
+        default=3600, alias="DL_SENPAI_BILI_BROWSE_INTERVAL_MAX_SEC"
+    )
+    # 上限跟着频率走：一次只挑一个视频，40 次≈一天的量，正常作息撞不到
+    bili_browse_daily_max: int = Field(default=40, alias="DL_SENPAI_BILI_BROWSE_DAILY_MAX")
+    # 刷到就评论（要同时打开 bili_write_enable；真正能发还得账号到 Lv2）
+    bili_browse_comment_enable: bool = Field(
+        default=True, alias="DL_SENPAI_BILI_BROWSE_COMMENT_ENABLE"
+    )
+    # 点赞 / 收藏：都是真实账号行为。点赞默认刷到就点（always），
+    # 收藏交给模型判断"值不值得回看"（judge）——收藏等于承诺以后还来，
+    # 每篇都收等于收藏夹变垃圾桶。
+    # ---- 浏览器像个人 ----
+    # 反检测脚本 + 启动参数：别让站点一眼看出是自动化
+    browser_stealth_enable: bool = Field(
+        default=True, alias="DL_SENPAI_BROWSER_STEALTH_ENABLE"
+    )
+    # 持久 profile：同一个目录反复用，cookie 和指纹都长在这里面
+    browser_profile_enable: bool = Field(
+        default=True, alias="DL_SENPAI_BROWSER_PROFILE_ENABLE"
+    )
+    browser_profile_root: str = Field(
+        default="", alias="DL_SENPAI_BROWSER_PROFILE_ROOT"
+    )
+    # 人味操作：进页面先滚两下、鼠标动一动、停一会儿
+    browser_humanize_enable: bool = Field(
+        default=True, alias="DL_SENPAI_BROWSER_HUMANIZE_ENABLE"
+    )
+    # 撞验证的帖子多久内不再碰（换目标比硬撞同一篇划算）
+    heybox_avoid_ttl_sec: int = Field(
+        default=21600, alias="DL_SENPAI_HEYBOX_AVOID_TTL_SEC"
+    )
+    heybox_avoid_file: str = Field(
+        default="", alias="DL_SENPAI_HEYBOX_AVOID_FILE"
+    )
+    # ---- 看一眼画面（抽帧 + 视觉模型）。默认关，见 video_vision.py ----
+    video_vision_enable: bool = Field(
+        default=False, alias="DL_SENPAI_VIDEO_VISION_ENABLE"
+    )
+    # 每轮抽几帧：8 帧≈一秒一个采样点，够看「在干什么」，不够看连续动作
+    video_watch_frames: int = Field(default=8, alias="DL_SENPAI_VIDEO_WATCH_FRAMES")
+    # 抽帧宽度：960 能看清界面文字，再大只涨 token
+    video_frame_width: int = Field(default=960, alias="DL_SENPAI_VIDEO_FRAME_WIDTH")
+    video_frame_timeout: float = Field(
+        default=30.0, alias="DL_SENPAI_VIDEO_FRAME_TIMEOUT"
+    )
+    # 这模型带思考链，给小了正文会是空的（实测 300 全被思考吃掉）
+    video_vision_max_tokens: int = Field(
+        default=2000, alias="DL_SENPAI_VIDEO_VISION_MAX_TOKENS"
+    )
+    video_vision_timeout: float = Field(
+        default=60.0, alias="DL_SENPAI_VIDEO_VISION_TIMEOUT"
+    )
+    # 播放心跳：让这次"看"出现在 B 站历史里。观看时长也算养号经验（Lv2 才能评论）
+    bili_watch_report_enable: bool = Field(
+        default=False, alias="DL_SENPAI_BILI_WATCH_REPORT_ENABLE"
+    )
+    # 每次报多少秒：0 = 按视频时长随机取（60 秒起，最多 5 分钟）
+    bili_watch_report_seconds: int = Field(
+        default=0, alias="DL_SENPAI_BILI_WATCH_REPORT_SECONDS"
+    )
+    # 报完回头查一眼历史，确认真的记上了（上报成功 ≠ 平台真记）
+    bili_watch_report_verify: bool = Field(
+        default=True, alias="DL_SENPAI_BILI_WATCH_REPORT_VERIFY"
+    )
+    bili_like_enable: bool = Field(default=True, alias="DL_SENPAI_BILI_LIKE_ENABLE")
+    bili_like_mode: str = Field(default="always", alias="DL_SENPAI_BILI_LIKE_MODE")
+    # 点赞跟着刷的量走：刷 30 个赞 20 个，跟真人一样；但不能无限，风控看行为
+    bili_like_daily_max: int = Field(default=30, alias="DL_SENPAI_BILI_LIKE_DAILY_MAX")
+    bili_fav_enable: bool = Field(default=True, alias="DL_SENPAI_BILI_FAV_ENABLE")
+    bili_fav_daily_max: int = Field(default=10, alias="DL_SENPAI_BILI_FAV_DAILY_MAX")
+    bili_fav_folder_id: int = Field(default=0, alias="DL_SENPAI_BILI_FAV_FOLDER_ID")
+    bili_actions_file: str = Field(
+        default="data/dl_senpai/bili_actions.json", alias="DL_SENPAI_BILI_ACTIONS_FILE"
+    )
+    # 刷视频时读字幕（她看不了画面，字幕是唯一的内容来源）
+    bili_browse_transcript_enable: bool = Field(
+        default=True, alias="DL_SENPAI_BILI_BROWSE_TRANSCRIPT_ENABLE"
+    )
+    bili_transcript_max_chars: int = Field(
+        default=2000, alias="DL_SENPAI_BILI_TRANSCRIPT_MAX_CHARS"
+    )
+    # 看完愿意写进日记的概率（其余情况就是"看了没感觉"）
+    bili_browse_diary_probability: float = Field(
+        default=0.4, alias="DL_SENPAI_BILI_BROWSE_DIARY_PROBABILITY"
+    )
+    bili_browse_log_file: str = Field(
+        default="data/dl_senpai/bili_browse_log.jsonl",
+        alias="DL_SENPAI_BILI_BROWSE_LOG_FILE",
+    )
+    bili_browse_schedule_file: str = Field(
+        default="data/dl_senpai/bili_browse_schedule.json",
+        alias="DL_SENPAI_BILI_BROWSE_SCHEDULE_FILE",
+    )
+    # 刷到的内容里「真值得记住」的那几条：单独一本，带上限、可检索
+    bili_memory_file: str = Field(
+        default="data/dl_senpai/bili_memory.json", alias="DL_SENPAI_BILI_MEMORY_FILE"
+    )
+    bili_memory_max: int = Field(default=200, alias="DL_SENPAI_BILI_MEMORY_MAX")
+    # 刷到的内容回流进每轮提示词：她才会被看过的东西影响，而不是只写进文件
+    browse_influence_enable: bool = Field(
+        default=True, alias="DL_SENPAI_BROWSE_INFLUENCE_ENABLE"
+    )
+    browse_influence_hours: int = Field(default=48, alias="DL_SENPAI_BROWSE_INFLUENCE_HOURS")
+    browse_influence_max_items: int = Field(
+        default=4, alias="DL_SENPAI_BROWSE_INFLUENCE_MAX_ITEMS"
+    )
+    # ---- 抖音（只读：必须登录，走浏览器拦响应，见 douyin.py）----
+    douyin_enable: bool = Field(default=False, alias="DL_SENPAI_DOUYIN_ENABLE")
+    # 浏览器慢，一次读要 10~20 秒，超时给宽一点
+    douyin_timeout: float = Field(default=40.0, alias="DL_SENPAI_DOUYIN_TIMEOUT")
+    douyin_daily_limit: int = Field(default=12, alias="DL_SENPAI_DOUYIN_DAILY_LIMIT")
+    # 解析对不上时把原始响应存下来（data/dl_senpai/douyin_raw/），平时别开
+    douyin_dump_raw: bool = Field(default=False, alias="DL_SENPAI_DOUYIN_DUMP_RAW")
+    # 自主刷抖音：浏览器一次 10~20 秒，比 B 站慢，所以间隔拉长
+    douyin_browse_enable: bool = Field(default=False, alias="DL_SENPAI_DOUYIN_BROWSE_ENABLE")
+    douyin_browse_interval_min_sec: int = Field(
+        default=1800, alias="DL_SENPAI_DOUYIN_BROWSE_INTERVAL_MIN_SEC"
+    )
+    douyin_browse_interval_max_sec: int = Field(
+        default=5400, alias="DL_SENPAI_DOUYIN_BROWSE_INTERVAL_MAX_SEC"
+    )
+    douyin_browse_diary_probability: float = Field(
+        default=1.0, alias="DL_SENPAI_DOUYIN_BROWSE_DIARY_PROBABILITY"
+    )
+    douyin_browse_log_file: str = Field(
+        default="data/dl_senpai/douyin_browse_log.jsonl",
+        alias="DL_SENPAI_DOUYIN_BROWSE_LOG_FILE",
+    )
+    douyin_browse_schedule_file: str = Field(
+        default="data/dl_senpai/douyin_browse_schedule.json",
+        alias="DL_SENPAI_DOUYIN_BROWSE_SCHEDULE_FILE",
+    )
+    douyin_memory_file: str = Field(
+        default="data/dl_senpai/douyin_memory.json",
+        alias="DL_SENPAI_DOUYIN_MEMORY_FILE",
+    )
+    douyin_memory_max: int = Field(default=200, alias="DL_SENPAI_DOUYIN_MEMORY_MAX")
+
     # ---- 养号（攒经验到 Lv2 才能评论）----
     # 注意：B站协议不允许自动化操作账号，这里默认关，风险自负
     bili_grow_enable: bool = Field(default=False, alias="DL_SENPAI_BILI_GROW_ENABLE")
@@ -1419,6 +1787,45 @@ class PluginConfig(BaseSettings):
         if not raw:
             return set()
         return {q.strip() for q in raw.split(",") if q.strip()}
+
+    @staticmethod
+    def _split_ids(raw: str) -> set[str]:
+        """把逗号/分号/空格分隔的 QQ 号串拆成集合。
+
+        多个配置项共用一套拆分规则：同一份名单在三个地方各自实现一次，
+        迟早会出现「在这里生效、在那里不生效」的怪毛病。
+        """
+        text = str(raw or "").replace(";", ",").replace("；", ",")
+        text = text.replace(" ", ",").replace("\u3000", ",")
+        return {part.strip() for part in text.split(",") if part.strip()}
+
+    def admin_id_set(self) -> set[str]:
+        """管理指令的管理员集合。
+
+        优先级：DL_SENPAI_ADMIN_QQ > DL_SENPAI_AGENT_ADMIN_QQ > DL_SENPAI_OWNER_IDS。
+
+        为什么要三级回退而不是只留一个字段：老部署里「管理员」是配在
+        agent_admin_qq 里的，新增 admin_qq 时如果直接切过去，所有老配置会
+        一夜之间失去管理权限——那不是安全收紧，是故障。
+        """
+        explicit = self._split_ids(self.admin_qq)
+        if explicit:
+            return explicit
+        legacy = self._split_ids(getattr(self, "agent_admin_qq", "") or "")
+        if legacy:
+            return legacy
+        return self._split_ids(self.owner_ids)
+
+    def is_admin(self, user_id: object) -> bool:
+        """这个人是不是管理指令的管理员。
+
+        只认名单，不看群角色：群角色那层判断在 admin_commands.ensure_admin
+        里单独做，因为它是**可开关**的，而且绝不能影响高风险工具的鉴权。
+        """
+        admins = self.admin_id_set()
+        if not admins:
+            return False
+        return str(user_id).strip() in admins
 
     def is_owner(self, user_id: object) -> bool:
         """这个人是不是主人。

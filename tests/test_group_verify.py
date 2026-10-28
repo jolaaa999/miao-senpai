@@ -76,11 +76,19 @@ def test_store_persists_across_reload() -> None:
     reset_verify_store()
 
 
-def test_welcome_mentions_verify() -> None:
+def test_welcome_mentions_verify_only_when_needed() -> None:
+    """默认只欢迎；need_verify（群管 + 认证开着）时才提「认证」和时限。
+
+    为什么拆两套：学姐不是群管时踢不了人，「认证」两个字也接不住，
+    写成默认话术就等于让新人做一件系统做不到的事（实测她会现场瞎编）。
+    """
     import random
 
     from dl_senpai.welcome import build_welcome_text
 
-    text = build_welcome_text("小明", rng=random.Random(0))
-    assert "认证" in text
-    assert "分钟" in text or "十分钟" in text
+    plain = build_welcome_text("小明", rng=random.Random(0))
+    assert "认证" not in plain
+
+    verify = build_welcome_text("小明", need_verify=True, rng=random.Random(0))
+    assert "认证" in verify
+    assert "分钟" in verify or "十分钟" in verify

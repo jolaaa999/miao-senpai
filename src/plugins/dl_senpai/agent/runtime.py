@@ -169,8 +169,12 @@ class AgentRuntime:
                 cross_chat_brief=context.extra.get("cross_chat_brief", ""),
                 memory_cards_brief=context.extra.get("memory_cards_brief", ""),
                 diary_brief=context.extra.get("diary_brief", ""),
+                presence_hint=context.extra.get("presence_hint", ""),
+                slang_brief=context.extra.get("slang_brief", ""),
                 brevity_hint=context.extra.get("brevity_hint", ""),
                 tone_hint=context.extra.get("tone_hint", ""),
+                # 人设卡：上游按会话解析好放在 extra 里（见 legacy_bridge._fill_persona_card）
+                persona_body=context.extra.get("persona_body", ""),
                 visible_tools=visible,
             )
         )

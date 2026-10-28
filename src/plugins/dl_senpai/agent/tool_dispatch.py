@@ -90,6 +90,21 @@ class SharedToolDispatcher:
 
         register_note_tool(registry)
         register_diary_tool(registry)
+        # 社交层三件（拍一拍 / 黑话 / 反馈）同样在这里补一次：
+        # 本分发器可能先于 Runtime 被调用，那时注册表里还没有它们，
+        # 模型写的 <<<POKE>>> 会被当成正文原样发出去。
+        from ..feedback import register_feedback_tool
+        from ..poke import register_poke_tool
+        from ..slang import register_slang_tool
+
+        from ..portrait import register_self_image_tool
+        from ..sticker_book import register_emoji_tool
+
+        register_poke_tool(registry)
+        register_slang_tool(registry)
+        register_feedback_tool(registry)
+        register_emoji_tool(registry)
+        register_self_image_tool(registry)
 
         from .permissions import PermissionService
 

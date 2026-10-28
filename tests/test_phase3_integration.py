@@ -405,7 +405,12 @@ async def test_scenario_4_plain_message_uses_interrupt_probability(
     with patch.object(runtime.agent_trigger, "decide") as decide:
         from dl_senpai.core.agent_trigger import AgentDecision, AgentTrigger
 
-        decide.return_value = AgentDecision(AgentTrigger.INTERRUPT, "forced")
+        # forced=True 必须显式写：第二个位置参数是 reason，不是 forced。
+        # 只写 reason 会让这条「强制回复」落进「有时候看见了就是不接」的
+        # 随机判定里（10% 概率装没看见），测试就变成偶发失败。
+        decide.return_value = AgentDecision(
+            AgentTrigger.INTERRUPT, reason="forced", forced=True
+        )
         with patch("dl_senpai.legacy_bridge.handle_agent_message", fake_agent):
             await runtime.dispatch(ctx)
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from threading import Lock
 from typing import Any
@@ -99,6 +100,35 @@ class ChatMemory:
         safe = session_id_to_fs_key(session_id)
         return self.memory_dir / ".rollover" / f"{safe}.jsonl"
 
+    def _stamps_path(self, session_id: str) -> Path:
+        """消息时间轴：与主文件同长度、按下标对齐的 ts 数组。
+
+        为什么不直接往主文件每条里塞 ts：memory/*.json 的 role/content 结构是
+        admin 控制台的读取契约，Phase 2 明确要求「JSON 结构不变」。
+        时间戳另开一个文件，两边都不破。
+        """
+        safe = session_id_to_fs_key(session_id)
+        return self.memory_dir / ".stamps" / f"{safe}.json"
+
+    def _load_stamps(self, session_id: str, count: int) -> list[float]:
+        """读时间轴。长度对不上就当没有——宁可没 ts，也不能错位盖到别人头上。"""
+        try:
+            data = json.loads(self._stamps_path(session_id).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return []
+        if not isinstance(data, list) or len(data) != count:
+            return []
+        return [float(x) if isinstance(x, (int, float)) else 0.0 for x in data]
+
+    def _save_stamps(self, session_id: str, stamps: list[float]) -> None:
+        path = self._stamps_path(session_id)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            JsonStore(path, create_parent=False).save(stamps)
+        except OSError:
+            # 时间轴写不进去就降级成「这批消息没有 ts」，绝不能挡主文件保存
+            pass
+
     def _archive_rolled_over(self, session_id: str, dropped: list[dict[str, str]]) -> None:
         """把被滚出上限的旧消息追加到归档文件，而不是直接丢掉。
 
@@ -137,8 +167,9 @@ class ChatMemory:
         data = self._store(session_id).load(default=[])
         if not isinstance(data, list):
             return []
+        stamps = self._load_stamps(session_id, len(data))
         cleaned: list[dict[str, str]] = []
-        for item in data:
+        for idx, item in enumerate(data):
             if (
                 isinstance(item, dict)
                 and item.get("role") in {"user", "assistant"}
@@ -152,12 +183,29 @@ class ChatMemory:
                 if item["role"] == "assistant" and not content.strip():
                     # 整条就是标记残渣：不进上下文，但也不改用户数据文件
                     continue
-                cleaned.append({"role": item["role"], "content": content})
+                msg: dict[str, Any] = {"role": item["role"], "content": content}
+                # ts 只在内存里流转，不并进 content：让「读给模型」那一侧知道
+                # 这条是几点的，才能判断出「这是昨天的」。旧数据没有 ts，
+                # 缺了就是缺了，绝不拿当前时间补——那比没有更误导。
+                _ts = item.get("ts")
+                if isinstance(_ts, (int, float)) and _ts > 0:
+                    msg["ts"] = float(_ts)
+                elif idx < len(stamps) and stamps[idx] > 0:
+                    msg["ts"] = stamps[idx]
+                cleaned.append(msg)
         return cleaned
 
     def save(self, session_id: str, messages: list[dict[str, str]]) -> None:
         trimmed = self._apply_persist_limit(session_id, self._trim(messages))
-        self._store(session_id).save(trimmed)
+        # 主文件只写 role/content（admin 按这个结构读），ts 走 .stamps/ 时间轴
+        plain: list[dict[str, str]] = []
+        stamps: list[float] = []
+        for msg in trimmed:
+            plain.append({"role": msg["role"], "content": msg["content"]})
+            _ts = msg.get("ts")
+            stamps.append(float(_ts) if isinstance(_ts, (int, float)) and _ts > 0 else 0.0)
+        self._store(session_id).save(plain)
+        self._save_stamps(session_id, stamps)
 
     def append_turn(
         self,
@@ -169,8 +217,11 @@ class ChatMemory:
         # 而这里的返回值还要 save() 回磁盘——套了预算就等于每轮都删掉
         # 一段用户历史。预算只作用于「读给模型」那一侧。
         history = self._trim(self.load_all(session_id))
-        history.append({"role": "user", "content": user_content})
-        history.append({"role": "assistant", "content": assistant_content})
+        # 每轮都盖当前时间。没有 ts 的历史等于一锅没有先后的炖菜：
+        # 模型无法区分「刚说的」和「昨天说的」，会把隔夜请求当成待办接着办。
+        now = time.time()
+        history.append({"role": "user", "content": user_content, "ts": now})
+        history.append({"role": "assistant", "content": assistant_content, "ts": now})
         history = self._trim(history)
         self.save(session_id, history)
         return history
@@ -192,3 +243,44 @@ def session_id_for_private(user_id: int | str) -> str:
 def messages_for_llm(history: list[dict[str, str]]) -> list[dict[str, Any]]:
     """返回可直接拼进 OpenAI messages 的历史（不含当前句）。"""
     return [{"role": m["role"], "content": m["content"]} for m in history]
+
+
+# 没有时间戳的存量消息用这个前缀：不假装知道几点，只说明「不是刚说的」。
+_STALE_BARE_PREFIX = "[之前] "
+
+
+def stamp_stale_messages(
+    messages: list[dict[str, Any]],
+    *,
+    now: float | None = None,
+    keep_tail: int = 2,
+) -> list[dict[str, Any]]:
+    """给「不是今天」的历史消息加「[10-27 21:20] 」前缀，并统一剥掉 ts 键。
+
+    为什么必须加：历史里只有 role/content，模型看不出「帮我整个谷歌账号」是
+    昨天傍晚说的，于是当成刚刚有人提、还没办完的事接着办。2026-10-28 11:34
+    线上用户原话就是「你这BOT怎么还在昨天的话题」，随后它还在追着问那件事。
+
+    只处理跨天的：同一天内的消息不加前缀，否则每一句都顶着时间戳，比不加更假。
+    升级前写入的存量消息没有 ts（那时候还不记时间）。这部分不能不管：不看时间戳
+    就等于把隔夜内容继续当新鲜的喂进去。历史是有序的，最后 keep_tail 条必定是
+    最近两轮，其余一律标「[之前]」—— 不猜具体时刻，只表达「这不是刚说的」。
+
+    返回值一律只留 role/content：ts 是内部字段，多一个键会让下游拼 messages 时
+    报 unexpected keyword。
+    """
+    cur = time.time() if now is None else now
+    today = time.localtime(cur)[:3]
+    total = len(messages)
+    out: list[dict[str, Any]] = []
+    for idx, msg in enumerate(messages):
+        content = msg.get("content", "")
+        ts = msg.get("ts")
+        if isinstance(ts, (int, float)) and ts > 0:
+            lt = time.localtime(ts)
+            if lt[:3] != today:
+                content = time.strftime("[%m-%d %H:%M] ", lt) + content
+        elif idx < total - max(0, keep_tail):
+            content = _STALE_BARE_PREFIX + content
+        out.append({"role": msg.get("role", "user"), "content": content})
+    return out

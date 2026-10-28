@@ -119,7 +119,7 @@ async def test_chat_builds_messages(monkeypatch: pytest.MonkeyPatch) -> None:
     assert captured["max_tokens"] == 100
     assert captured["messages"][0]["role"] == "system"
     assert "被点名" in captured["messages"][0]["content"]
-    assert captured["messages"][-1]["content"].startswith("小明：")
+    assert captured["messages"][-1]["content"].startswith("[小明] 说：")
 
 
 @pytest.mark.asyncio

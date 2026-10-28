@@ -85,7 +85,10 @@ def test_recent_and_context_only_last_n(tmp_path):
     assert "别复述" in ctx
 
 
-def test_context_empty_when_no_entries(tmp_path):
+def test_context_empty_when_no_entries(tmp_path, monkeypatch):
+    # 日记本身为空时必须返回空串。刷到的内容是挂在同一个 brief 上的另一段，
+    # 它读的是线上真实台账，所以这里显式关掉——不关就会把线上内容串进断言。
+    monkeypatch.setattr("dl_senpai.browse_influence.build_browse_brief", lambda cfg: "")
     assert DiaryStore(tmp_path).context(3) == ""
     assert build_diary_brief(DiaryStore(tmp_path), n=3) == ""
 

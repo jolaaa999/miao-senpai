@@ -91,6 +91,20 @@ class ConfigWatcher:
             self._snapshot = current
             self._apply()
 
+    def force_reload(self) -> bool:
+        """立刻重载一次配置（喵/重载配置 用）。
+
+        为什么要有这个公开入口：管理员改完 .env 想马上生效，不应该
+        只能等轮询（最长 2 秒）或者重启进程 —— 重启会丢掉正在生成的回复、
+        正在跑的后台任务，代价远大于收益。
+
+        返回是否成功；失败原因已经写进日志，指令侧只要回一句「没成功」。
+        """
+        before = self._reload_count
+        self._apply()
+        return self._reload_count > before
+
+
     def _apply(self) -> None:
         """失效三条缓存并刷新单例。
 

@@ -159,12 +159,16 @@ async def _run_process(
 
     用 create_subprocess_exec 传 argv 列表。
     """
+    from ...winproc import no_window_kwargs
+
     proc = await asyncio.create_subprocess_exec(
         *argv,
         cwd=str(cwd),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         env=env,
+        # 这条链路一天能起几十次 powershell，忘了它就一直闪黑窗
+        **no_window_kwargs(),
     )
     try:
         out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)

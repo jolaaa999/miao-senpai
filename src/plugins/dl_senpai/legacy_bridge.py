@@ -278,10 +278,31 @@ def _assemble_memory(
     except Exception:  # noqa: BLE001 — 日记读不出来最多是少一段回味
         pass
 
+    # 人设卡：决定「她是谁」。必须在任何简报之前解析——正文会顶替
+    # SYSTEM_PROMPT，后面那些段是叠在它之上的补充，顺序错了就成了
+    # 「补充说明一份不存在的人设」。
+    try:
+        _fill_persona_card(cfg, session_id, extra)
+    except Exception:  # noqa: BLE001 — 卡库坏了就回落到 persona.py
+        pass
+
+    # 在场与节奏：拼在长度纪律之前（顺序说明见 PromptBuilder.build）。
+    # 先定「这一轮要不要开口、说几句」，再压「一条多短」。
+    try:
+        _fill_presence_hint(cfg, extra)
+    except Exception:  # noqa: BLE001 — 少这段最多是节奏差一点，不影响回复
+        pass
+
+    # 群黑话词表：跟在场那段一样贴着本轮消息放（见 PromptBuilder.build）。
+    try:
+        _fill_slang_brief(cfg, extra)
+    except Exception:  # noqa: BLE001 — 少这段最多是听错一个梗，不影响回复
+        pass
+
     # 长度纪律：必须最后注入（PromptBuilder 也把它拼在末尾）。
     # 人设中段的规则压不住输出长度，这条得贴着本轮消息放。
     try:
-        _fill_brevity_hint(cfg, extra)
+        _fill_brevity_hint(cfg, extra, query)
     except Exception:  # noqa: BLE001 — 少了这段最多是话变长，不影响对话
         pass
 
@@ -360,19 +381,70 @@ def _fill_recent_chat_brief(
         extra["recent_chat_brief"] = brief
 
 
-def _fill_brevity_hint(cfg: Any, extra: dict[str, Any]) -> None:
+def _fill_brevity_hint(cfg: Any, extra: dict[str, Any], query: str = "") -> None:
     """把长度纪律写进 extra["brevity_hint"]。
 
     默认开：她原来会把「群里问一句」答成三段落，这是最常见的抱怨。
     想关掉就设 DL_SENPAI_REPLY_BREVITY_ENABLE=false。
+
+    query 是本轮用户原话：用它判定「闲聊档 / 解释档」。
+    为什么由代码判而不是让模型自判——见 brevity.is_explain_request 的注释。
     """
     if not bool(getattr(cfg, "reply_brevity_enable", True)):
         return
-    from .brevity import build_brevity_hint
+    from .brevity import build_brevity_hint, is_explain_request
 
-    hint = build_brevity_hint(True)
+    hint = build_brevity_hint(True, explain=is_explain_request(query))
     if hint:
         extra["brevity_hint"] = hint
+
+
+def _fill_persona_card(cfg: Any, session_id: str, extra: dict[str, Any]) -> None:
+    """把当前会话的人设卡正文写进 extra["persona_body"]。
+
+    取不到卡（没绑、目录空、功能关着）就什么都不写：PromptBuilder 按
+    「非空即注入」判断，空串写进去只会让 sections 诊断失真，也会让
+    persona.py 的回落路径多绕一圈。
+    """
+    from .personas import resolve_persona_body
+
+    body, card_id = resolve_persona_body(session_id, cfg)
+    if not body:
+        return
+    extra["persona_body"] = body
+    log_event(
+        "agent.persona_card",
+        session_id=session_id or None,
+        card=card_id,
+        chars=len(body),
+    )
+
+
+def _fill_presence_hint(cfg: Any, extra: dict[str, Any]) -> None:
+    """把「在场与节奏」写进 extra["presence_hint"]。
+
+    文案由 presence.py 提供：机制改了措辞就得跟着改，所以两边同源，
+    不在这里再抄一份——抄一份的下场是机制已经允许潜水了，提示词还在
+    教她「每条都要接」。
+    """
+    from .presence import build_presence_hint
+
+    hint = build_presence_hint(cfg)
+    if hint:
+        extra["presence_hint"] = hint
+
+
+def _fill_slang_brief(cfg: Any, extra: dict[str, Any]) -> None:
+    """把已确认的黑话词表写进 extra["slang_brief"]。
+
+    只拼 confirmed 的词：待确认的是「她记下但还没人确认」的候选，
+    把半懂的释义喂回人设，比不认识这个词更容易说错还理直气壮。
+    """
+    from .slang import build_slang_brief
+
+    brief = build_slang_brief(cfg)
+    if brief:
+        extra["slang_brief"] = brief
 
 
 def _fill_tone_hint(
@@ -816,7 +888,27 @@ async def _extract_memory_cards(agent_context: Any, history: list[dict[str, str]
         ]
         # max_tokens 给到 1000：500 会把「先推理再给 JSON」的输出拦腰截断，
         # 实测抓到过尾句停在半句话的回复，那种一定解析不出卡片。
-        completion = await llm._complete_once(messages, max_tokens=1000, timeout=45.0)
+        try:
+            completion = await llm._complete_once(
+                messages, max_tokens=1000, timeout=45.0
+            )
+        except Exception as exc:  # noqa: BLE001
+            # 上游偶发「吐空回复」（_complete_once 会把它包成 LLMError）：
+            # 这跟配置错不是一回事，再问一次通常就正常。不重试的代价是这一轮
+            # 记忆永久丢失——下一次要再等 memory_extract_every 轮才触发。
+            from .llm import LLMError as _LLMError
+
+            if not isinstance(exc, _LLMError):
+                raise
+            log_event(
+                "agent.memory_extract_retry",
+                session_id=session_id or None,
+                chars=0,
+                reason="empty_completion",
+            )
+            completion = await llm._complete_once(
+                messages, max_tokens=1000, timeout=45.0
+            )
         # _complete_once 的真实返回是 _Completion（正文在 .text），但测试替身
         # 可能直接返回字符串。两种都要认，否则解析会静默拿到空串。
         raw = getattr(completion, "text", None)

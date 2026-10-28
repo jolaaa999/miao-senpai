@@ -208,3 +208,22 @@ def test_brief_newlines_are_flattened() -> None:
     """多行消息会把背景段撑成一大片，压成一行才好读。"""
     brief = build_recent_chat_brief(_entries((100.0, "moring", "第一行\n第二行")), "第一行")
     assert "第一行 第二行" in brief
+
+
+def test_brief_names_the_sender_format_and_skips_empty() -> None:
+    """背景资料必须点明「发言人：内容」的格式，且空流水不能注入。
+
+    为什么钉这两条：
+    1. 不点明格式时，模型会把发言人名字当成正文——实测「失语.：123」被它
+       拆成「失语.」是个名字？还是在说你自己无语了？（「失语」本身是常用词）；
+    2. 加了格式说明行之后，空流水如果还被判为「有背景」注入，模型会对着两行
+       空说明硬编，比没有背景更糟。
+    """
+    from dl_senpai.recent_chat import ChatEntry, build_recent_chat_brief
+
+    assert build_recent_chat_brief([], "在吗") == ""
+
+    entry = ChatEntry(ts=1793021014.0, sender="失语.", user_id="2843422418", text="123", message_id="1")
+    brief = build_recent_chat_brief([entry], "123", is_private=True)
+    assert "冒号前是发言人名字" in brief
+    assert "失语." in brief

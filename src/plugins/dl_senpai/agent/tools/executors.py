@@ -483,8 +483,21 @@ async def execute_browse(context: Any, call: ToolCall) -> ToolResult:
 
 
 async def execute_card(context: Any, call: ToolCall) -> ToolResult:
-    """修改群名片。走现有 `group_card.apply_card_actions`。"""
-    from ...group_card import CardAction, apply_card_actions
+    """修改群名片。走现有 `group_card.apply_card_actions`。
+
+    为什么在这里加"到底是不是被叫去改"的闸门：agent 工具这条路径**不经过**
+    `group_card.filter_actions()`，所以 playful 冷却、违禁词、长度截断全都不生效——
+    模型一时兴起写个 <<<CARD ...>>> 就能把人名片改了。这里补三道：
+      1. `kind` 只接受 `request`（playful 一律拒，等于取消"自己觉得好玩就改"）；
+      2. `card_require_request` 为真时，当前消息必须真的在要求改名片/起外号；
+      3. 名片文本过 `sanitize_card()`（违禁词 + 截断），与 legacy 行为对齐。
+    """
+    from ...group_card import (
+        CardAction,
+        apply_card_actions,
+        looks_like_card_request,
+        sanitize_card,
+    )
 
     bot = _bot_of(context)
     if bot is None:
@@ -494,11 +507,49 @@ async def execute_card(context: Any, call: ToolCall) -> ToolResult:
         )
 
     args = call.arguments or {}
+    cfg = getattr(context, "config", None)
+
+    # 闸门一：主动改（playful）不要了。没人叫她改，她就不该动别人的名片。
+    if str(args.get("kind") or "request").lower() != "request":
+        return ToolResult(
+            tool_name="card",
+            tool_call_id=call.id,
+            success=False,
+            error="只处理对方明确要求的改名片（kind 必须是 request）",
+            error_type="not_requested",
+        )
+
+    # 闸门二：这句话里到底有没有人要求改名片。宁可少改一次，也不要乱改。
+    # 配置拿不到时按"要求"处理（默认严格）；关掉开关可回退到旧行为。
+    if bool(getattr(cfg, "card_require_request", True)):
+        user_text = str(getattr(context, "plain_text", "") or "")
+        if not looks_like_card_request(user_text):
+            return ToolResult(
+                tool_name="card",
+                tool_call_id=call.id,
+                success=False,
+                error="这条消息里没人要求改名片，别自己改；想回应就用嘴说一句",
+                error_type="not_requested",
+            )
+
+    card_text = sanitize_card(
+        str(args.get("card") or ""),
+        max_len=int(getattr(cfg, "card_max_len", 16) or 0),
+    )
+    if not card_text:
+        return ToolResult(
+            tool_name="card",
+            tool_call_id=call.id,
+            success=False,
+            error="名片内容为空或不合规",
+            error_type="bad_card",
+        )
+
     try:
         action = CardAction(
             user_id=int(args.get("user_id")),
-            card=str(args.get("card") or ""),
-            kind=str(args.get("kind") or "request"),
+            card=card_text,
+            kind="request",
         )
     except (TypeError, ValueError) as exc:
         return ToolResult(

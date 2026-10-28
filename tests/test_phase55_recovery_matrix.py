@@ -27,6 +27,7 @@ from typing import Any
 
 import pytest
 
+from dl_senpai.msg_format import format_user_turn
 from dl_senpai.agent.recovery import (
     CARD_RETRY_PROMPT,
     MUTE_RETRY_PROMPT,
@@ -111,13 +112,13 @@ def legacy_history(inp: LegacyInputs) -> list[dict[str, Any]]:
 
          hist2 = [
              *history,
-             {"role": "user", "content": f"{sender}：{chat_text}"},
+             # 期望值也走同一个 helper：前缀形态以后改了，这里跟着变，不会再漂
              {"role": "assistant", "content": result.text},
          ]
     """
     return [
         *(inp.history or []),
-        {"role": "user", "content": f"{inp.sender}：{inp.chat_text}"},
+        {"role": "user", "content": format_user_turn(inp.sender, inp.chat_text)},
         {"role": "assistant", "content": inp.first_reply},
     ]
 

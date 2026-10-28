@@ -22,6 +22,7 @@ from .memory import (
 )
 from .welcome import build_welcome_text
 from .group_verify import (
+    bot_can_kick,
     build_verify_pass_text,
     build_verify_prompt,
     get_verify_store,
@@ -313,6 +314,10 @@ async def _reply(
     sticker: MessageSegment | None = None,
     voice: MessageSegment | None = None,
     image: MessageSegment | None = None,
+    # 管理指令/工具类回执要「立刻到」，不能走拟人打字延迟：
+    # 「喵/帮助」分 6 段发时，每段都等 1-2 秒会让人以为她卡死了。
+    # None = 跟随配置（正常聊天），显式 False = 这条立即发。
+    humanize: bool | None = None,
 ) -> None:
     config = get_config()
     await send_text_reply(
@@ -327,7 +332,7 @@ async def _reply(
         forward_min_chars=config.forward_min_chars,
         forward_node_chars=config.forward_node_chars,
         nickname=get_senpai_name(),
-        humanize_send=bool(config.humanize_send),
+        humanize_send=bool(config.humanize_send) if humanize is None else humanize,
         typing_delay_ms_min=config.typing_delay_ms_min,
         typing_delay_ms_max=config.typing_delay_ms_max,
         bubble_max=config.bubble_max,
@@ -383,12 +388,21 @@ async def handle_group_increase(bot: Bot, event: GroupIncreaseNoticeEvent) -> No
         logger.warning("dl_senpai: failed to fetch new member info")
 
     parts: list[str] = []
-    if is_feature_enabled(config, event.group_id, "welcome"):
-        parts.append(build_welcome_text(str(nickname)))
 
-    if config.is_verify_group(event.group_id) and is_feature_enabled(
-        config, event.group_id, "verify"
-    ):
+    # 认证话术能不能写进欢迎词，先看学姐在这个群是不是管理员：不是群管就踢不了人，
+    # 「认证」两个字也接不住（命令 guard 要求待认证状态），写了只是空承诺。
+    # `bot_can_kick` 内部已经吞异常，接口抽风时返回 False —— 宁可少承诺一次。
+    can_kick = await bot_can_kick(bot, event.group_id)
+    verify_on = (
+        can_kick
+        and config.is_verify_group(event.group_id)
+        and is_feature_enabled(config, event.group_id, "verify")
+    )
+
+    if is_feature_enabled(config, event.group_id, "welcome"):
+        parts.append(build_welcome_text(str(nickname), need_verify=verify_on))
+
+    if verify_on:
         timeout = max(30, int(config.verify_timeout_sec))
         store = get_verify_store(config.verify_dir)
         item = store.register(
@@ -962,7 +976,19 @@ async def _dispatch_via_router(bot: Bot, event: MessageEvent) -> None:
 
 @gateway_notice_matcher.handle()
 async def handle_gateway_notice(bot: Bot, event: NoticeEvent) -> None:
-    """通知类事件：只走旁路观察者（入群欢迎 / 退群清理）。"""
+    """通知类事件：只走旁路观察者（入群欢迎 / 退群清理）。
+
+    拍一拍先接一下：它不是 MessageEvent，from_onebot_event 对它返回 None，
+    于是「有人戳了她」这条事件此前被整条丢掉——她对此毫无反应。
+    """
+    from .poke import handle_poke_notice
+
+    try:
+        if await handle_poke_notice(bot, event):
+            return
+    except Exception:  # noqa: BLE001 — 拍一拍出错不能挡住别的 notice
+        logger.exception("dl_senpai poke notice failed")
+
     from .gateway import from_onebot_event
 
     ctx = from_onebot_event(event, bot)

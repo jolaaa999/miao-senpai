@@ -90,6 +90,12 @@ class Runtime:
         # owner 设为 builtin_commands，让 PluginRuntime 能整体停用。
         register_builtin_commands(self.commands, owner="builtin_commands")
 
+        # 管理员「喵指令」：与上面那批群友玩法分开注册（不同的 guard 与优先级）。
+        # 注册失败只记日志：管理指令挂掉不应该让整个 bot 起不来。
+        self._register_admin_commands();
+        self._register_wordbank_command()
+        self._register_badwords_command()
+        self._register_wordbank_command()
         # 内置观察者：旁路行为，永不短路（Phase 3 第十八节）
         self._register_builtin_observers()
 
@@ -160,6 +166,22 @@ class Runtime:
             # 生成层（Word/PPT）：对**所有群友**可见。它只接受结构化文本，
             # 参数里没有路径也没有命令，与管理员专属的高危层是两套东西。
             register_creator_tools(self.tools)
+            # 社交层：拍一拍 / 群黑话词表 / 反馈记录。
+            # 都走单独注册 —— 那个 8 个内置工具的数量与 executor 契约有守卫
+            # 测试钉着，新工具一律不往里塞（与 memory/note/diary 同一条路）。
+            from ..feedback import register_feedback_tool
+            from ..poke import register_poke_tool
+            from ..slang import register_slang_tool
+
+            from ..portrait import register_self_image_tool
+            from ..sticker_book import register_emoji_tool
+
+            register_poke_tool(self.tools)
+            register_slang_tool(self.tools)
+            register_feedback_tool(self.tools)
+            # 表情本子与自画像：一个管「有什么图可发」，一个管「我自己长什么样」
+            register_emoji_tool(self.tools)
+            register_self_image_tool(self.tools)
             self.agent = AgentRuntime(registry=self.tools)
             self.services.register(SERVICE_TOOLS, self.tools, owner="core")
             self.services.register(SERVICE_AGENT, self.agent, owner="core")
@@ -192,6 +214,108 @@ class Runtime:
         if self.extensions is None:
             return []
         return self.extensions.describe()
+
+    def _register_admin_commands(self) -> None:
+        """注册管理员「喵指令」（喵禁言 / 喵撤回 / 喵状态 …）。
+
+        刻意与 builtin_commands 分开登记：
+          - 它们的 guard 不同（只认管理员 QQ，不看群白名单）；
+          - 它们的优先级不同（必须比群友玩法先匹配）；
+          - 它们的 owner 不同（停用管理指令不该连带停掉签到）。
+        """
+        from .commands.admin import register_admin_commands
+
+        try:
+            register_admin_commands(self.commands, owner="admin_commands")
+        except Exception as exc:  # noqa: BLE001 — 管理指令注册失败不阻断启动
+            log_event(
+                "admin_commands.register_failed",
+                level="warning",
+                error=f"{type(exc).__name__}: {exc}",
+            )
+
+
+    def _register_wordbank_command(self) -> None:
+        """注册群词库的自动回复命令。
+
+        为什么它是一条 Command 而不是走 agent：词库是管理员写死的一句话，
+        命中就应当直接回、不进模型——那样既省 token，也保证「说好的回复」
+        不会某天被模型改写。
+
+        优先级 60：排在玩法指令（50）之后、agent（300）之前。
+        这样「签到」不会被词库抢走，而词库又能先于 AI 生效。
+        permission 留空是刻意的：带「喵」的输入只走管理指令，
+        所以「喵/xxx」永远不会被词库命中（哪怕管理员真把键写成那样）。
+        """
+        try:
+            import re as _re
+
+            # admin_words 在 core 的**上一层**（插件根目录）：点号少写一个就变成
+            # core.admin_words，报错是 ModuleNotFoundError，而这外面的 try/except
+            # 会把它降级成一句 warning —— 「词库看起来注册了其实没注册」。
+            from ..admin_words import word_guard, word_reply_handler
+            from .commands.models import Command
+
+            command = Command(
+                name="wordbank_reply",
+                namespace="words",
+                # 匹配任意一段短文本，真正的判定在 guard 里（查词库有没有命中）
+                patterns=[("any", _re.compile(r"(?s)^.{1,200}$"))],
+                handler=word_reply_handler,
+                description="群词库自动回复（管理员用 喵/词库 维护）",
+                priority=60,
+                consume=True,
+                guard=word_guard,
+                owner="admin_commands",
+            )
+            self.commands.register(command)
+        except Exception as exc:  # noqa: BLE001 — 词库坏了不能拖垮整个命令表
+            log_event(
+                "words.register_failed",
+                level="warning",
+                error=f"{type(exc).__name__}: {exc}",
+            )
+
+
+    def _register_badwords_command(self) -> None:
+        """注册群违禁词检测。
+
+        为什么做成 Command 而不是 agent 工具：违禁词要在**每条**群消息上判，
+        走模型既慢又贵，而且模型可能「觉得没那么严重」而放过——这是不允许
+        有判断空间的策略。
+
+        优先级 55：玩法指令（50）之后、词库（60）之前。违禁词消息不该再被
+        词库接一句预设回复，那是给违规内容配一个可爱回应。
+        consume=True：命中就拦下这条，不再让她闲聊接话。
+        """
+        try:
+            import re as _re
+
+            # admin_badwords 在 core 的上一层：少一个点就变成 core.admin_badwords，
+            # 报错会被下面的 except 降级成一句 warning（「看起来注册了其实没有」）。
+            from ..admin_badwords import badword_guard, badword_handler
+            from .commands.models import Command
+
+            command = Command(
+                name="badword_hit",
+                namespace="badwords",
+                # 匹配任意一段文本，真正判定在 guard 里（查词表有没有踩中）
+                patterns=[("any", _re.compile(r"(?s)^.{1,500}$"))],
+                handler=badword_handler,
+                description="群违禁词检测（管理员用 喵badword 维护）",
+                priority=55,
+                consume=True,
+                guard=badword_guard,
+                owner="admin_commands",
+            )
+            self.commands.register(command)
+        except Exception as exc:  # noqa: BLE001 — 违禁词坏了不能拖垮整个命令表
+            log_event(
+                "badwords.register_failed",
+                level="warning",
+                error=f"{type(exc).__name__}: {exc}",
+            )
+
 
     def _register_builtin_plugins(self) -> None:
         """把内置能力登记为 Plugin，建立 owner 归属。
@@ -289,6 +413,18 @@ class Runtime:
             if getattr(ctx, "is_private", False)
             else int(getattr(cfg, "batch_window_group_ms", 2500))
         )
+
+        # 等下文：对方这句明显没说完（「我跟你讲」「…但是」「然后」）就把窗口
+        # 拉长到几十秒，等他补完再一起回。这不是「保险一点」，是**必须**：
+        # 抢答的人设会被第二句打脸，然后只能补一句「哦」——比晚回半分钟难看得多。
+        #
+        # 放在 batch_enable 判断之后：连合并窗口都关掉的人要的是「立刻回」，
+        # 不该被这里偷偷拖慢。
+        from ..presence import get_presence_gate
+
+        window_ms = get_presence_gate().wait_window_ms(
+            getattr(ctx, "plain_text", "") or "", window_ms
+        )
         if window_ms <= 0:
             return ""
 
@@ -310,6 +446,11 @@ class Runtime:
         判定为 NONE 就直接跳过（等价于旧的"概率没中"）。
         """
         from .router import Route, RouteResult
+        # 命令层的「没权限」用专用异常表达：它要和真正的代码报错区分开——
+        # 前者静默跳过（消息交给 AI 兜底），后者要记 warning。
+        # 从 models 导入而不是 admin_commands：reset / persona / 管理指令
+        # 用的是同一个异常类型，这里不该依赖「管理员指令」那个模块。
+        from .commands.models import CommandPermissionDenied
 
         async def command_route(ctx: Any) -> RouteResult:
             """命令 stage：查 CommandRegistry。"""
@@ -326,6 +467,12 @@ class Runtime:
             )
             try:
                 await _maybe_await(command.handler(ctx, invocation.match))
+            except CommandPermissionDenied:
+                # 非管理员发了管理指令：**静默跳过，不 consume**。
+                # 这条命令确实命中了（是给指令用的），但这人没权限——
+                # 既不该回「你没权限」（等于告诉全群谁有权限），
+                # 也不该把消息吃掉（那会像石沉大海）。交给 AI 兜底即可。
+                return RouteResult.skip(reason="admin_denied")
             except Exception as exc:  # noqa: BLE001
                 log_event(
                     "command.failed",
@@ -346,10 +493,61 @@ class Runtime:
             if getattr(ctx, "message_type", "") not in {"group", "private"}:
                 return RouteResult.skip(reason="not_message")
 
+            from ..presence import get_presence_gate
+
+            gate = get_presence_gate()
+            session_id = getattr(ctx, "session_id", "") or ""
+            # 先**无条件**记「有人在说话」。
+            #
+            # 为什么不能只记「她本来要回」的那些：插嘴没摇中、被短消息过滤掉的
+            # 消息也是群里的真实动静。漏记它们，「群里安静了多久」会严重失真——
+            # 群里正聊得热闹，她却以为没人说话，主动冒泡的闸门和潜水时机全跑偏。
+            gate.note_incoming(session_id)
+
+            # 管理员静默（喵闭嘴）：本群所有人都不回，包括 @ 和私聊以外的强制触发。
+            #
+            # 为什么放在触发判定**之前**：静默的意义就是「不用再算她要说什么」，
+            # 提前退出既省一次 LLM 预算，也让行为可解释（不是「这次没摇中」）。
+            # 只对群生效：静默是群级命令，私聊本来就该随时能找到她。
+            group_id = getattr(ctx, "group_id", "") or ""
+            if group_id:
+                from ..admin_control import silence_left_seconds
+                from ..config_runtime.runtime import get_config
+
+                # 把配置传进去：静默文件路径是可配的，指令写在哪里，
+                # 这里就必须读哪里，否则「喵闭嘴」看起来完全没生效。
+
+                cfg = get_config()
+                if silence_left_seconds(group_id, cfg=cfg) > 0:
+                    return RouteResult.skip(reason="admin_silenced")
+
+                # 群级黑名单（喵/拉黑）：她不再接这个人的话。
+                # 放在静默之后、触发判定之前——同样是省掉一次判定，
+                # 而且行为可解释：不是「没摇中」，是管理员说过不接他。
+                # 只拦她说话，不拦签到/商店：积分是群友自己的资产，
+                # 不该因为管理员的一句气话被冻结。
+                from ..admin_control import is_blacklisted
+
+                if is_blacklisted(group_id, getattr(ctx, "user_id", "") or "", cfg=cfg):
+                    return RouteResult.skip(reason="admin_blacklisted")
             decision = self.agent_trigger.decide(ctx)
             self.agent_trigger.log_decision(decision, ctx)
             if not decision.should_run:
                 return RouteResult.skip(reason=decision.reason or "no_trigger")
+
+            # 被叫到（@/召唤词/主人）= 唤醒：潜水立刻结束、话题计数清零。
+            if decision.forced:
+                gate.note_incoming(session_id, addressed=True)
+
+            # 潜水期不随机插嘴：普通消息叫不醒她。
+            # 这两条否决刻意放在合并窗口**之前**——既然本来就不接，就不该再
+            # 白等一个几十秒的「等下文」窗口。
+            if not decision.forced:
+                if gate.is_diving(session_id):
+                    return RouteResult.skip(reason="diving")
+                if gate.topic_pokes_exhausted(session_id):
+                    # 同一个话题她已经主动开口够多了，没人接就放下。
+                    return RouteResult.skip(reason="topic_poke_exhausted")
 
             # 消息合并窗口：连着发的几条攒成一次再回。
             # 放在触发判定**之后**：先确认她本来就该醒，再去等；
@@ -380,6 +578,12 @@ class Runtime:
             from .. import legacy_bridge
 
             ran = await legacy_bridge.handle_agent_message(ctx, trigger=decision)
+            if ran:
+                # 说过话了：潜水从「说完之后安静了多久」算起；
+                # 没被叫到的那些额外记一次「主动开口」，用来卡同话题追问上限。
+                gate.note_replied(session_id)
+                if not decision.forced:
+                    gate.mark_topic_poke(session_id)
             if not ran:
                 # 背压拒绝：不算处理成功，但仍短路（避免重复入队）
                 return RouteResult.handle(

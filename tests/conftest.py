@@ -148,6 +148,57 @@ def isolate_send_guard():
 
 
 @pytest.fixture(autouse=True)
+def isolate_presence():
+    """每个用例前把在场状态机清空。
+
+    为什么必须隔离：presence 也是**进程级单例**，记录的是「各会话最近一次有人
+    说话 / 她最近一次开口」的墙钟时间。前面任何一个用例只要走过 agent 路由，
+    就会给自己的会话盖上时间戳；后面的用例（尤其 own_life 的「首次运行只记基线」）
+    就会看到「刚刚还有人说话」，被沉睡前观察闸门拦下来，断言莫名其妙失败——
+    而且单跑那个文件永远是绿的。
+
+    生产行为本身是对的（在场状态就该是全局的），所以修的是测试隔离。
+    """
+    try:
+        from dl_senpai.presence import reset_presence_gate
+    except Exception:  # noqa: BLE001 — 早期导入阶段允许失败
+        yield
+        return
+
+    reset_presence_gate()
+    yield
+    reset_presence_gate()
+
+
+@pytest.fixture(autouse=True)
+def isolate_social_state():
+    """每个用例前清空社交层单例（拍一拍额度 / 黑话词表缓存）。
+
+    为什么必须隔离：额度是进程级的（生产上本来就该全局），前一个用例戳了
+    8 次，后一个用例就被「这一小时戳得够多了」拦住；词表按路径缓存，
+    换临时目录时如果不 reset，会读到上一个用例的内容。
+    """
+    try:
+        from dl_senpai.personas import reset_persona_store
+        from dl_senpai.poke import reset_poke_budget
+        from dl_senpai.slang import reset_slang_store
+        from dl_senpai.stickers import reset_sticker_store
+    except Exception:  # noqa: BLE001 — 早期导入阶段允许失败
+        yield
+        return
+
+    def _reset() -> None:
+        reset_persona_store()
+        reset_poke_budget()
+        reset_slang_store()
+        reset_sticker_store()
+
+    _reset()
+    yield
+    _reset()
+
+
+@pytest.fixture(autouse=True)
 def no_wait_retry(monkeypatch):
     """把 LLM 重试等待归零。
 
@@ -232,3 +283,22 @@ def block_network(monkeypatch):
     monkeypatch.setattr(socket.socket, "connect", real_connect, raising=False)
     monkeypatch.setattr(socket.socket, "connect_ex", real_connect_ex, raising=False)
     monkeypatch.setattr(socket, "create_connection", real_create_connection, raising=False)
+
+@pytest.fixture(autouse=True)
+def isolate_reference_blocklist(tmp_path_factory, monkeypatch):
+    """测试不许读真实的网图黑名单。
+
+    那份文件记的是生产结论（哪些角色的网图被判过「跟设定不符」）。测试一旦
+    读到它，就会因为用例恰好用了同一个角色名而静默跳过联网，断言失败还看不出
+    原因——实测过一次：Eyjafjalla 在黑名单里，导致 web_probe 用例拿到
+    reference_mode="none" 而不是 "web_probe_only"。
+    """
+    # 测试把包名当 `dl_senpai`，生产是 `plugins.dl_senpai`——这两个是**不同的**
+    # 模块对象，patch 错一个等于没 patch。
+    try:
+        from dl_senpai import draw_pipeline
+    except ImportError:
+        from plugins.dl_senpai import draw_pipeline
+
+    path = tmp_path_factory.mktemp("blocklist") / "blocklist.json"
+    monkeypatch.setattr(draw_pipeline, "_blocklist_path", lambda: path)

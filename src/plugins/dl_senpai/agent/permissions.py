@@ -184,15 +184,6 @@ class PermissionService:
         机器人可能被拉进任何人的私聊。场景不改变信任级别，身份才改变。
         """
         cfg = self._cfg(context)
-        configured = str(getattr(cfg, "agent_admin_qq", "") or "").strip()
-        if not configured:
-            return False
-        # 支持逗号/分号/空格分隔的多个管理员，方便以后加人。
-        allowed = {
-            part.strip()
-            for part in configured.replace(";", ",").replace(" ", ",").split(",")
-            if part.strip()
-        }
         # **身份必须取账号（user_id），绝不能用 actor。**
         #
         # actor 是「发送者显示名（优先群名片）」，也就是用户**自己随手就能改**的东西。
@@ -204,6 +195,23 @@ class PermissionService:
         ident = str(getattr(context, "user_id", "") or "").strip()
         if not ident:
             ident = str(getattr(context, "actor", "") or "").strip()
+        # 统一走 PluginConfig.is_admin：管理员名单的三级回退
+        # （admin_qq → agent_admin_qq → owner_ids）只实现一次。
+        # 以前这里硬编码读 agent_admin_qq，于是给群里配了 admin_qq 之后，
+        # 「喵禁言能用」而「读文件不能用」——同一句话问两次得到两个答案。
+        unified = getattr(cfg, "is_admin", None)
+        if callable(unified):
+            return bool(unified(ident))
+        # 兼容老配置对象（单测里的 SimpleNamespace 等）：退回单字段判断。
+        configured = str(getattr(cfg, "agent_admin_qq", "") or "").strip()
+        if not configured:
+            return False
+        # 支持逗号/分号/空格分隔的多个管理员，方便以后加人。
+        allowed = {
+            part.strip()
+            for part in configured.replace(";", ",").replace(" ", ",").split(",")
+            if part.strip()
+        }
         return ident in allowed
 
     async def prefetch_group_manage(self, context: Any) -> None:

@@ -134,6 +134,16 @@ class PromptRequest:
     brevity_hint: str = ""
     # 本轮语气判断（吐槽/真倾诉）。比长度纪律更靠后：它判的是这一句要不要安慰
     tone_hint: str = ""
+    # 「在场与节奏」：等对方说完、说完先听一会儿、同一话题别追着问、别当群管家。
+    # 机制（presence.py）决定她**什么时候被叫醒**，这一段决定她被叫醒之后
+    # **怎么说话**；两边不一致时，模型会写出和节奏相反的话。
+    presence_hint: str = ""
+    # 群里已确认的黑话词表。跟在场那段一样由模块自己拼好再传进来，
+    # 不在 builder 里抄一份写法——两处文案必然漂移。
+    slang_brief: str = ""
+    # 人设卡正文（personas.py）。空串 = 用 persona.py 的 SYSTEM_PROMPT。
+    # 由 legacy_bridge 按会话解析后写进 extra，runtime 原样搬过来。
+    persona_body: str = ""
     # -- 注册表驱动的工具集合 --
     visible_tools: list[ToolDefinition] = field(default_factory=list)
 
@@ -192,7 +202,11 @@ class PromptBuilder:
         flags = self._tool_flags(request.visible_tools)
         renderer = self._get_renderer()
 
+        # 没卡时不传这个 kwarg：渲染器签名与调用形状保持原样，
+        # 让「关掉人设卡 = 完全等于改造前」这条守卫仍然成立。
+        card_kwargs = {"persona_body": request.persona_body} if request.persona_body else {}
         text = renderer(
+            **card_kwargs,
             interrupt=request.interrupt,
             has_images=request.has_images,
             private_chat=request.private_chat,
@@ -259,6 +273,30 @@ class PromptBuilder:
         if diary:
             text = f"{text}\n{diary}"
 
+        # 在场与节奏放在长度纪律**之前**：先定这一轮要不要开口、说几句，
+        # 再压「一条多短」。顺序反过来的话，模型先忙着掐长度，把「该不该说、
+        # 要不要等对方说完」忘光——实测出来的就是三个字的答非所问。
+        presence = (request.presence_hint or "").strip()
+        if presence:
+            text = f"{text}\n{presence}"
+
+        # 黑话词表紧跟在场之后：先知道「在不在、说几句」，再知道
+        # 「他们说的那个词是什么意思」。反过来会让模型先忙着对词，
+        # 把这一轮该不该接话忘掉。
+        slang = (request.slang_brief or "").strip()
+        if slang:
+            text = f"{text}\n{slang}"
+
+        # 【要动手时怎么写】放在长度纪律之前、presence 之后。
+        # 背景：提示词已经 1.2 万字，工具说明夹在中段，实测问「画一张凯尔希」
+        # 时会回「我无法生成图片」——不是不会，是那一段没被读到。
+        # 示例文本从各工具自己的说明里抠，不另写一份，避免两处说法漂移。
+        # 插嘴轮不注入（与工具说明块一致：那种轮次不该握有完整工具箱）。
+        if not request.interrupt:
+            cheatsheet = self._marker_cheatsheet(request.visible_tools)
+            if cheatsheet:
+                text = f"{text}\n{cheatsheet}"
+
         # 长度纪律放在**最末**：模型对最后读到的那段最敏感，塞在几千字人设
         # 中段的规则实际压不住。之前「目标 400~1500 字」就是这么把闲聊撑成
         # 小作文的，改完人设还得在这儿再兜一道。
@@ -283,11 +321,16 @@ class PromptBuilder:
             "recent_chat": bool((request.recent_chat_brief or "").strip()),
             "cross_chat": bool((request.cross_chat_brief or "").strip()),
             "diary": bool((request.diary_brief or "").strip()),
+            # 诊断用：在场与节奏有没有拼进去（和长度纪律一样容易漏接）
+            "presence_hint": bool((request.presence_hint or "").strip()),
+            "slang_brief": bool((request.slang_brief or "").strip()),
             # 诊断用：长度纪律这次有没有真的拼进提示词（它是最容易漏接的一段）
             "brevity_hint": bool((request.brevity_hint or "").strip()),
             "tone_hint": bool((request.tone_hint or "").strip()),
             # 诊断用：本次追加了哪些新工具的说明块。
             "extra_tool_block": bool(block),
+            # 诊断用：末尾那张 marker 速查有没有拼进去
+            "marker_cheatsheet": (not request.interrupt) and bool(self._marker_cheatsheet(request.visible_tools)),
         }
 
         return BuiltPrompt(
@@ -295,6 +338,87 @@ class PromptBuilder:
             sections=sections,
             tool_names=[t.name for t in request.visible_tools],
         )
+
+    # 每个 marker 的「什么时候该用」。
+    # 只有格式没有时机时，模型会认得格式但想不起该用——这是实测出来的：
+    # 提示词里明明有【生图能力】，问「画一张凯尔希」它仍回「我无法生成图片」。
+    _WHEN = {
+        "DRAW": "对方要图 / 让你画东西 / 要自拍（参考图你自己找，别反问对方要）",
+        "STICKER": "一句话配个表情包更到位时",
+        "VOICE": "对方要你「念出来 / 说话」时",
+        "CARD": "对方**点名**要你改名片时（没人叫就别自己找机会改）",
+        "MUTE": "被惹毛，或对方点名要你禁言",
+        "SEARCH": "问天气/价格/新闻这类时效信息",
+        "BROWSE": "要开网页、截图、去淘宝或 pixiv 找东西",
+        "GROUP": "要读群公告 / 群文件 / 群相册",
+        "IMPRESSION": "发现对方稳定的性格或事实",
+    }
+
+    def _marker_cheatsheet(self, tools: list[ToolDefinition]) -> str:
+        """把可见工具的 marker 用法压成一张速查表（时机 + 可照抄的格式）。
+
+        为什么需要：prompt_text 写得很清楚，但它在提示词中段（整段一万多字），
+        模型经常漏读；末尾这张表只占十行，却能在它准备开口时把「要不要动手、
+        怎么写」拉回眼前。
+        """
+        lines: list[str] = []
+        for tool in tools:
+            example = self._example_of(tool)
+            if not example:
+                continue
+            marker = getattr(tool, "marker", "") or ""
+            when = self._WHEN.get(marker) or (tool.description or tool.name).strip()
+            lines.append(f"- {when} → {example}")
+        if not lines:
+            return ""
+        return (
+            "【动手前先看这里】该动手的时候只动嘴等于没做——\n"
+            "先正常说话（一两句），再在回复末尾另起一行写指令，群友看不到这一行：\n"
+            + "\n".join(lines)
+            + "\n说「画好了 / 已经改了」却没写对应指令，就是什么都没发生。"
+        )
+
+    # 速查用的紧凑示例。工具说明里的示例有两种不可用的形态：
+    # 一种是占位符 `<<<DRAW ...>>>`（模型会照着写 `...`），
+    # 一种是 IMPRESSION 那种一大段 JSON（十行速查里塞不下）。
+    # 所以：说明里有含花括号的实例就优先用，否则用这里这份。
+    _FALLBACK_EXAMPLES = {
+        "DRAW": "<<<DRAW 银发女医生穿白大褂站在舰桥，半身，日系插画>>>",
+        "STICKER": "<<<STICKER 猫猫 无语>>>",
+        "VOICE": "<<<VOICE>>>",
+        "CARD": '<<<CARD {"user_id":123456,"card":"新名字"}>>>',
+        "MUTE": '<<<MUTE {"user_id":123456,"duration":60,"kind":"angry"}>>>',
+        "SEARCH": "<<<SEARCH 今天的天气>>>",
+        "BROWSE": "<<<BROWSE pixiv 明日方舟 壁纸>>>",
+        "GROUP": '<<<GROUP {"kind":"notice"}>>>',
+        "IMPRESSION": '<<<IMPRESSION {"add":["主玩源氏"]}>>>',
+    }
+
+    @classmethod
+    def _example_of(cls, tool: ToolDefinition) -> str:
+        """给速查表找一条能直接照抄的示例。
+
+        优先用工具说明里的真实实例（含花括号那种），
+        说明里只有占位符时退回 _FALLBACK_EXAMPLES。
+        """
+        marker = getattr(tool, "marker", "") or ""
+        if not marker:
+            return ""
+        head = f"<<<{marker}"
+        for raw in (getattr(tool, "prompt_text", "") or "").splitlines():
+            line = raw.strip().lstrip("-").strip()
+            idx = line.find(head)
+            if idx < 0:
+                continue
+            snippet = line[idx:]
+            end = snippet.find(">>>")
+            if end < 0:
+                continue
+            cand = snippet[: end + 3]
+            # 只认带参数的实例：`<<<X ...>>>` 和 `<<<X>>>` 照抄都没意义
+            if "{" in cand and "..." not in cand and len(cand) <= 90:
+                return cand
+        return cls._FALLBACK_EXAMPLES.get(marker, "")
 
     def _new_tool_block(self, tools: list[ToolDefinition], existing: str) -> str:
         """挑出**尚未出现在提示词里**的工具说明，拼成追加块。

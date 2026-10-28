@@ -32,6 +32,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable
 
+from ..msg_format import format_user_turn
+
 # 触发谓词：(intent_text) -> bool
 IntentPredicate = Callable[[str], bool]
 
@@ -111,7 +113,9 @@ class RecoveryPolicy:
         """构造补救用的历史（与重构前 hist2 的形状一致）。"""
         return [
             *history,
-            {"role": "user", "content": f"{sender}：{chat_text}"},
+            # 与主链路同一套前缀（msg_format），否则补救重试时模型看到的格式变了，
+            # 会按旧格式重新把名字当正文。
+            {"role": "user", "content": format_user_turn(sender, chat_text)},
             {"role": "assistant", "content": first_reply},
         ]
 

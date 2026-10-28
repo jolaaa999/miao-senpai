@@ -47,6 +47,8 @@ SITES: dict[str, tuple[str, str]] = {
     "qzone": ("QQ空间", "https://user.qzone.qq.com/"),
     "heybox": ("小黑盒", "https://www.xiaoheihe.cn/"),
     "bili": ("B站", "https://www.bilibili.com/"),
+    # 抖音必须登录才有推荐流（匿名打开首页会弹登录框），所以只能走有头登录
+    "douyin": ("抖音", "https://www.douyin.com/jingxuan"),
 }
 
 # 从 cookie 里认账号的候选字段（不同站点不一样，取到第一个非空的就够）
@@ -59,6 +61,9 @@ _UIN_COOKIES = (
     "user_id",
     "account_id",
     "DedeUserID",
+    # 抖音登录后的身份 cookie
+    "uid_tt",
+    "uid_tt_ss",
 )
 
 _DEFAULT_DIR = "data/dl_senpai/web_login"
@@ -300,19 +305,24 @@ async def with_context(
         raise WebLoginError('没装 playwright：pip install -e ".[browser]"') from exc
 
     from .browser_agent import _UA, _browser_lock
+    from .browser_stealth import close_page, open_page
 
     async with _browser_lock:
         async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=headless)
+            # 和 browser_agent 走同一套开页逻辑：持久 profile + 反检测脚本。
+            # 评论是最容易被风控抓的动作，指纹不一致会更惨。
+            context, browser, page = await open_page(
+                p,
+                cfg,
+                site=site,
+                headless=headless,
+                storage_state=str(path),
+                persist_path=str(path),
+                viewport={"width": 1280, "height": 900},
+                user_agent=_UA,
+            )
             try:
-                context = await browser.new_context(
-                    locale="zh-CN",
-                    user_agent=_UA,
-                    storage_state=str(path),
-                    viewport={"width": 1280, "height": 900},
-                )
-                page = await context.new_page()
                 page.set_default_timeout(20000)
                 return await fn(page)
             finally:
-                await browser.close()
+                await close_page(context, browser, persist_path=str(path))

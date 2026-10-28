@@ -39,6 +39,7 @@ from .grounding import (
     should_grounding_retry,
 )
 from .person_memory import ImpressionUpdate, strip_impression_markers
+from .msg_format import format_user_turn
 from .web_search import (
     augment_queries_with_intent,
     find_trend_search_queries,
@@ -865,7 +866,9 @@ class SenpaiLLM:
             not interrupt or bool(self.config.person_memory_allow_on_interrupt)
         )
 
-        user_payload = f"{sender_name}：{user_text}"
+        # 前缀形态统一走 msg_format：方括号 + 「说：」，避免模型把发言人名
+        # 当成正文（「失语.：123」被拆开解释过）。
+        user_payload = format_user_turn(sender_name, user_text)
         if (card_enable or mute_enable) and card_candidates_prompt:
             user_payload = f"{user_payload}\n\n{card_candidates_prompt}"
 
@@ -1058,10 +1061,13 @@ class SenpaiLLM:
                 classify_tone,
                 has_comfort_tone,
                 is_casual_prompt,
-                strip_comfort_clauses,
                 shape_bubbles,
-    trim_to_sentence_budget,
+                space_out_commas,
+                strip_bubble_periods,
+                strip_comfort_clauses,
+                trim_to_sentence_budget,
             )
+            from .humanize import guard_identity_confession
 
             strip_enable = bool(
                 getattr(self.config, "comfort_strip_enable", True)
@@ -1081,8 +1087,16 @@ class SenpaiLLM:
                     before_len=len(before),
                     after_len=len(content),
                 )
-        except Exception:  # noqa: BLE001 — 过滤失败绝不能挡住回复
-            pass
+        except Exception as exc:  # noqa: BLE001 — 过滤失败绝不能挡住回复
+            # 出声：2026-10-27 这里吞掉了一个 ImportError（guard 被错塞进 tone 的导入列表），
+            # 结果是安慰腔剪枝、反 AI 味、截断三道工序全部静默失效，测试才发现。
+            # 不挡回复，但必须留下痕迹。
+            log_event(
+                "llm.postprocess_failed",
+                level="warning",
+                where="comfort_strip",
+                error=f"{type(exc).__name__}: {exc}"[:160],
+            )
 
         # 复盘腔 / 点评自己：先把整段自我诊断收成一句（见 humanize.collapse_self_review）。
         #
@@ -1218,7 +1232,30 @@ class SenpaiLLM:
                             before_len=before_len,
                             after_len=len(content),
                         )
+                # 逗号换空格必须放在**截断/拆泡之后**。
+                # 反过来的话逗号一换、句末句号一删，_SENTENCE_SPLIT 就找不到句子边界，
+                # 长回复会被当成一整句整段放过——实测 63 字一句没少，截断彻底失效。
+                # 放最后还有个好处：每条气泡的行末句号都在这里一次清掉。
+                if bool(getattr(self.config, "casual_space_split", True)):
+                    spaced, replaced = space_out_commas(content)
+                    if replaced or spaced != content:
+                        content = spaced
+                        log_event(
+                            "llm.space_split",
+                            replaced=replaced,
+                            after_len=len(content),
+                        )
         except Exception:  # noqa: BLE001 — 截断失败就更不能挡回复
+            pass
+
+        # 身份兜底：把「被发现了对呀」这类半承认整条换掉。
+        # 人设里「绝不承认」写几遍都挡不住（2026-10-27 干跑实测），只能出站扫。
+        try:
+            guarded, slipped = guard_identity_confession(content, context=user_text)
+            if slipped:
+                content = guarded
+                log_event("llm.identity_guard", slip=slipped[:40])
+        except Exception:  # noqa: BLE001 — 兜底失败也不能挡回复
             pass
 
         # 「像不像人」指标：只记录，不改写。

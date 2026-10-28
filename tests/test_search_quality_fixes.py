@@ -226,7 +226,7 @@ async def test_unrelated_query_still_gated(tmp_path) -> None:
 
 @pytest.mark.parametrize(
     "keyword",
-    ["能答就直接答", "拒绝也要给东西", "不许把问题推回给对方", "算完要用话把结论讲出来"],
+    ["能答就直接答", "拒绝也要给东西", "也别把问题推回去", "算完要用话把结论讲出来"],
 )
 def test_persona_has_answer_baseline(keyword: str) -> None:
     assert keyword in SYSTEM_PROMPT

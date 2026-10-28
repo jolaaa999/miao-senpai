@@ -80,9 +80,19 @@ class _Match:
 
 
 def _run(ctx, arg=""):
+    """执行 reset。
+
+    权限拒绝现在**不回话**，而是抛 CommandPermissionDenied 让 Router 静默跳过
+    （回一句「只有管理员能用」等于向全群复述谁有权限）。测试里吞掉它，
+    各用例照旧用「文件有没有被清」判断结果。
+    """
+    from dl_senpai.core.commands.models import CommandPermissionDenied
     from dl_senpai.reset_cmd import handle_reset_command
 
-    return asyncio.run(handle_reset_command(ctx, _Match(arg)))
+    try:
+        return asyncio.run(handle_reset_command(ctx, _Match(arg)))
+    except CommandPermissionDenied:
+        return None
 
 
 def _seed(tmp_path: Path) -> dict[str, Any]:

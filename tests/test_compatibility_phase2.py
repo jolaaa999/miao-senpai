@@ -405,6 +405,14 @@ _ADMIN_ALLOWED_CHANGES = (
     "admin/frontend/src/views/AgentTracesView.vue",
     "admin/frontend/src/router/index.ts",
     "admin/frontend/src/components/AppLayout.vue",
+    # 2026-10-28 人设卡：控制台「学姐自设」页加了一个卡片面板（列/绑/解绑/
+    # 看正文/从 persona.py 导出）。只多了只读与绑定两个动作，不碰 persona.py 的
+    # 既有编辑逻辑 —— 属于「确实为一个明确需求而改」。
+    "admin/backend/internal/services/persona_cards.go",
+    "admin/backend/internal/config/config.go",
+    "admin/frontend/src/views/PersonaView.vue",
+    # 构建产物：每次 vue-tsc -b 都会重写，不该被当作"改动"来评审。
+    "admin/frontend/tsconfig.tsbuildinfo",
 )
 
 

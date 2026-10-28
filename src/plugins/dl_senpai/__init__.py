@@ -71,6 +71,12 @@ if driver is not None:
             f"breaker={'on' if cfg.send_breaker_enable else 'off'}"
             f"({cfg.send_rate_per_minute}/min,{cfg.send_rate_per_hour}/h) "
             f"typing_status={'on' if cfg.typing_status_enable else 'off'} "
+            # 在场状态是这一版「活人味」的骨架：等下文多久、说完先听多久、
+            # 潜水区间。出问题第一个要看这几个数，所以直接打出来。
+            f"presence={'on' if cfg.presence_enable else 'off'}"
+            f"(wait={cfg.pending_wait_ms}ms observe={cfg.presence_observe_ms}ms "
+            f"dive={cfg.presence_dive_min_ms}~{cfg.presence_dive_max_ms}ms "
+            f"pre_sleep={cfg.presence_pre_sleep_ms}ms) "
             f"diary={'on' if cfg.diary_enable else 'off'} "
             f"backfill={'on' if cfg.backfill_enable else 'off'} "
             f"asr={'on' if cfg.asr_enable else 'off'} "
@@ -81,6 +87,9 @@ if driver is not None:
             # B站/小黑盒各自一个开关，横幅里必须能一眼看到（出问题先看这行）
             f"bili={'on' if cfg.bili_enable else 'off'} "
             f"heybox={'on' if cfg.heybox_enable else 'off'} "
+            f"bili_browse={'on' if cfg.bili_browse_enable else 'off'}"
+            f"(every={cfg.bili_browse_interval_min_sec}~{cfg.bili_browse_interval_max_sec}s "
+            f"max={cfg.bili_browse_daily_max}) "
             f"bili_grow={'on' if cfg.bili_grow_enable else 'off'}"
             f"(hour={cfg.bili_grow_hour}) "
             f"bili_inbox={'on' if cfg.bili_inbox_enable else 'off'}"
@@ -144,6 +153,11 @@ if driver is not None:
         from .own_life import own_life_loop
 
         asyncio.create_task(own_life_loop(bot))
+        # 定时消息（喵/定时）：这轮循环只负责「到点发出去」，
+        # 任务本身在 data/dl_senpai/admin/schedule.json 里，重启不丢。
+        from .admin_schedule import timer_loop  # noqa: E402 — 与上面几个循环同一批延迟导入
+
+        asyncio.create_task(timer_loop(bot), name="dl_senpai-timer-loop")
 
         # 她自己刷帖子：隔一阵去小黑盒首页逛逛，有话说就评一句（默认关闭）。
         # 不放在 startup：它要用登录态开浏览器，跟 bot 是否在线无关，
@@ -161,6 +175,16 @@ if driver is not None:
         from .bili_grow import bili_grow_loop
 
         asyncio.create_task(bili_grow_loop())
+
+        # 自主刷B站：看视频、读字幕、点赞、偶尔收藏，写日记/记忆本。默认关闭。
+        from .bili_browse import bili_browse_loop
+
+        asyncio.create_task(bili_browse_loop())
+
+        # 自主刷抖音：走浏览器拦响应（必须登录，慢），只读描述+热评。默认关闭。
+        from .douyin_browse import browse_loop as douyin_browse_loop
+
+        asyncio.create_task(douyin_browse_loop())
 
         # 断线补课：连接是刚刚才建立起来的，所以这里是**唯一**能补的时机。
         # 补课结果不会直接发消息，只写一份摘要等下一轮拼提示词时注入一次。

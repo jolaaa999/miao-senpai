@@ -309,6 +309,20 @@ def limit_assistant_turns(
     return out
 
 
+def _as_message(item: dict[str, Any]) -> dict[str, Any]:
+    """转成 OpenAI messages 形状，但把 ts 一起带上。
+
+    为什么带 ts：调用方要判断「这条是不是昨天的」，才能决定要不要加时间前缀。
+    不带的话，隔夜请求和刚刚说的话在模型眼里完全没有区别（2026-10-28 的
+    「你这BOT怎么还在昨天的话题」就是这么来的）。落盘前上层会剥掉它。
+    """
+    msg: dict[str, Any] = {"role": item["role"], "content": item["content"]}
+    ts = item.get("ts")
+    if isinstance(ts, (int, float)) and ts > 0:
+        msg["ts"] = float(ts)
+    return msg
+
+
 def messages_for_llm_with_recall(
     history: list[dict[str, str]],
     query: str,
@@ -324,7 +338,7 @@ def messages_for_llm_with_recall(
         kept = limit_assistant_turns(
             trim_by_char_budget(history, max_chars), max_assistant_turns
         )
-        return [{"role": m["role"], "content": m["content"]} for m in kept], ""
+        return [_as_message(m) for m in kept], ""
     recent, brief = select_recent_and_recall(
         history,
         query,
@@ -335,4 +349,4 @@ def messages_for_llm_with_recall(
     recent = limit_assistant_turns(
         trim_by_char_budget(recent, max_chars), max_assistant_turns
     )
-    return [{"role": m["role"], "content": m["content"]} for m in recent], brief
+    return [_as_message(m) for m in recent], brief

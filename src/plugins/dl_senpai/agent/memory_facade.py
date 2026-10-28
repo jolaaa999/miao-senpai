@@ -290,6 +290,12 @@ class MemoryFacade:
             max_assistant_turns=int(getattr(cfg, "history_assistant_turns", 0) or 0),
             mood_word=mood_word,
         )
+        # 让模型看得见「这条是昨天的」：否则跨天的旧请求会被当成还没办的事接着办
+        # （2026-10-28 用户原话「你这BOT怎么还在昨天的话题」）。
+        # 必须放在召回之后：前缀会污染关键词匹配，只能在最后一步盖上去。
+        from ..memory import stamp_stale_messages
+
+        history = stamp_stale_messages(history)
         # 召回条目数：brief 非空时按行估算（不解析内容）
         recalled = 0
         if brief:

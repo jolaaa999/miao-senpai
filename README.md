@@ -139,6 +139,154 @@ powershell -ExecutionPolicy Bypass -File .\scripts\install-autostart.ps1
 注意跟 `DL_SENPAI_BUBBLE_MAX` 方向相反：那个管她的话拆成几条，这个管对方的话攒成几条。
 代价是每条回复都会晚一个窗口，觉得慢就把 `DL_SENPAI_BATCH_WINDOW_GROUP_MS` 调小或直接关掉。
 
+## 在场与节奏：等下文 / 先听一会儿 / 潜水
+
+前面几节管的是「怎么把话发出去」，这一节管的是**她什么时候开口**。
+逐条独立掷骰子只能得到「随机的客服」；真人有一份连续的在场状态，
+这一版（`presence.py`）把这套状态显式建起来了，对应 qq-bridge 二代仿真里的
+`qq_wait_for_messages` 与 `qq_set_wake_config`。
+
+- **等下文**：对方这句明显没说完（「我跟你讲」「…但是」「然后」「等一下」，
+  或句尾是逗号/顿号）时，不抢答，把等待窗口拉长到 `DL_SENPAI_PENDING_WAIT_MS`
+  （默认 45 秒），等他补完再一起回。句号/问号/感叹号收尾的消息不受影响，
+  仍走 2.5 秒合并窗口。关掉用 `DL_SENPAI_PENDING_WAIT_ENABLE=false`。
+- **先听一会儿**：她说完话之后 `DL_SENPAI_PRESENCE_OBSERVE_MS`（默认 90 秒）
+  内不随机插嘴——刚说完就再补一条是机器节奏。
+- **潜水**：观察期满、群里也没人说话，就进入 `DL_SENPAI_PRESENCE_DIVE_MIN_MS`
+  ~ `DL_SENPAI_PRESENCE_DIVE_MAX_MS`（默认 3~10 分钟）的潜水：**普通消息叫不醒**
+  她，只有 @ / 召唤词 / 主人能叫醒。@ 和私聊永远必回，不受影响。
+- **同一话题追问上限**：没被叫到时她主动开口，同一话题最多
+  `DL_SENPAI_PRESENCE_TOPIC_POKE_MAX`（默认 2）次；没人接就放下。
+  被 @ 或过了 `DL_SENPAI_PRESENCE_TOPIC_WINDOW_MS` 自动清零。
+- **沉睡前观察**：主动冒泡（`own_life`）之前，群里必须已经安静
+  `DL_SENPAI_PRESENCE_PRE_SLEEP_MS`（默认 5 分钟）。别人正聊着时她不会插一句
+  然后消失。
+
+配套还有一处**出站质检**（`bubble_lint.py`）：气泡被切在「这是哪个番的」后面、
+下一条接「表情包？」这种半句话，出站时合回一条；中文之间的空格（「好的 我看下」）
+改成逗号。两条都可以单独关（`DL_SENPAI_BUBBLE_LINT_ENABLE` /
+`DL_SENPAI_CJK_SPACE_FIX_ENABLE`）。
+
+提示词侧同步注入一段【在场与节奏】（`DL_SENPAI_PRESENCE_HINT_ENABLE`）：
+机制决定她**什么时候被叫醒**，提示词决定她**被叫醒之后怎么说话**，
+两边不一致时模型会写出和节奏相反的话。
+
+## 拍一拍 / 群黑话 / 反馈记录
+
+这三样搬自 qq-bridge，都是「不用说话也能表达的社交动作」。
+
+**拍一拍**（`poke.py`）。之前不只是没有主动戳人的能力，**连被戳都收不到**：
+拍一拍是 notice 事件，而 notice 只接了入群/退群两条旁路，事件被整条丢掉，
+群里有人戳她永远毫无反应。现在：
+
+- 别人戳她 → 写进在场状态（等于被叫到，潜水立刻结束）+ 按概率**回拍**一下（默认 0.65）
+- 她自己想戳人 → 写 `<<<POKE>>>`（戳当前说话人）或 `<<<POKE QQ号>>>
+- 额度比说话严一个量级：同一个人 90 秒内不重复，全群每小时最多 8 次
+
+关掉回拍 `DL_SENPAI_POKE_BACK_ENABLE=false`；整体关 `DL_SENPAI_POKE_ENABLE=false`。
+
+**群黑话词表**（`slang.py`）。群里换梗她只能按字面瞎猜。qq-bridge 是用 LLM
+自动挖词，这边**不做自动挖**——中文 2~4 字的重复串里绝大多数是常用词，
+纯统计挖出来全是噪声。改成她遇到不懂的才记一笔：
+
+1. 她在群里看到听不懂的说法 → `<<<SLANG NEW 说法>>>`（记成待确认）
+2. 主人解释过 → `<<<SLANG ADD 说法=意思>>>`（**只有主人能写**，群友教会她
+   群语言是被投毒最快的入口）
+3. 之后每轮自动注入**已确认**的词表（`DL_SENPAI_SLANG_BRIEF_ENABLE`）
+
+待确认的释义**不注入**：半懂的释义喂回人设，比不认识这个词更糟——她会用错
+还理直气壮。
+
+**反馈记录**（`feedback.py`）。她自己觉得哪句不像人、哪次没答上来，写
+`<<<FEEDBACK 类别|一句话>>>` 落到 `data/dl_senpai/feedback/feedback.jsonl`。
+类别白名单：不像人 / 没答上来 / 被冷落 / 群友不满 / 被夸。
+**只写不判**——让程序按自评自动调参，最后只会收紧成客服。写的时候也不许
+在对话里说「我记下了」。
+
+## 人设卡
+
+人设以前只有一份，跟业务代码挤在 `persona.py` 里：想给某个群换个语气，只能改
+Python。现在对齐 qq-bridge 的 `roles/<name>.md`——
+
+    data/dl_senpai/personas/<任意名>.md     一张卡 = 一份「她是谁」
+    data/dl_senpai/personas/bindings.json   哪个群用哪张（自动维护，别手改）
+
+    ---
+    id: 学姐2
+    name: 小满
+    groups: 1050332675
+    description: 那个群更嘴硬的一版
+    ---
+    （正文就是人设本身，写多长都行）
+
+    /人设            看有哪些卡、本会话在用什么
+    /人设 学姐2      本会话切过去（下一句生效）
+    /人设 默认       取消绑定，回到 persona.py
+    /人设 体检       逐张检查（与 persona.py 同一套 lint）
+
+控制台「学姐自设」页也有卡片面板（列 / 绑到某个会话 / 解绑 / 看正文 / 把当前人设
+导成一张卡），绑定时立即生效、不用重启——它写的就是同一个 `bindings.json`，
+bot 侧按 mtime 热加载。
+
+命令行等价物：`python scripts\persona_card.py list|check|bind|unbind|export`。
+`export` 把当前 `persona.py` 的人设导成一张卡（`data/dl_senpai/personas/学姐.md`
+就是这么来的），并在 front-matter 里记下正文指纹 `source_hash`——之后
+`list`/`check` 会用 `=` / `≠` 标出这张副本与 `persona.py` 是否还一致。
+两份文案并存时，「改哪份算数」必须能一眼看出来，否则就是
+「改了说明书、没改真正生效的那份」。
+
+**当前这张卡没有绑定任何会话**，线上仍走 `persona.py`（你习惯直接改那里）。
+想让她以卡为准：`DL_SENPAI_PERSONA_CARD_DEFAULT=学姐`，或对某个群 `/人设 学姐`。
+
+几条刻意的决定：
+
+- **没卡 = 完全等于改造前**。目录空、卡读不出来、开关关掉，一律回落到
+  `persona.py` 的 `SYSTEM_PROMPT`，输出逐字不变（有守卫测试盯着）。这层功能
+  不该让「她是谁」变成可能不可用的状态。
+- **卡只换人设，不换仿真层**。格式说明、场景补充、工具说明、各项简报照旧叠在
+  后面——卡管「她是谁」，那些管「怎么说话才像人」。
+- **不注册成模型工具**。人设卡决定她是谁，一旦成为模型可调用的工具，群里任何
+  一句「把你自己换成⋯⋯」就能生效。切换只认管理员（`DL_SENPAI_AGENT_ADMIN_QQ`）。
+- **解析顺序**：显式绑定 > 卡里声明的 `groups` > `DL_SENPAI_PERSONA_CARD_DEFAULT`
+  > 回落 persona.py。绑定的决定压过文件声明：管理员点过名的那张才算数。
+- **按卡切换微调风格没做**。`speak_styles` 是全局单例，按群切会串台（A 群换软萌，
+  B 群跟着变），比不切更糟。等风格库支持按会话解析再说。
+
+## 表情本子 / 自画像 / 图片归一化
+
+**表情本子**（`sticker_book.py`）。她本来就会自动收集群里的表情包，但库是黑盒：
+几百张图她一张都看不见，只能按关键词碰运气挑——跟 qq-bridge 的
+`list_stickers` / `collect_sticker` / `sticker_note` 差着一整层。现在：
+
+    <<<EMOJI>>>                               翻最近收的（编号 1 是最新的）
+    <<<EMOJI 3>>>                             把第 3 张发出来看看
+    <<<EMOJI NOTE 3 阴阳人|#阴阳 #无语>>>      写备注 + 追加标签
+    <<<EMOJI COLLECT 123456>>>                把某条消息里的表情手动收进来
+
+编号只按「最新的是第 1 张」算：她看不到入库顺序，只看得见列表，两个顺序必须
+一致。marker 用 `EMOJI` 而不是 `STICKERBOOK`——`<<<STICKER\s*([^>]+?)>>>`
+那个正则会把 STICKERBOOK 当成 STICKER 的参数吞掉。
+
+**自画像**（`portrait.py`）。群里迟早有人问「你长什么样」。以前只能现编，或者
+用生图模型现画——现画的问题是每次都不一样，群里立刻有人说「上次不是长这样」。
+现在素材放 `data/dl_senpai/self/`，她发出去的是**固定的**自己：
+
+    <<<SELFIMAGE>>>         随机一张
+    <<<SELFIMAGE 全身>>>    文件名带「全身」的那张
+
+目录为空时工具会明确告诉模型「你没有图，别编」，让它自然岔开，而不是硬撑一张。
+`DL_SENPAI_SELF_CHARACTER` 填角色名还能回落到 `character_references` 里已核验的
+参考图（跟生图共用一套素材）。
+
+**图片归一化**（`media_normalize.py`）。搬自 qq-bridge 的 media-normalize：
+
+- 长边压到 `DL_SENPAI_MEDIA_MAX_SIDE`（默认 1280）、体积压到
+  `DL_SENPAI_MEDIA_MAX_BYTES`（默认 1.5MB）：几千像素的原图视觉模型吃不下，
+  中转站按字节计费还会直接 400，而失败时她只会说「图看不清」
+- 动图抽 6 帧拼成网格：视觉模型只看得到第一帧，等于只看了一眼开头
+- 已经够小的图**原样不动**（重编码必然掉画质）；压不动就退回原始字节——
+  宁可发张大图，也不能因为图处理崩掉整条回复
+
 ## 改完先自检
 
 ```powershell

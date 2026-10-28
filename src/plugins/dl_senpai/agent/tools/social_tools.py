@@ -22,6 +22,7 @@ from .registry import FailurePolicy, ToolDefinition
 __all__ = ["build_web_extra_tools", "execute_bili", "execute_heybox"]
 
 BILI_MARKER = "BILI"
+BILIMEMO_MARKER = "BILIMEMO"
 HEYBOX_MARKER = "HEYBOX"
 
 BILI_PROMPT_TEXT = """你可以自己上 B 站看东西，也能看到「谁回了我」。
@@ -41,6 +42,18 @@ BILI_PROMPT_TEXT = """你可以自己上 B 站看东西，也能看到「谁回�
   不要描述视频里出现了什么、说了什么、弹幕怎么飘
 - 一次只看一条，别连着刷十个视频；别人的问题跟你刷 B 站无关就别刷
 - 不要暴露 marker，也不要说「正在调用接口」这种机械话"""
+
+BILIMEMO_PROMPT_TEXT = """你有一本「B站刷到过、真记住了」的小本子。
+
+用法：
+    <<<BILIMEMO>>>                # 最近记住的几条
+    <<<BILIMEMO 5>>>              # 最近 5 条
+    <<<BILIMEMO 买车>>>            # 按主题搜
+
+说明：
+- 主人问「你最近刷到啥」「你记得那个XX吗」就查这里，别凭空编
+- 记住的是**看过标题和文字**的东西，不是看过画面：别说「我看了那个视频，拍得真好」
+- 本子里没有就说没有，别为了接话硬凑"""
 
 HEYBOX_PROMPT_TEXT = """你可以自己上小黑盒逛、搜、看帖子（只读）。
 
@@ -92,6 +105,70 @@ def _visible_bili(context: Any) -> bool:
 def _visible_heybox(context: Any) -> bool:
     cfg = _cfg(context)
     return bool(getattr(cfg, "heybox_enable", True)) if cfg is not None else False
+
+
+_BILIMEMO_RE = re.compile(r"<<<BILIMEMO(?:\s+([^>\n]*?))?\s*(?:>>>|＞＞＞)", re.IGNORECASE)
+
+
+def _parse_bilimemo(text: str) -> tuple[str, list[ToolCall]]:
+    """解析 <<<BILIMEMO ...>>>。不写参数就是「最近记住的」。"""
+    calls: list[ToolCall] = []
+    for match in _BILIMEMO_RE.finditer(text or ""):
+        argument = (match.group(1) or "").strip()
+        if not argument:
+            calls.append(
+                ToolCall(
+                    tool_name="bili_memo",
+                    arguments={"action": "recent", "limit": 6},
+                    marker=BILIMEMO_MARKER,
+                )
+            )
+        elif argument.isdigit():
+            calls.append(
+                ToolCall(
+                    tool_name="bili_memo",
+                    arguments={"action": "recent", "limit": max(1, min(int(argument), 20))},
+                    marker=BILIMEMO_MARKER,
+                )
+            )
+        else:
+            calls.append(
+                ToolCall(
+                    tool_name="bili_memo",
+                    arguments={"action": "search", "query": argument, "limit": 6},
+                    marker=BILIMEMO_MARKER,
+                )
+            )
+    if calls:
+        stripped = _BILIMEMO_RE.sub("", text or "")
+        return stripped, calls
+    return text or "", calls
+
+
+async def execute_bili_memo(context: Any, call: ToolCall) -> ToolResult:
+    """查她自己那本「刷到过、记住了」的小本子。纯读本地文件，不碰网络。"""
+    from ... import bili_memory as bmemo
+
+    args = call.arguments or {}
+    cfg = _cfg(context)
+    if cfg is None:
+        return ToolResult(
+            tool_name="bili_memo",
+            tool_call_id=call.id,
+            success=False,
+            error="配置读不到",
+            error_type="no_config",
+        )
+    query = str(args.get("query") or "").strip()
+    limit = int(args.get("limit") or 6)
+    rows = bmemo.search(cfg, query, limit=limit) if query else bmemo.search(cfg, "", limit=limit)
+    return ToolResult(
+        tool_name="bili_memo",
+        tool_call_id=call.id,
+        success=True,
+        output=bmemo.render(rows, limit=limit),
+        data={"count": len(rows), "query": query},
+    )
 
 
 def _parse_bili(text: str) -> tuple[str, list[ToolCall]]:
@@ -534,6 +611,34 @@ def build_web_extra_tools(cfg: Any = None) -> list[ToolDefinition]:
                 continuation=Continuation.RETURN_TO_MODEL,
                 failure_policy=FailurePolicy.RETURN_TO_MODEL,
                 visibility=_visible_bili,
+                owner="social_layer",
+                side_effect=False,
+            )
+        )
+    if bool(getattr(cfg, "bili_enable", True)):
+        tools.append(
+            ToolDefinition(
+                name="bili_memo",
+                description="查她自己记住的B站内容（本地小本子，只读）",
+                marker=BILIMEMO_MARKER,
+                prompt_text=BILIMEMO_PROMPT_TEXT,
+                parser=_parse_bilimemo,
+                executor=execute_bili_memo,
+                parameter_schema={
+                    "type": "object",
+                    "properties": {
+                        "action": {"type": "string", "enum": ["recent", "search"]},
+                        "query": {"type": "string", "description": "主题关键词"},
+                        "limit": {"type": "integer", "description": "条数"},
+                    },
+                    "required": ["action"],
+                },
+                permission="bili.memo",
+                timeout=10.0,
+                rate_limit=1.0,
+                priority=54,
+                continuation=Continuation.RETURN_TO_MODEL,
+                failure_policy=FailurePolicy.RETURN_TO_MODEL,
                 owner="social_layer",
                 side_effect=False,
             )

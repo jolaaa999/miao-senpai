@@ -226,8 +226,13 @@ def test_render_heybox_search_points_to_read() -> None:
 
 
 def test_build_tools_respects_enable() -> None:
+    """关掉开关的工具连名字都不该注册。
+
+    bili_memo（查她自己存下的 B 站口味记忆）跟着 bili_enable 一起开关：
+    没有 bili 能力时这个工具也没有意义，所以它和 bili 同进退，不是漏写。
+    """
     cfg = _Cfg()
-    assert {t.name for t in build_web_extra_tools(cfg)} == {"bili", "heybox"}
+    assert {t.name for t in build_web_extra_tools(cfg)} == {"bili", "bili_memo", "heybox"}
 
     cfg.bili_enable = False
     assert {t.name for t in build_web_extra_tools(cfg)} == {"heybox"}

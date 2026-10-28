@@ -87,6 +87,14 @@ def test_prompt_registry_driven_equals_legacy(
     # legacy 侧是冻结的 persona 原文，对它施加**同一层**可见性过滤后再逐字
     # 比对——守卫语义不变：证明除这层已声明的过滤外没有其它漂移。
     expected = apply_tool_visibility_filter(legacy, set(tool_names))
+    # 2026-10-26：提示词末尾新增「【要动手时怎么写】」速查块，只由注册表路径产出
+    # （persona.py 是冻结的生产资产，不往里加东西）。
+    # 这里把这块差异**显式**拼进期望值，守卫语义不变：除这块之外两条路径
+    # 必须逐字一致，任何别的漂移都还会被抓到。
+    if not interrupt:
+        cheatsheet = builder._marker_cheatsheet([tools[n] for n in tool_names])
+        if cheatsheet:
+            expected = f"{expected}\n{cheatsheet}"
     assert built.text == expected, f"{label} 的 prompt 文本不一致"
 
 

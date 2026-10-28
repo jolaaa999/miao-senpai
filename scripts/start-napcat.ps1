@@ -53,6 +53,19 @@ if ($running) {
     exit 0
 }
 
+# 外壳不在，但内核可能还活着：实测过外壳退出后 SnowLuma 的 node 会裸跑，
+# 并因为写日志的管道断了疯狂刷 EPIPE（一分钟 50MB，最后把 WebSocket 拖断）。
+# 这种孤儿必须先清掉，否则新外壳起来会和它抢端口/双开。
+$orphans = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+    $_.Name -eq "node.exe" -and $_.ExecutablePath -like "*NapCatQQ Desktop*"
+}
+foreach ($o in $orphans) {
+    Write-Log "Killing orphan SnowLuma kernel pid=$($o.ProcessId)"
+    try { Stop-Process -Id $o.ProcessId -Force -ErrorAction Stop }
+    catch { Write-Log "ERROR: kill $($o.ProcessId) failed: $($_.Exception.Message)" }
+}
+if ($orphans) { Start-Sleep -Seconds 3 }
+
 Write-Log "Starting: $exe"
 $workdir = Split-Path -Parent $exe
 Start-Process -FilePath $exe -WorkingDirectory $workdir

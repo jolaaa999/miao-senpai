@@ -131,7 +131,7 @@ async def test_snapshot_plain_chat() -> None:
     assert {"role": "user", "content": "之前的话"} in fake.messages_at(0)
 
     # 当前输入前缀发送者名
-    assert fake.last_user_at(0).startswith("小明：")
+    assert fake.last_user_at(0).startswith("[小明] 说：")
 
     # 无 tool 执行
     assert result.card_actions == []
@@ -523,7 +523,7 @@ async def test_snapshot_card_recovery_retry() -> None:
 
     hist2 = [
         *[],
-        {"role": "user", "content": "小明：改名片"},
+        {"role": "user", "content": "[小明] 说：改名片"},
         {"role": "assistant", "content": first.text},
     ]
     second = await llm.chat(
