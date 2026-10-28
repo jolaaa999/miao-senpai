@@ -19,7 +19,7 @@ from typing import Any
 
 from ...observability.logging import log_event
 from .models import Command, CommandMatch
-from .registry import CommandRegistry
+from .registry import PERMISSION_ADMIN, CommandRegistry
 
 # 优先级：数值小者先匹配。
 # 这是**语义优先级**，不是把 NoneBot 的 priority 数字照搬过来：
@@ -34,6 +34,7 @@ NS_RESET = "reset"
 NS_CHECKIN = "checkin"
 NS_SHOP = "shop"
 NS_AFFECTION = "affection"
+NS_PERSONA = "persona"
 
 
 def _pattern_list(pairs: Any) -> list[tuple[str, Any]]:
@@ -49,6 +50,8 @@ def build_builtin_commands() -> list[Command]:
     """
     from ...affection import _CMD_PATTERNS as AFFECTION_PATTERNS
     from ...checkin import _CMD_PATTERNS as CHECKIN_PATTERNS
+    # 群友指令（抽签/骰子/计算/群信息…）：另一套权限模型，单独模块
+    from ...member_commands import build_member_commands
     from ...shop import (
         _BUY_PATTERN,
         _HELP_PATTERN,
@@ -74,6 +77,12 @@ def build_builtin_commands() -> list[Command]:
         from ...handlers import dispatch_verify_command
 
         await dispatch_verify_command(ctx, match)
+
+    # -- 人设卡（切换本会话用哪张卡）--
+    async def handle_persona_card_command(ctx: Any, match: CommandMatch) -> None:
+        from ...personas import handle_persona_command
+
+        await handle_persona_command(ctx, match)
 
     # -- 重置（清理被污染的本群上下文）--
     async def handle_reset_command(ctx: Any, match: CommandMatch) -> None:
@@ -126,13 +135,25 @@ def build_builtin_commands() -> list[Command]:
         Command(
             name="reset",
             namespace=NS_RESET,
-            # 严格匹配整个「reset喵」：写宽了（比如只要含 reset）会把
-            # 正常聊天里的英文单词也当成命令短路掉，用户永远收不到回复。
-            # 参数部分只允许中文层级词或空白，其余一律走用法提示。
+            # 认「喵/reset」「喵reset」「/reset」「reset喵」四种写法，但**整句**匹配：
+            # 放宽到「含 reset」会把正常聊天里的英文单词当命令短路掉，
+            # 用户就永远收不到回复。参数只允许中文层级词或空白，其余走用法提示。
             patterns=[("reset", _RESET_PATTERN)],
             handler=handle_reset_command,
             description="重置本群上下文（历史 / 卡片 / 风格）",
             priority=PRIORITY_COMMAND,
+            permission=PERMISSION_ADMIN,
+            consume=True,
+            owner="builtin",
+        ),
+        Command(
+            name="persona",
+            namespace=NS_PERSONA,
+            patterns=[("persona", _PERSONA_PATTERN)],
+            handler=handle_persona_card_command,
+            description="人设卡：查看 / 切换本会话用哪张卡（管理员）",
+            priority=PRIORITY_COMMAND,
+            permission=PERMISSION_ADMIN,
             consume=True,
             owner="builtin",
         ),
@@ -147,7 +168,7 @@ def build_builtin_commands() -> list[Command]:
             owner="builtin",
             guard=_shop_guard,
         ),
-    ]
+    ] + build_member_commands()
 
 
 # 认证消息的语法：具体判定在 guard 里（需要 pending 状态），
@@ -156,10 +177,17 @@ import re as _re  # noqa: E402
 
 _VERIFY_PATTERN = _re.compile(r"^(认证|验证|新人认证)$")
 
-# 「reset喵」必须整体匹配。捕获组是可选参数（历史/卡片/风格/全部），
-# 空参数等价于只清对话历史 —— 这是最常用也最轻的一档。
+# 人设卡命令。为什么不写成「只要含人设」：「人设崩了」「这人设真好」是正常
+# 聊天，被当成命令短路掉，用户就永远收不到回复。带斜杠的显式命令 +
+# 不带斜杠的「人设卡」（三个字，日常几乎不会这么说话）才认。
+_PERSONA_PATTERN = _re.compile(r"^(?:/人设|人设卡)(?:\s+(?P<arg>.+?))?\s*$")
+
+# 认的写法（都等价）：喵/reset、喵reset、/reset、reset喵、reset。
+# 「喵/」前缀在 registry 里已被归一化成「/reset」再进这里，
+# 所以这里只需处理斜杠、喵前缀、喵后缀这三种残形。
 _RESET_PATTERN = _re.compile(
-    r"^\s*reset\s*喵\s*(历史|对话|记忆|卡片|记忆卡|风格|群风格|全部|所有)?\s*$",
+    r"^\s*(?:喵\s*/?\s*)?/?\s*reset\s*喵?\s*"
+    r"(历史|对话|记忆|卡片|记忆卡|风格|群风格|全部|所有)?\s*$",
     _re.IGNORECASE,
 )
 

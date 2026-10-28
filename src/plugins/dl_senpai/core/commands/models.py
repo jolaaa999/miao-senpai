@@ -36,6 +36,22 @@ class CommandMatch:
 
 
 # 流程钩子签名：(context) -> bool；返回 False 表示本命令不适用
+class CommandPermissionDenied(Exception):
+    """命令命中了，但这个发言者没有权限。
+
+    为什么用异常，而不是让 handler 返回 False 或回一句「你没权限」：
+
+    - 命令确实命中了（这条输入就是给指令用的），只是这个人不许用；
+    - Router 需要**静默跳过且不 consume**——回一句等于向全群复述谁有权限，
+      consume 了又等于把消息吃掉，AI 连正常接话都做不到；
+    - 它也不能按「代码报错」处理，那会打 warning，真正的异常会被淹掉。
+
+    所以给一个专用类型，让 Router 一眼分得清「没权限 / 正常 / 出 bug」三种情况。
+    定义在 models 而不是 admin_commands：reset 与 persona 也要用它，
+    不该为了一个异常去依赖「管理员指令」那个模块。
+    """
+
+
 CommandGuard = Callable[[Any], bool]
 # 处理器签名：(context, match) -> None（是否回复由内部决定）
 CommandHandler = Callable[[Any, CommandMatch], Any] | Callable[[Any, CommandMatch], Awaitable[Any]]
@@ -75,6 +91,10 @@ class Command:
     enabled: bool = True
     owner: str = ""
     guard: CommandGuard | None = None
+    # 允许非管理员用「喵」前缀触发本条命令（内容再按身份区分）。
+    # 只给 help 用：群友发「喵help」要能看到自己能用的指令，
+    # 而不是被「喵 = 管理员专用」整条规则静默吞掉。
+    open_admin_prefix: bool = False
     # 注册后由 registry 填充：编译好的 (action, regex) 列表
     _compiled: list[tuple[str, Pattern[str]]] = field(default_factory=list, repr=False)
 
@@ -130,4 +150,10 @@ def _as_pattern(value: Any) -> Pattern[str]:
     return re.compile(str(value))
 
 
-__all__ = ["Command", "CommandMatch", "CommandHandler", "CommandGuard"]
+__all__ = [
+    "Command",
+    "CommandMatch",
+    "CommandHandler",
+    "CommandGuard",
+    "CommandPermissionDenied",
+]
