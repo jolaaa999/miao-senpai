@@ -44,14 +44,17 @@ _PICK_INSTRUCTION = """你在替一个 QQ 群里的学姐（真人感、爱打�
 
 _TALK_INSTRUCTION = """你在替一个 QQ 群里的学姐（真人感、爱打游戏、嘴不太甜）看小黑盒帖子。
 
-看完正文，判断她会不会想在评论区说一句。
-- 想说的是**短的一句两句**，像真人随手打字：接梗、补充经验、吐槽半句、问一句
+**既然点开看完了，就在评论区说一句。** 不是每篇都要深刻，随手一句就行：
+- 短的一句两句，像真人打字：接梗、补充自己的经验、吐槽半句、问一句
 - 不要总结全文，不要夸作者，不要"感谢分享"，不要写成小作文
 - 不提问式套近乎，不带链接、不带联系方式
-- 如果没什么好说的，就别说——多半时候是没什么好说的
+
+只有这些情况可以不说（comment 给 false）：
+- 整帖是广告、抽奖、引战、纯标题党，没有任何可接的东西
+- 正文短到你看不出在讲什么
 
 只输出一行 JSON：
-{"comment": true/false, "text": "<要说的话，不想说就留空>"}"""
+{"comment": true/false, "text": "<要说的话>"}"""
 
 
 _REPLY_INSTRUCTION = """有人在你的评论下面回了一句。你在纠结要不要接话。
@@ -91,6 +94,64 @@ def recent_log(cfg: Any, limit: int = 10) -> list[dict[str, Any]]:
     return rows
 
 
+# 一天里的活跃度权重：晚上最密、午休次之、凌晨最稀。
+# 为什么不均匀：人是"扎堆刷手机"的，固定间隔反而是最容易识别的机器特征。
+# 数值含义是"相对频率"，实际间隔 = 基础间隔 / 权重。
+_HOUR_WEIGHT = {
+    0: 0.55, 1: 0.5, 2: 0.5,
+    3: 0.0, 4: 0.0, 5: 0.0, 6: 0.0, 7: 0.0,   # 静默时段，权重 0 表示不刷
+    8: 1.1, 9: 1.3, 10: 1.3, 11: 1.3,
+    12: 1.9, 13: 2.0,                            # 午休：手机上最容易一直在看
+    14: 1.2, 15: 1.2, 16: 1.2, 17: 1.3,
+    18: 1.7, 19: 1.8,
+    20: 2.1, 21: 2.2, 22: 2.1, 23: 1.6,          # 晚上是全天高峰
+}
+
+
+def _hour_weight(hour: int) -> float:
+    return float(_HOUR_WEIGHT.get(int(hour) % 24, 1.0))
+
+
+def _schedule_path(cfg: Any):
+    from pathlib import Path
+
+    raw = str(getattr(cfg, "heybox_browse_schedule_file", "") or "")
+    return Path(raw or "data/dl_senpai/heybox_browse_schedule.json")
+
+
+def _today_count(cfg: Any) -> int:
+    """今天已经逛了几次。跨天自动归零。"""
+    import json
+
+    from pathlib import Path
+
+    path: Path = _schedule_path(cfg)
+    today = datetime.now().strftime("%Y-%m-%d")
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return 0
+    if str(data.get("date") or "") != today:
+        return 0
+    return int(data.get("count") or 0)
+
+
+def _bump_today(cfg: Any) -> int:
+    import json
+
+    path = _schedule_path(cfg)
+    today = datetime.now().strftime("%Y-%m-%d")
+    count = _today_count(cfg) + 1
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps({"date": today, "count": count}, ensure_ascii=False), encoding="utf-8"
+        )
+    except OSError:
+        pass
+    return count
+
+
 def _in_quiet_hours(cfg: Any, now: datetime | None = None) -> bool:
     """深夜不刷：跟她自己发消息的静默时段保持一致。"""
     hour = (now or datetime.now()).hour
@@ -99,6 +160,45 @@ def _in_quiet_hours(cfg: Any, now: datetime | None = None) -> bool:
     if start == end:
         return False
     return start <= hour < end if start < end else (hour >= start or hour < end)
+
+
+def _seconds_until_quiet_end(cfg: Any, now: datetime | None = None) -> float:
+    """离静默结束还有多久。已经不在静默期就返回 0。"""
+    from datetime import timedelta
+
+    current = now or datetime.now()
+    if not _in_quiet_hours(cfg, current):
+        return 0.0
+    end_hour = int(getattr(cfg, "own_life_quiet_end", 8) or 8)
+    target = current.replace(hour=end_hour, minute=0, second=0, microsecond=0)
+    if target <= current:
+        target = target + timedelta(days=1)
+    # 加几分钟随机，别每天八点零分零秒准时上线
+    return (target - current).total_seconds() + random.randint(120, 900)
+
+
+def _next_gap_seconds(cfg: Any) -> int:
+    """下一次多久之后逛。基础间隔取配置区间，再按当前小时的活跃度压缩/拉长。"""
+    low = int(getattr(cfg, "heybox_browse_interval_min_sec", 3600) or 3600)
+    high = int(getattr(cfg, "heybox_browse_interval_max_sec", 10800) or 10800)
+    low, high = min(low, high), max(low, high)
+
+    # 落在静默期就直接睡到静默结束
+    quiet_wait = _seconds_until_quiet_end(cfg)
+    if quiet_wait > 0:
+        return int(quiet_wait)
+
+    weight = max(0.2, _hour_weight(datetime.now().hour))
+    gap = random.uniform(low, high) / weight
+
+    # 偶发连刷：刚放下手机又点开，是人的常态，也是节奏最不像脚本的地方
+    if random.random() < float(getattr(cfg, "heybox_browse_burst_probability", 0.12) or 0):
+        gap = random.uniform(120, 480)
+
+    # 上限是硬约束：主人要求"每两小时内必须刷一篇"，所以基础间隔再大也不许超过它。
+    # 原来写死 5 小时，遇到低谷时段（权重 0.5）会拉出 4 小时空档，等于没做到。
+    max_gap = int(getattr(cfg, "heybox_browse_max_gap_sec", 7200) or 7200)
+    return int(max(60, min(gap, max(600, max_gap))))
 
 
 def _first_json(text: str) -> dict[str, Any]:
@@ -187,6 +287,42 @@ async def answer_messages(
     return outcomes
 
 
+def _avoid_path(cfg: Any) -> Path:
+    """撞过验证的帖子记在哪。"""
+    raw = str(getattr(cfg, "heybox_avoid_file", "") or "")
+    return Path(raw) if raw else Path("data") / "dl_senpai" / "heybox_avoid.json"
+
+
+def _avoid_load(cfg: Any) -> dict[str, float]:
+    """读避让名单，顺手把过期的扔掉。"""
+    path = _avoid_path(cfg)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    ttl = float(getattr(cfg, "heybox_avoid_ttl_sec", 21600) or 21600)
+    now = time.time()
+    return {k: float(v) for k, v in (data or {}).items() if isinstance(v, (int, float)) and now - float(v) < ttl}
+
+
+def _avoid_mark(cfg: Any, link_id: str) -> None:
+    """把撞了验证的帖子记下来。
+
+    为什么这么做：同一条链接反复撞验证最容易把账号顶死——
+    平台看到的是"这个访客一直在刷同一个被拦的页面"。换一篇比硬顶划算。
+    """
+    if not link_id:
+        return
+    data = _avoid_load(cfg)
+    data[link_id] = time.time()
+    path = _avoid_path(cfg)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    except OSError:
+        pass
+
+
 async def browse_once(cfg: Any, *, llm: Any = None, force: bool = False) -> dict[str, Any]:
     """刷一次：看首页 -> 挑一篇读 -> 想说就说。
 
@@ -229,6 +365,16 @@ async def browse_once(cfg: Any, *, llm: Any = None, force: bool = False) -> dict
         _append_log(cfg, record)
         return record
 
+    # 撞过验证的帖子短期内不再出现：换个目标比硬顶同一篇划算
+    avoid = _avoid_load(cfg)
+    if avoid:
+        record["avoided"] = sum(1 for p in posts if p.link_id in avoid)
+        posts = [p for p in posts if p.link_id not in avoid]
+        if not posts:
+            record["skipped"] = "all_avoided"
+            _append_log(cfg, record)
+            return record
+
     listing = "\n".join(
         f"{i}. {p.title[:50]}（{p.topics[:16]}，{p.comments} 评）{p.desc[:60]}"
         for i, p in enumerate(posts, 1)
@@ -245,16 +391,33 @@ async def browse_once(cfg: Any, *, llm: Any = None, force: bool = False) -> dict
     post = posts[index - 1]
     record["link_id"] = post.link_id
     record["title"] = post.title[:60]
-    try:
-        doc = await hs.heybox_read(post.link_id, cfg=cfg)
-        text = (getattr(doc, "text", "") or "").strip()
-    except Exception as exc:  # noqa: BLE001
-        record["error"] = f"read:{type(exc).__name__}:{exc}"
-        _append_log(cfg, record)
-        return record
+    # 读正文要重试一次：小黑盒的风控是"闪一下"的，同一秒读是 0 字，
+    # 过两秒再读往往就好了。2026-10-27 实测：12:32~15:03 连续 4 次 0 字，
+    # 16:12 再读同一篇立刻拿到 1993 字——所以别拿一次失败就认。
+    text = ""
+    read_error = ""
+    for attempt in range(2):
+        try:
+            doc = await hs.heybox_read(post.link_id, cfg=cfg)
+            text = (getattr(doc, "text", "") or "").strip()
+        except Exception as exc:  # noqa: BLE001
+            read_error = f"read:{type(exc).__name__}:{exc}"
+            text = ""
+        if len(text) >= 200:
+            break
+        if attempt == 0:
+            import asyncio as _asyncio
+
+            await _asyncio.sleep(2.5)
     record["read_chars"] = len(text)
+    if read_error:
+        record["error"] = read_error[:200]
     if len(text) < 200:
+        # 连着两次都拿不到字，基本就是被风控了：这时候继续按 2 小时的节奏撞
+        # 只会越撞越死，标记 blocked 让循环退避（见 browse_loop）。
         record["skipped"] = "empty_text"
+        record["blocked"] = True
+        _avoid_mark(cfg, str(record.get("link_id") or ""))
         _append_log(cfg, record)
         return record
 
@@ -272,7 +435,9 @@ async def browse_once(cfg: Any, *, llm: Any = None, force: bool = False) -> dict
     wants = bool(decision.get("comment"))
     comment_text = str(decision.get("text") or "").strip()
     record["wants_comment"] = wants
-    if not wants or not comment_text:
+    # 主人定的口味是「刷了就说」，所以这里不再让模型的一票否决生效：
+    # 只要它给出了文案就发。模型说 false 却没给文案，才算真没什么可说。
+    if not comment_text:
         record["skipped"] = "nothing_to_say"
         _append_log(cfg, record)
         return record
@@ -299,9 +464,12 @@ async def browse_once(cfg: Any, *, llm: Any = None, force: bool = False) -> dict
 
 
 async def browse_loop() -> None:
-    """后台循环：隔一阵让她自己去逛逛。
+    """后台循环：按人的作息去逛，不是掐着秒表去逛。
 
-    间隔是随机的（默认 1~3 小时）：固定间隔是最容易被识别的机器特征。
+    频率靠三层叠出来，而不是把一个固定间隔调小：
+    1. 小时权重（_HOUR_WEIGHT）：晚上/午休密，凌晨不刷
+    2. 偶发连刷：小概率"刚放下又点开"
+    3. 每日上限 + 撞验证冷静期：把总量封死，出事自动退避
     """
     from nonebot import logger
 
@@ -314,15 +482,49 @@ async def browse_loop() -> None:
         "dl_senpai heybox_browse loop started "
         f"interval={getattr(cfg, 'heybox_browse_interval_min_sec', 3600)}~"
         f"{getattr(cfg, 'heybox_browse_interval_max_sec', 10800)}s "
+        f"daily_max={getattr(cfg, 'heybox_browse_daily_max', 16)} "
         f"p_comment={getattr(cfg, 'heybox_browse_comment_probability', 0.35)}"
     )
     while True:
-        low = int(getattr(cfg, "heybox_browse_interval_min_sec", 3600) or 3600)
-        high = int(getattr(cfg, "heybox_browse_interval_max_sec", 10800) or 10800)
-        await asyncio.sleep(random.randint(max(60, min(low, high)), max(low, high)))
+        daily_max = int(getattr(cfg, "heybox_browse_daily_max", 16) or 16)
+        gap = _next_gap_seconds(cfg)
+
+        # 今天已经逛够了：直接睡到明天，别靠"再想想"来刹车
+        if _today_count(cfg) >= daily_max > 0:
+            gap = max(gap, random.randint(3600, 9000))
+
+        await asyncio.sleep(max(60, gap))
+
+        if _in_quiet_hours(cfg):
+            continue
+        if _today_count(cfg) >= daily_max > 0:
+            continue
+
+        _bump_today(cfg)
         try:
             record = await browse_once(cfg)
             if record.get("commented"):
                 logger.info(f"dl_senpai heybox_browse commented link={record.get('link_id')}")
+            if record.get("blocked"):
+                # 读不到字 = 被风控了。退避多久由 heybox.note_captcha 决定：
+                # 第一次 25 分钟，连着第二次才 3 小时（原来一律 3 小时，一天睡掉一半）。
+                from . import heybox as _hb
+
+                backoff = int(_hb.read_cooldown_remaining() or 0) or int(
+                    getattr(cfg, "heybox_captcha_backoff_sec", 10800) or 10800
+                )
+                logger.warning(
+                    f"dl_senpai heybox_browse blocked (read_chars={record.get('read_chars')}) "
+                    f"backoff {backoff}s"
+                )
+                await asyncio.sleep(max(600, backoff))
         except Exception as exc:  # noqa: BLE001 — 逛失败不该拖垮循环
-            logger.warning(f"dl_senpai heybox_browse tick failed: {type(exc).__name__}: {exc}")
+            text = f"{type(exc).__name__}: {exc}"
+            logger.warning(f"dl_senpai heybox_browse tick failed: {text}")
+            # 撞上人机验证/被限流就冷静一阵：这种时候继续重试只会越试越死
+            if "人机验证" in text or "show_captcha" in text or "HeyboxError" in text:
+                from . import heybox as _hb2
+
+                backoff = int(_hb2.note_captcha() if _hb2.read_cooldown_remaining() <= 0 else _hb2.read_cooldown_remaining())
+                logger.warning(f"dl_senpai heybox_browse backoff {backoff}s")
+                await asyncio.sleep(max(600, backoff))

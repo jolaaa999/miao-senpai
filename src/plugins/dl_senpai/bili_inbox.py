@@ -130,6 +130,7 @@ async def bili_inbox_loop() -> None:
     await asyncio.sleep(min(interval, 300))
     while True:
         record: dict[str, Any] = {"ts": time.time(), "at": datetime.now().isoformat(timespec="seconds")}
+        wait = max(300, interval)
         try:
             outcomes = await answer_once(cfg)
             if outcomes:
@@ -139,7 +140,12 @@ async def bili_inbox_loop() -> None:
                     if row.get("replied"):
                         logger.info(f"dl_senpai bili.inbox replied to={row.get('to')}")
         except Exception as exc:  # noqa: BLE001 — 看留言失败不该拖垮循环
-            record["error"] = f"{type(exc).__name__}: {exc}"
+            text = f"{type(exc).__name__}: {exc}"
+            record["error"] = text
             _append_log(cfg, record)
-            logger.warning(f"dl_senpai bili_inbox tick failed: {type(exc).__name__}: {exc}")
-        await asyncio.sleep(max(300, interval))
+            logger.warning(f"dl_senpai bili_inbox tick failed: {text}")
+            # 登录态没了是"要人去修"的事，不是"过一会儿再试"的事：
+            # 每半小时刷一条同样的警告只会把日志淹掉
+            if "登录态" in text or "未登录" in text:
+                wait = max(wait, 6 * 3600)
+        await asyncio.sleep(wait)

@@ -629,6 +629,7 @@ async def _with_page(
     *,
     storage_state: str | None = None,
     persist_path: str | None = None,
+    site: str = "",
 ) -> Any:
     """起一次浏览器把 page 交给 fn。
 
@@ -638,6 +639,9 @@ async def _with_page(
     为什么要有回写：小黑盒这类站的验证是**按"你是不是老熟人"来判的**，
     每次都用全新匿名 context 等于每次都是陌生人，被要人机验证的概率高得多。
     回写之后 cookie 罐（buvid/风控 token 等）会累积，像同一个浏览器在反复看。
+
+    site：持久 profile 用哪个目录。不传就从 persist_path 的文件名猜（heybox/douyin），
+    猜不出来就共用一个 shared——反正同一个"人"用一台机器，指纹本来就该一致。
     """
     try:
         from playwright.async_api import async_playwright
@@ -646,33 +650,35 @@ async def _with_page(
             '未安装浏览器依赖，请运行: pip install -e ".[browser]" && playwright install chromium'
         ) from exc
 
+    from .browser_stealth import close_page, open_page
+
     async with _browser_lock:
         async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=bool(config.browser_headless))
+            context, browser, page = await open_page(
+                p,
+                config,
+                site=site or _site_of(persist_path),
+                headless=bool(config.browser_headless),
+                storage_state=storage_state,
+                persist_path=persist_path,
+                viewport={
+                    "width": int(config.browser_viewport_width),
+                    "height": int(config.browser_viewport_height),
+                },
+                user_agent=_UA,
+            )
             try:
-                context = await browser.new_context(
-                    viewport={
-                        "width": int(config.browser_viewport_width),
-                        "height": int(config.browser_viewport_height),
-                    },
-                    user_agent=_UA,
-                    locale="zh-CN",
-                    storage_state=storage_state if storage_state else None,
-                )
-                page = await context.new_page()
                 page.set_default_timeout(int(float(config.browser_timeout) * 1000))
-                try:
-                    return await fn(page)
-                finally:
-                    # 回写 cookie：失败不致命（没有写权限/浏览器已崩），只记一条
-                    if persist_path:
-                        try:
-                            # 目录可能还不存在（第一次跑），先建好再写
-                            from pathlib import Path as _Path
-
-                            _Path(persist_path).parent.mkdir(parents=True, exist_ok=True)
-                            await context.storage_state(path=str(persist_path))
-                        except Exception as exc:  # noqa: BLE001
-                            logger.debug(f"dl_senpai storage_state 回写失败: {exc}")
+                return await fn(page)
             finally:
-                await browser.close()
+                await close_page(context, browser, persist_path=persist_path)
+
+
+def _site_of(persist_path: str | None) -> str:
+    """从登录态文件路径猜站点名：.../web_login/heybox.json -> heybox。"""
+    if not persist_path:
+        return "shared"
+    from pathlib import Path as _Path
+
+    stem = _Path(persist_path).stem
+    return stem if stem and stem.isascii() else "shared"

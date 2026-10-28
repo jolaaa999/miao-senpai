@@ -48,7 +48,13 @@ _SEARCH_API_HINT = "general/search/v1"
 # 读帖失败后的冷却秒数。实测小黑盒的内容接口在连续抓取后会回
 # {"status": "show_captcha"}，页面只剩页头页脚；此时再刷只会更久不给。
 # 冷却期间直接告诉她"刚被要求验证"，比反复失败更诚实。
-_READ_COOLDOWN_SEC = 600.0
+# 撞人机验证后的冷却。原来一次就停 3 小时，但验证多数几分钟就解，
+# 停 3 小时等于半天不干活（10-27 那天撞了 4 次 = 12 小时在睡）。
+# 现在分两档：第一次 25 分钟就回来再看，连着第二次才认为真被盯上，歇 3 小时。
+_READ_COOLDOWN_SEC = 1500.0
+_READ_COOLDOWN_HARD_SEC = 10800.0
+# 连续撞验证次数：成功读到一次就清零，所以"偶发"和"被盯上"能分开处理
+_captcha_streak = 0
 # 写操作（评论）被挡时的冷却：比读更长。理由是小黑盒对写接口的风控更敏感，
 # 短时间反复试只会把恢复时间越推越远。
 _WRITE_COOLDOWN_SEC = 1200.0
@@ -190,6 +196,27 @@ async def heybox_search(keyword: str, limit: int = 6, *, cfg: Any = None) -> Hey
     return HeyboxSearch(keyword=query, posts=posts[: max(1, int(limit))])
 
 
+def note_captcha() -> float:
+    """记一次撞验证，返回这次该冷却多少秒。
+
+    为什么要连击计数：单独一次验证多半是限流抽风，25 分钟就过；
+    连着两次说明这个出口/账号真的被盯上了，这时候才值得停 3 小时。
+    """
+    global _captcha_streak
+    _captcha_streak += 1
+    return _READ_COOLDOWN_HARD_SEC if _captcha_streak >= 2 else _READ_COOLDOWN_SEC
+
+
+def note_success() -> None:
+    """顺利读到东西，清掉连击。"""
+    global _captcha_streak
+    _captcha_streak = 0
+
+
+def captcha_streak() -> int:
+    return _captcha_streak
+
+
 def _bump_cooldown(seconds: float) -> None:
     """把冷却时间往后推（多个入口共用同一个时间戳）。"""
     global _read_cooldown_until
@@ -239,12 +266,16 @@ async def heybox_read(ref: str, *, cfg: Any = None, focus: str = "") -> Any:
         url = share_url_of(raw)
     else:
         raise HeyboxError("认不出这个帖子标识（要 hash 形式的分享链接）")
+    # 读也算一次出门：原来这条路完全没过闸门，是昨天连着读到 0 字的主要原因之一
+    await _session_gate(cfg, heavy=False)
     doc = await read_link(url, cfg=cfg, focus=focus)
     if not getattr(doc, "ok", False) and "empty_text" in (getattr(doc, "error", "") or ""):
-        # 抽不到正文 = 这次大概被人机验证拦了，进入冷却
+        # 抽不到正文 = 这次大概被人机验证拦了，进冷却（连撞两次才升级成大退避）
         import time as _time
 
-        _read_cooldown_until = _time.time() + _READ_COOLDOWN_SEC
+        _read_cooldown_until = _time.time() + note_captcha()
+    else:
+        note_success()
     return doc
 
 
@@ -486,7 +517,21 @@ _SESSION_GATE_FILE = "data/dl_senpai/heybox_session_gate.json"
 _session_last = 0.0
 
 
-async def _session_gate(cfg: Any = None) -> None:
+def _gate_gap(cfg: Any, *, heavy: bool) -> float:
+    """出门间隔分两档。
+
+    主人 2026-10-27 的判断是对的：小黑盒不是怕"多"，是怕"密"——一次只丢一个请求
+    基本没事，短时间连着丢一串就会回 show_captcha。
+
+    重档（评论区翻页、发评论）间隔几分钟；轻档（读正文、看信息流、看留言）
+    几十秒就够，否则群里有人说"看看这个帖子"，她要等四分钟才动，体验没法看。
+    """
+    if heavy:
+        return float(getattr(cfg, "heybox_session_gap_sec", 240) or 0)
+    return float(getattr(cfg, "heybox_request_gap_sec", 45) or 0)
+
+
+async def _session_gate(cfg: Any = None, *, heavy: bool = True) -> None:
     """开浏览器之前的一次"出门登记"。
 
     为什么需要：2026-10-26 实测，短时间内连着开十几次浏览器上下文之后，
@@ -495,7 +540,7 @@ async def _session_gate(cfg: Any = None) -> None:
     所以她每次出门之间要隔一会儿，宁可慢也别把账号搞进验证。
     """
     global _session_last
-    gap = float(getattr(cfg, "heybox_session_gap_sec", 240) or 0)
+    gap = _gate_gap(cfg, heavy=heavy)
     if gap <= 0:
         return
     now = time.time()
@@ -560,7 +605,7 @@ async def heybox_feed(
     if not has_state("heybox", cfg):
         raise HeyboxError("小黑盒还没登录/没过验证，先跑一次 scripts\\login-web.py heybox")
 
-    await _session_gate(cfg)
+    await _session_gate(cfg, heavy=False)
     collected: list[str] = []
     storage_state = optional_state_path("heybox", cfg)
     persist_to = str(state_path("heybox", cfg))
@@ -770,9 +815,12 @@ async def heybox_thread_many(
                     rows.append(comment)
 
         page.on("response", lambda r: asyncio.ensure_future(_capture(r)))
-        for link_id in ids:
+        for index, link_id in enumerate(ids):
             current["id"] = link_id
             url = share_url_of(link_id)
+            if index:
+                # 同一会话里换帖也要停一下：连着 goto 三篇等于一秒三个请求
+                await asyncio.sleep(random.uniform(4.0, 9.0))
             try:
                 await page.goto(url, wait_until="domcontentloaded", timeout=int(timeout) * 1000)
                 deadline = time.time() + timeout
@@ -799,6 +847,9 @@ async def heybox_thread_many(
                             await locator.click(timeout=1200)
                         except Exception:  # noqa: BLE001
                             continue
+                        # 一次只丢一个请求：连着点两个"展开回复"就是两个接口同时出去，
+                        # 这正是主人说的"一次丢太多会被拦"
+                        await page.wait_for_timeout(random.randint(700, 1600))
                     await page.mouse.wheel(0, 1800)
                     await page.wait_for_timeout(random.randint(2500, 5000))
             except Exception:  # noqa: BLE001 — 单篇失败不影响后面几篇
