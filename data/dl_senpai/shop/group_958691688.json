@@ -1,12 +1,12 @@
 {
   "slots": [
-    "white_lolita",
-    "hoodie_casual",
-    "gothic_dress",
+    "blue_lolita",
+    "pajamas",
+    "qipao_black",
     "pink_lolita"
   ],
   "current_outfit_id": "",
-  "slots_refresh_day": "2026-10-26",
+  "slots_refresh_day": "2026-10-28",
   "user_warehouses": {},
-  "updated_at": "2026-10-26T17:26:33.528411+08:00"
+  "updated_at": "2026-10-28T16:10:29.881150+08:00"
 }

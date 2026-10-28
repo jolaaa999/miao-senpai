@@ -1,12 +1,12 @@
 {
   "slots": [
+    "pink_lolita",
     "kimono_floral",
-    "gothic_dress",
-    "qipao_black",
-    "green_lolita"
+    "jk_sailor",
+    "blue_lolita"
   ],
   "current_outfit_id": "sundress_yellow",
-  "slots_refresh_day": "2026-10-26",
+  "slots_refresh_day": "2026-10-28",
   "user_warehouses": {},
-  "updated_at": "2026-10-26T17:26:23.494161+08:00"
+  "updated_at": "2026-10-28T16:10:19.823496+08:00"
 }

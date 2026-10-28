@@ -1,12 +1,12 @@
 {
   "slots": [
-    "cyber_jacket",
-    "hanfu_blue",
-    "hoodie_casual",
-    "witch_dress"
+    "white_lolita",
+    "winter_coat",
+    "jk_sailor",
+    "gothic_dress"
   ],
   "current_outfit_id": "",
-  "slots_refresh_day": "2026-10-26",
+  "slots_refresh_day": "2026-10-28",
   "user_warehouses": {},
-  "updated_at": "2026-10-26T17:26:28.514320+08:00"
+  "updated_at": "2026-10-28T16:10:24.858213+08:00"
 }

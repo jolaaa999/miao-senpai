@@ -1,12 +1,12 @@
 {
   "slots": [
-    "sportswear",
-    "hoodie_casual",
+    "maid_classic",
     "black_lolita",
-    "hanfu_pink"
+    "kimono_floral",
+    "white_lolita"
   ],
   "current_outfit_id": "",
-  "slots_refresh_day": "2026-10-26",
+  "slots_refresh_day": "2026-10-28",
   "user_warehouses": {},
-  "updated_at": "2026-10-26T17:26:58.613242+08:00"
+  "updated_at": "2026-10-28T16:10:55.116633+08:00"
 }

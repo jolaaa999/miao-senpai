@@ -1,12 +1,12 @@
 {
   "slots": [
-    "pajamas",
-    "jk_blazer",
-    "hanfu_blue",
-    "idol_stage"
+    "hanfu_pink",
+    "sportswear",
+    "sundress_yellow",
+    "white_lolita"
   ],
   "current_outfit_id": "",
-  "slots_refresh_day": "2026-10-26",
+  "slots_refresh_day": "2026-10-28",
   "user_warehouses": {},
-  "updated_at": "2026-10-26T17:27:03.628942+08:00"
+  "updated_at": "2026-10-28T16:11:00.151117+08:00"
 }

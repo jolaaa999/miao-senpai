@@ -356,5 +356,21 @@
     "collected_at": "2026-10-26T01:08:00+00:00",
     "source_user": "沐心",
     "local_path": "E:\\PROJECT\\QQBot\\data\\dl_senpai\\stickers\\files\\f8d6752dbd11fc4a.gif"
+  },
+  {
+    "id": "feab7b2ac7299f9e",
+    "segment_type": "image",
+    "segment_data": {
+      "url": "https://multimedia.nt.qq.com.cn/download?appid=1407&fileid=EhRuqSmK4oghHDyAsv5Ma07Hm9OvYxjn9wEg_woo8sP1h97ZlwMyBHByb2RQgL2jAVoQcPsWYCr-r4_KZidvpzrpoXoCIfyCAQJuag&spec=0&rkey=CAMSMA2_RCF4YZCWCrFeIxl_gYnxPtPvcJgUksrtQnLMnCcxaXfEsJ426l1vxVWPXm403g",
+      "file": "5D46157BB0D35AA1FF81F37ED84E1FF7.jpg",
+      "sub_type": 13,
+      "summary": "[动画表情]"
+    },
+    "context_text": "",
+    "keywords": [],
+    "use_count": 0,
+    "collected_at": "2026-10-27T08:03:17+00:00",
+    "source_user": "沐心",
+    "local_path": "E:\\PROJECT\\QQBot\\data\\dl_senpai\\stickers\\files\\feab7b2ac7299f9e.jpg"
   }
 ]
