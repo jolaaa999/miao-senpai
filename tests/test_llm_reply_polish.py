@@ -117,7 +117,13 @@ async def test_comfort_clause_is_stripped_on_vent() -> None:
         "别难过啦，我理解你的感受。其实呢，先深呼吸一下，一切都会好起来的，你要相信自己。",
         "烦死了，今天又被骂了",
     )
-    assert out == "其实呢，先深呼吸一下，你要相信自己。"
+    # 2026-10-27：casual 整形会把逗号换空格、去掉句末句号，所以这里守意图不逐字：
+    # 安慰腔必须剪掉，有用的一半必须留着。
+    assert "别难过啦" not in out
+    assert "我理解你的感受" not in out
+    assert "先深呼吸一下" in out
+    assert "你要相信自己" in out
+    assert "，" not in out
 
 
 @pytest.mark.asyncio
@@ -135,7 +141,11 @@ async def test_private_chat_uses_its_own_budget() -> None:
     """私聊预算比群聊宽：用群聊的 60 会把私聊压成客服腔。"""
     reply = "嗯嗯，我知道啦，你先忙你的，忙完了再来找我，我一直在的，不用着急，慢慢来就好。"
     out = await run_chat(reply, "我先去忙", private_chat=True)
-    assert out == reply
+    # 标点会被 casual 整形改（逗号→空格、去句末句号），长度和内容才是这个用例要守的：
+    # 私聊预算宽，不能把这句话压成客服腔的短句。
+    assert len(out) >= len(reply) - 8
+    assert "你先忙你的" in out
+    assert "慢慢来就好" in out
 
 
 @pytest.mark.asyncio
@@ -146,7 +156,8 @@ async def test_bubbles_are_shaped_when_enabled() -> None:
         "约个时间",
         {"DL_SENPAI_BUBBLE_MAX": 3},
     )
-    assert out == "好呀\n那我们几点见？\n我提前十分钟到。"
+    # 换行结构必须保留（出站要靠它拆泡）；行末句号会被 strip_bubble_periods 清掉。
+    assert out.split("\n") == ["好呀", "那我们几点见？", "我提前十分钟到"]
 
 
 @pytest.mark.asyncio
@@ -167,10 +178,12 @@ async def test_long_reply_exceeding_budget_is_cut() -> None:
         "别纠结太久，纠结太久反而更难受，真的，相信我。"
     )
     out = await run_chat(reply, "随便")
-    assert out == (
-        "这个嘛，我觉得还是看你自己怎么想吧，反正我觉得都行，你要是喜欢就买，"
-        "不喜欢就算了，别纠结太久，纠结太久反而更难受，真的"
-    )
+    # 守三件事：截到预算内、保住开头、没有把原句最后一个词硬塞进来。
+    # 标点形态由 casual 整形决定，不逐字比。
+    assert len(out) <= 62
+    assert out.startswith("这个嘛 我觉得还是看你自己怎么想吧")
+    assert "相信我" not in out
+    assert "，" not in out and "。" not in out
 
 
 # ================================================================

@@ -11,7 +11,7 @@
 from __future__ import annotations
 
 from dl_senpai.agent.prompt.builder import PromptBuilder, PromptRequest
-from dl_senpai.brevity import brevity_hint_text, build_brevity_hint
+from dl_senpai.brevity import brevity_hint_text, build_brevity_hint, is_explain_request
 from dl_senpai.config import PluginConfig
 from dl_senpai.reply_send import split_human_bubbles
 
@@ -108,3 +108,37 @@ def test_split_bubbles_still_works_when_enabled():
     text = "第一句说点什么。第二句再补一句。第三句收个尾。"
     out = split_human_bubbles(text, min_chars=1, prefer_chars=10, max_bubbles=3)
     assert len(out) >= 2
+
+
+def test_chat_and_explain_modes_differ() -> None:
+    """闲聊档压到一句，解释档允许展开，两档都要带语气铁律。
+
+    为什么拆两档：只有一套规则时「要不要展开」由模型自己判，它几乎总判「该」，
+    实测最近 159 条回复中位数 63 字、77% 超 40 字（真人聊天 10~20 字）。
+    """
+    chat = build_brevity_hint(True)
+    explain = build_brevity_hint(True, explain=True)
+
+    assert "20 字" in chat
+    assert "20 字" not in explain
+    assert "400 字" in explain
+    assert chat != explain
+    # 语气铁律两档共用，任何一档掉了都会让回答回到"客服腔"
+    assert "【别演】" in chat
+    assert "【别演】" in explain
+    assert build_brevity_hint(False, explain=True) == ""
+
+
+def test_is_explain_request_recognizes_questions() -> None:
+    """求解释的句子走解释档，闲聊走闲聊档。"""
+    for text in (
+        "深度学习是什么",
+        "为什么我的代码报错了",
+        "怎么配置 NapCat",
+        "详细讲讲这个方案",
+        "帮我写个正则",
+    ):
+        assert is_explain_request(text), text
+
+    for text in ("在吗", "123", "晚安", "哈哈哈哈哈", "牛逼", ""):
+        assert not is_explain_request(text), text

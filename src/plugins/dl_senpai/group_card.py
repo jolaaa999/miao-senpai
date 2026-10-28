@@ -338,6 +338,38 @@ async def _member_role(bot: Bot, *, group_id: int, user_id: int) -> str:
     return str(info.get("role") or "")
 
 
+_ROLE_CN = {"owner": "群主", "admin": "管理员", "member": "普通成员"}
+
+
+async def special_title_blocker(bot: Bot, *, group_id: int) -> str:
+    """设头衔之前先查「能不能设」：能设返回空串，不能则返回给管理员看的原因。
+
+    为什么要在发请求之前拦下来（2026-10-28 实机踩到）：
+    QQ 的群专属头衔**只有群主能设**，管理员身份会被协议层直接拒
+    （ActionFailed: OIDB error 1013 on 0x8fc_2）。而一旦被拒就会写入 6 小时
+    冷却，接下来 6 小时里管理员发「喵title」只会收到一句「头衔没设上，可能是
+    协议端不支持」——指令看起来像坏了，其实从一开始就不可能成功。
+
+    先查身份再发，代价是一次 get_group_member_info，换来的是能直接告诉
+    管理员「你得把我设成群主」，而不是让他反复试。
+    """
+    if _title_refused(group_id):
+        return (
+            "刚才试过一次被腾讯拒了，我先停 6 小时不再重试。\n"
+            "这期间发也是一样的结果——要立刻重试的话，把我设成群主之后再发。"
+        )
+    role = await _member_role(bot, group_id=group_id, user_id=int(bot.self_id))
+    if role and role != "owner":
+        return (
+            f"专属头衔只有群主能设，我现在是{_ROLE_CN.get(role, role)}，"
+            "发出去也会被腾讯直接拒。\n"
+            "想用这个功能，得把我设成群主；只是想换个名字显示，"
+            "用「喵card @某人 新名字」改群名片也行。"
+        )
+    return ""
+
+
+
 async def _try_special_title(
     bot: Bot,
     *,

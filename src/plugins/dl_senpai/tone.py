@@ -190,6 +190,21 @@ _INSTRUCTION_WORDS = (
 )
 
 
+# 技术/求助信号：出现就不当「随口一问」，宁可回长一点也不压成半句。
+#
+# 为什么必须补（2026-10-27 干跑查出来的）：
+# 「学姐我那个 loss 一直不降」只有 13 字，被当成闲聊，回答从 292 字压到 28 字，
+# 压出来的还是一句没用的「先别急着改模型」。用户那边看到的就是「一本正经重复废话」——
+# 不是她在说废话，是答案被长度纪律砍掉了。
+_TECH_SIGNAL_WORDS = (
+    "怎么", "为什么", "为啥", "帮我", "教我", "步骤", "安装", "下载",
+    "配置", "设置", "打不过", "卡住", "不降", "闪退", "蓝屏", "失败",
+    "崩溃", "跑不起来", "对不上", "求", "教程",
+)
+# 中文闲聊很少夹英文单词；夹了基本是在讲技术（loss / lr / bug / api）
+_ASCII_WORD = re.compile(r"[A-Za-z]{2,}")
+
+
 def is_casual_prompt(text: str, *, max_chars: int = 25) -> bool:
     """这句是不是「随口一问」，长回答在这种场景下必然显得假。
 
@@ -210,6 +225,10 @@ def is_casual_prompt(text: str, *, max_chars: int = 25) -> bool:
     if len(body) > max_chars:
         return False
     if any(word in body for word in _INSTRUCTION_WORDS):
+        return False
+    if any(word in body for word in _TECH_SIGNAL_WORDS):
+        return False
+    if _ASCII_WORD.search(body):
         return False
     return True
 def split_marker_lines(text: str) -> tuple[str, list[str]]:
@@ -613,3 +632,141 @@ _TONE_LABEL = {"vent": "吐槽", "distress": "真倾诉", "normal": "普通"}
 def tone_label(verdict: str) -> str:
     """日志用：把英文枚举换成中文，方便直接搜日志。"""
     return _TONE_LABEL.get(verdict, verdict)
+
+# 闲聊里的逗号要换成空格。要保护的是「1,000」这类数字分隔和英文里的语法逗号，
+# 所以先把它们换成占位符，处理完再换回来。
+# 占位符用 chr(0) 拼出来而不是写转义：直接写转义会被写文件那层吃掉，变成真的 NUL。
+_GUARD = chr(0)
+_COMMA_NUM_GUARD = re.compile(r"(?<=\d),(?=\d)")
+_COMMA_EN_GUARD = re.compile(r"(?<=[A-Za-z]),(?=[ 	]*[A-Za-z])")
+_ANY_COMMA = re.compile(r"[，,]")
+_TRAILING_PERIOD = re.compile(r"[。.]+[ 	]*$")
+_MULTI_SPACE = re.compile(r"[ 	]{2,}")
+
+
+def space_out_commas(text: str) -> tuple[str, int]:
+    """把闲聊里的逗号换成空格、去掉句末句号。返回 (新文本, 换掉的逗号数)。
+
+    为什么要在出站做这件事：小黑盒那篇《提升大肥鱼活人感技巧》第四条说得很直接——
+    「逗号一多就书面，空格一多就网上」，而且这是他实测收益最大的一条。
+
+    为什么不能只靠人设：这条写进人设之后干跑照样是
+    「累成这样啊，那就先别干了，躺平一会儿。」三个逗号一个没少。
+    模型对「标点怎么用」这种细粒度指令基本不服从，只能出站整形。
+
+    只管闲聊分支（调用方保证）。技术答疑不走这里：那里逗号是语义分隔，
+    换成空格会读成结巴。
+
+    跳过条件（宁可不动，也别把人话改坏）：
+    - 含代码围栏；
+    - ASCII 占比超过 30%（英文/代码/公式为主，逗号是语法不是停顿）；
+    - 数字之间、英文单词之间的逗号。
+    """
+    body = text or ""
+    if not body.strip():
+        return body, 0
+    fence = chr(96) * 3
+    if "'" * 3 in body or fence in body:
+        return body, 0
+    ascii_ratio = sum(1 for ch in body if ord(ch) < 128) / max(1, len(body))
+    if ascii_ratio > 0.3:
+        return body, 0
+
+    guard_num = _GUARD + "N" + _GUARD
+    guard_en = _GUARD + "E" + _GUARD
+    out_lines: list[str] = []
+    replaced = 0
+    for line in body.split(chr(10)):
+        piece = _COMMA_NUM_GUARD.sub(guard_num, line)
+        piece = _COMMA_EN_GUARD.sub(guard_en, piece)
+        piece, hits = _ANY_COMMA.subn(" ", piece)
+        replaced += hits
+        piece = piece.replace(guard_num, ",").replace(guard_en, ",")
+        # 句末句号去掉；问号、感叹号、省略号留着——那些是情绪，不是书面感
+        piece = _TRAILING_PERIOD.sub("", piece)
+        piece = _MULTI_SPACE.sub(" ", piece).strip()
+        out_lines.append(piece)
+    return chr(10).join(out_lines), replaced
+
+
+def strip_bubble_periods(text: str) -> str:
+    """把每一行末尾的句号去掉（拆泡之后再调一次）。
+
+    为什么需要第二次：space_out_commas 在拆泡**之前**跑，那时是一个整段，
+    只能删掉最后那个句号；中间的「再拖下去就成夜宵了。」是拆泡后才变成行尾的，
+    于是留着句号——一条气泡以句号收尾，看着就是在写作文而不是在打字。
+    """
+    lines = [(_TRAILING_PERIOD.sub("", ln)).rstrip() for ln in (text or "").split(chr(10))]
+    return chr(10).join(lines)
+
+# 破折号：群里真人几乎不打 ——。2026-10-28 线上 38 条闲聊里 12 条带，
+# 这是「文青腔」最刺眼的标记，比逗号更能暴露她不是在打字。
+_LONG_DASH = re.compile(r"\s*(?:——|--)\s*")
+
+# 整行只有括号动作：「（笑了一下）」。真人不会单独发一条只有动作的消息，
+# 但线上真出现过 6 个字一条、内容只有一个括号。
+_ACTION_ONLY_LINE = re.compile(r"^\s*[（(][^（）()]{1,20}[）)]\s*$")
+
+
+def shape_for_send(
+    text: str,
+    *,
+    casual: bool = False,
+    space_split: bool = True,
+) -> tuple[str, dict[str, int]]:
+    """出站最后一道整形。返回 (新文本, 各项计数)，计数只为打点用。
+
+    为什么需要这一层：线上走 agent（agent/response.py -> polish_reply ->
+    reply_send），那条链只删污染；口语化那几道工序全在 llm.chat 里，
+    而线上 100% 不走它（2026-10-28 日志 19/19 条 agent.entry）。
+    结果就是干跑看着像人，群里发的全是逗号句号破折号齐全的完整句。
+
+    只做四件「改坏风险最低」的事：
+    1. 删掉整行只有（动作）的行；
+    2. 折叠连续空行（空行会拆出空气泡）；
+    3. casual 时破折号换空格，再走 space_out_commas；
+    4. 不截断长度：agent 的回答可能刚查过资料，按句截断的风险大于收益，
+       长度交给 prompt 压。
+
+    保护：含代码围栏、或整段是表格的，一律不整形（代码和表格里的逗号是语法）；
+    <<< 标记行单独留出、原样接在最后，它们的字节不能动。
+    """
+    body = str(text or "")
+    if not body.strip():
+        return body, {}
+
+    counts = {"action": 0, "blank": 0, "dash": 0, "comma": 0}
+
+    lines: list[str] = []
+    for line in body.split(chr(10)):
+        if not line.strip():
+            # 连续空行折叠：留一个空行当分段，多出来的会变成空气泡
+            if lines and lines[-1] == "":
+                counts["blank"] += 1
+                continue
+            lines.append("")
+            continue
+        if _ACTION_ONLY_LINE.match(line):
+            counts["action"] += 1
+            continue
+        lines.append(line)
+    trimmed = chr(10).join(lines).strip()
+    # 万一整条就是个括号动作，删干净了也得退回原文：宁可不完美，不能发空消息
+    if not trimmed:
+        return body, {}
+
+    marker_tail = [ln for ln in trimmed.split(chr(10)) if "<<" in ln]
+    prose = chr(10).join(ln for ln in trimmed.split(chr(10)) if "<<" not in ln).strip()
+
+    fence = chr(96) * 3
+    protected = fence in prose or "|" in prose or "'" * 3 in prose
+    if prose and casual and not protected:
+        if space_split:
+            dashed, dash_hits = _LONG_DASH.subn(" ", prose)
+            counts["dash"] = dash_hits
+            prose, comma_hits = space_out_commas(dashed)
+            counts["comma"] = comma_hits
+
+    out = chr(10).join([part for part in [prose] if part] + marker_tail)
+    return (out or body), counts
+

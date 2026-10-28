@@ -67,8 +67,14 @@ class MessageBatcher:
         buf = self._peek(session_id)
         buf.items.append((actor or "", (text or "").strip()))
         window = max(0.0, float(window_ms) / 1000.0)
-        # 窗口从最近一条开始重新计时——这就是 debounce 的核心
-        buf.deadline = now_fn() + window
+        # 窗口从最近一条开始重新计时——这就是 debounce 的核心。
+        #
+        # 为什么用 max 而不是直接覆盖：窗口长度可以**逐条不同**（对方那句明显
+        # 没说完时，presence 会给它一个长得多的等待窗口）。直接覆盖的话，
+        # 后面跟着的一条「完整」消息会把长窗口压回 2~3 秒，等下文就白等了。
+        # 用 max 让长窗口粘住，最后由还在睡的那个任务在长窗口到点时把合并结果
+        # 交出去（短窗口的任务醒来发现没到点，直接安静退出）。
+        buf.deadline = max(buf.deadline, now_fn() + window)
 
         if len(buf.items) >= self.max_items:
             # 攒满了不再等满窗口，直接交出去，避免有人刷屏时一直不吭声

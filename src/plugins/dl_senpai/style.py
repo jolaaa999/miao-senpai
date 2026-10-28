@@ -9,6 +9,44 @@ _FAKE_EMOJI_RE = re.compile(
     r"[\[（(【]\s*[^\]）)】]{0,24}?(emoji|表情|微笑|温柔|开心|哭|炸毛)\s*[^\]）)】]{0,12}?[\]）)】]",
     re.IGNORECASE,
 )
+# 黄脸/手势类 emoji（😀😤😏😂🥺👍👀）。
+#
+# 为什么只剥这一类：爱心💕、奖牌🥇、闪光✨ 这些是签到/好感文案里既有的
+# 装饰符号（checkin.py / affection.py 的固定模板），不是「拿表情代替说话」；
+# 一起剥会把那些界面改花。要治的是她拿 emoji 当情绪出口的习惯。
+# 前后允许空格，剥的时候连空格一起吃掉，免得留下「好呀 」这种尾巴。
+_FACE_EMOJI_RE = re.compile(
+    "["
+    "\U0001F600-\U0001F64F"  # 表情（😀😤😏😂😭🙂😳…）
+    "\U0001F900-\U0001F92F"  # 补充表情（🤔🤗🤭🤫…）
+    "\U0001F970-\U0001F97A"  # 🥰🥵🥶🥴🥺
+    "\U0001FAE0-\U0001FAE8"  # 🫠🫥🫨 新一批
+    "\U0001F440-\U0001F450"  # 👀👈👉👍 眼睛与手势
+    "]\uFE0F?"
+)
+# emoji 剥掉后留下的空格规则：中文之间不留空格，英文之间留一个。
+_CJK_BETWEEN_SPACE_RE = re.compile(
+    r"(?<=[\u4e00-\u9fff\u3000-\u303f\uff00-\uffef])[ \t]+(?=[\u4e00-\u9fff\u3000-\u303f\uff00-\uffef])"
+)
+
+def strip_face_emoji(text: str) -> str:
+    """剥掉黄脸/手势类 emoji。
+
+    提示词里已经明令禁止，这里是兜底：模型仍会漏出几个（尤其情绪重的轮次）。
+    只剥"用人脸表达情绪"的那一类，物件符号（💕🥇✨）原样保留。
+    """
+    if not text:
+        return text
+    cleaned = _FACE_EMOJI_RE.sub("", text)
+    if cleaned == text:
+        return text
+    # 剥完常留双空格（「就这 😏 还行」→「就这  还行」）：先收成一个，
+    # 再去掉夹在两个中文字之间的那个空格（中文本来不加空格）；
+    # 英文之间保留一个，否则「hello world」会被粘成「helloworld」。
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
+    cleaned = _CJK_BETWEEN_SPACE_RE.sub("", cleaned)
+    return cleaned.strip()
+
 _STICKER_MARKER_RE = re.compile(r"<<<STICKER\s*[^>\n]+?>>>", re.IGNORECASE)
 _VOICE_MARKER_RE = re.compile(r"<<<VOICE(?:\s+[^>\n]+?)?>>>", re.IGNORECASE)
 _CARD_LEAK_RE = re.compile(
@@ -597,6 +635,8 @@ def polish_reply(
     text = _MEMBER_CANDIDATE_LEAK_RE.sub("", text)
     text = _INTERNAL_SYS_NUDGE_RE.sub("", text)
     text = _FAKE_EMOJI_RE.sub("", text)
+    # 真 emoji 也剥：她习惯用 😤😏😑 收尾，提示词压不住时靠这层兜底
+    text = strip_face_emoji(text)
     text = _MUTE_CANT_TALK_RE.sub("", text)
     for filler in _ASSISTANT_FILLER:
         text = text.replace(filler, "")

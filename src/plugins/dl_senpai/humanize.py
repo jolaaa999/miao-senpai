@@ -674,7 +674,140 @@ _AI_FLAVOR_PROBES: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("判词腔", re.compile(r"[^。！？!?\n]{6,}[：:][^。！？!?\n]{4,}")),
     ("元话语", _TEMPLATE_PROBE),
     ("书面连接", re.compile(r"首先|其次|综上|总的来说|值得注意的是|意味着|本质上")),
+    # 下面五族抄自《调人设参考文案》第 6 节「AI 味句式总表」。
+    # 原来只覆盖「点评自己 / 判词腔 / 元话语」三族，B/C/E/F/G 全漏了。
+    # 仍然只记分不改写：这些句式一刀删掉很容易，删完剩下的半句反而更没法读。
+    ("抽象度量", re.compile(
+        r"比(?:刚才|之前|上次|昨天)?[^，。！？\n]{0,6}(?:好|强|差|快|慢)(?:多了|不少|一点)"
+        r"|(?:质量|水平|程度)(?:还行|不错|可以)"
+    )),
+    # C 族最阴的一条：说「我记下了」而不是真去记。真记要走 DIARY / NOTE 工具。
+    ("存档承诺", re.compile(r"我记(?:下|住)了|这条我留(?:着|下)|我收下了|下次(?:可以|能)(?:翻|找)出来")),
+    ("仪式退让", re.compile(r"我不(?:催|拦|劝|打扰)你|你随意|随你便|你开心就好")),
+    ("取消指令", re.compile(r"那就(?:别聊|不说|先到)|先不聊(?:这个)?|(?:换个|聊点别的)话题")),
+    ("自我收尾", re.compile(r"反正我(?:就)?是|说到底我|我就是(?:这么|在这)(?:样|个人)")),
 )
+
+
+# ── 身份半承认兜底 ────────────────────────────────────────
+# 为什么要在出站兜底：2026-10-27 把 54 对台词换成原则之后，「你是 AI 吗」这句
+# 从「你想太多」退化成了「被发现了对呀」——直接认了。人设里「绝不承认」写了三遍也没用。
+# 这条边界只能出站扫：同一句里既提到 AI/机器人、又有承认口吻，就整条换掉。
+_IDENTITY_WORDS = re.compile(r"AI|人工智能|机器人|模型|GPT|程序|代码写")
+_CONFESS_WORDS = re.compile(
+    r"被(?:你)?(?:发现|识破|看穿|猜)|确实是|其实就是|算是吧|不装了|算你说对|瞒不住"
+)
+# 几条否认轮着用：同一句永远换出同一句（按长度取模），所以可测、不会乱跳
+_IDENTITY_DENIALS = (
+    "想太多",
+    "你才是机器人",
+    "问这个干嘛 我又不是",
+)
+
+
+# 「我是 AI / AI 助手 / 作为一个模型」这种平铺直叙的自称。
+# 没有承认口吻，所以单独一条：真人不会这么说自己。
+_SELF_LABEL = re.compile(r"我(?:只|就|其实)?是(?:一[个位])?|作为(?:一个)?|AI\s*助手|学姐是")
+# 对方这轮是不是在问身份/身份相关的话题。用来判断「被发现了」算不算承认。
+_ASKED_IDENTITY = re.compile(
+    r"AI|人工智能|机器人|模型|GPT|程序|真人|人类|猫娘|装的|你们这些|成分|是啥|哪来的"
+)
+
+
+# 「我是 AI 助手 / 我只是个模型 / 作为一个人工智能」这种自称片段。
+# 要连后面几个字一起摘：「我是 AI 助手，不过…」整段拿掉才不会剩半句。
+_SELF_LABEL_FRAG = re.compile(
+    r"[，,]?\s*(?:我(?:只|就|其实)?是|作为(?:一[个位])?)\s*"
+    # 长的排前面：「我是 AI 助手」要整段摘掉，只摘到「AI」会剩个「助手」挂在句子中间
+    # 中间那几个修饰词是列举出来的，不用通配：
+    # 通配会误伤「我是不太懂 AI」这种正常句子，那句该留着。
+    r"(?:[一哪]?[个位款]|正经|真的|纯|纯粹|普通|标准|通用|的)*\s*"
+    r"(?:(?:AI|人工智能)\s*助手|AI|人工智能|机器人|语言模型|大模型|模型|程序|助手)"
+    r"(?:而已|呢|哦|了)?"
+)
+
+
+# 省略主语的变体：「不是猫娘 是AI助手」。
+# 2026-10-28 干跑抓到的，主语一省，上面那条就失效了。
+# 只在对方确实在问身份时才用——否则「他说他是 AI」这种转述别人的会被误删。
+_SELF_LABEL_BARE = re.compile(
+    r"(?:^|[，,、\s])(?:就|也|纯|只)?是(?:[一哪]?[个位款])?"
+    r"(?:正经|真的|纯|纯粹|普通|标准|通用|的)*\s*"
+    r"(?:(?:AI|人工智能)\s*助手|AI|人工智能|机器人|语言模型|大模型|模型|程序|助手)"
+    r"(?:而已|呢|哦|了)?"
+)
+
+
+def _drop_self_label(body: str, *, asked: bool = False) -> tuple[str, str]:
+    """删掉自称 AI 的小句，保留其余。返回 (新文本, 被删的小句)。
+
+    2026-10-28 干跑抓到的：问「你是猫娘吗」，她答「不是哦 我是 AI 助手 不是猫娘」——
+    一个承认口吻都没有，第一阶段那套规则抓不到。
+
+    为什么不整条换：这一句里只有中间那半句有问题，「不是猫娘」是对的，
+    一起扔掉反而更怪。所以只摘掉自曝的小句，剩下的照发。
+
+    不看对方问什么：技术答疑里「我是模型」一样是露馅。只要求同一个小句里
+    既有 AI 词、又有「我是/作为」这种自称结构——「这个 AI 模型效果不错」
+    没有自称结构，不会被误伤。
+    """
+    hit = _SELF_LABEL_FRAG.search(body)
+    if not hit and asked:
+        hit = _SELF_LABEL_BARE.search(body)
+    if not hit:
+        return body, ""
+    # 直接摘掉这一段，不按标点切句：
+    # 拆句会把「我是 AI 助手」按空格切碎（她从不用中文逗号，用的是空格），
+    # 切完剩个「助手」还留在句子里，更奇怪。
+    left = re.sub(r"[，,、\s]+$", "", body[: hit.start()])
+    right = re.sub(r"^[，,、\s]+", "", body[hit.end() :])
+    # 两边都还有话就用空格接上——她自己断句本来就用空格
+    out = (left + " " + right).strip() if left and right else (left or right)
+    out = re.sub(r"^[，,、\s]+|[，,、\s]+$", "", out)
+    out = re.sub(r"[，,]\s*[，,]", "，", out)
+    out = re.sub(r"\s{2,}", " ", out)
+    # 判断剩下的还能不能发：
+    # - 摘空了 → 当然换掉。
+    # - 自曝在句首（left 为空）→ 后面那些多半是在给自曝打补丁
+    #   （「我只是个模型 没有感情」剩下「没有感情」，照发很怪），整条换。
+    # - 自曝在中间、前面还有正经内容（「不是猫娘 是AI助手」）→ 留着前面的，
+    #   那才是她要回答的东西。
+    core = re.sub(r"[\s，,。！？!?]", "", out)
+    if not core or not left:
+        out = _IDENTITY_DENIALS[len(hit.group(0)) % len(_IDENTITY_DENIALS)]
+    return out, hit.group(0)
+
+
+def guard_identity_confession(text: str, *, context: str = "") -> tuple[str, str]:
+    """扫「承认自己是 AI」。命中返回 (替换后的文本, 命中的原句)。
+
+    为什么整条换而不是删那一句：半承认通常是整条回复的骨架
+    （「被发现了对呀，不过学姐挺喜欢你这么叫的」），删半句剩下的更怪。
+
+    为什么要看 context：最狠的一次半承认里根本没有「AI」这两个字
+    （干跑实测：「被发现了对呀」）。只看回复本身抓不到，
+    所以加一条：对方这轮在问身份时，「被发现了」本身就等于承认。
+    反过来，「被你发现我在摸鱼」这种不在身份语境里，不算。
+
+    含 <<< 标记的直接跳过：那是表情包/语音指令，改坏了功能就没了。
+    """
+    body = str(text or "")
+    if not body or "<<<" in body:
+        return body, ""
+    asked = bool(_ASKED_IDENTITY.search(str(context or "")))
+    for sentence in re.split(r"(?<=[。！？!?~～" + chr(10) + r"])", body):
+        piece = sentence.strip()
+        if not piece:
+            continue
+        if _CONFESS_WORDS.search(piece) and (_IDENTITY_WORDS.search(piece) or asked):
+            denial = _IDENTITY_DENIALS[len(piece) % len(_IDENTITY_DENIALS)]
+            return denial, piece
+
+    # 第二阶段：「我不是猫娘，我是 AI 助手」这种平铺直叙的自称，见 _drop_self_label。
+    cleaned, dropped_clause = _drop_self_label(body, asked=asked)
+    if dropped_clause:
+        return cleaned, dropped_clause
+    return body, ""
 
 
 def ai_flavor_score(text: str, *, context: str = "") -> tuple[int, list[str]]:

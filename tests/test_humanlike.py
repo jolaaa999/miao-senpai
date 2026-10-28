@@ -128,13 +128,16 @@ def test_trim_keeps_head_and_tail_for_long_reply():
     assert "所以你到底投的哪个岗。" in out
 
 
-def test_fewshot_is_short_by_default():
-    """样例的长度分布决定了她的默认长度：短样例必须占多数。"""
-    from dl_senpai.persona import FEWSHOT_DIALOGUES
+def test_reply_principles_stay_tiny():
+    """原则块必须小。
 
-    replies = [len(a) for _, a in FEWSHOT_DIALOGUES]
-    short = sum(1 for n in replies if n <= 10) / len(replies)
-    assert short >= 0.6, f"10 字以内的样例只有 {short:.0%}，模型会被长样例带偏"
+    它原来是 54 对台词、1240 字，比主段三分之一还长——模型一半注意力都在背句式上。
+    换成 10 条原则后是 587 字，钉一个上限防止又长回去。
+    """
+    from dl_senpai.persona import format_fewshot_block
+
+    # 2026-10-28 加回 10 对例外样例后是 896 字，上限抬到 1000 兜住
+    assert len(format_fewshot_block()) <= 1000
 
 
 def test_persona_allows_silence_and_forbids_pushing_back():
@@ -142,4 +145,5 @@ def test_persona_allows_silence_and_forbids_pushing_back():
     from dl_senpai.persona import SYSTEM_PROMPT
 
     assert "允许不接" in SYSTEM_PROMPT
-    assert "不许把问题推回给对方" in SYSTEM_PROMPT
+    # 2026-10-27 与「直接答、别反问」那次合并成了一句，措辞变了但规则还在
+    assert "也别把问题推回去" in SYSTEM_PROMPT

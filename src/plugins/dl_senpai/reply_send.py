@@ -190,6 +190,52 @@ def strip_residual_markers(text: str) -> str:
     return out
 
 
+def _lint_cjk_spaces(text: str) -> str:
+    """把中文之间的空格改成逗号（「好的 我看下」→「好的，我看下」）。
+
+    为什么要出站再走一道：模型偶尔会把停顿打成空格。中文群里那样打字一眼
+    就是排版，不是手打；而 qq-bridge 干脆把中文空格当成「分条信号」——
+    这边不分条，直接改成逗号，读起来才是正常语气。
+    英文单词/数字之间的空格一律不动（DeepSeek V3、3 kg 那种是必要的）。
+    """
+    if not text:
+        return text
+    try:
+        from .config import get_config
+
+        if not bool(getattr(get_config(), "cjk_space_fix_enable", True)):
+            return text
+    except Exception:  # noqa: BLE001 — 配置取不到就按默认开处理
+        pass
+    from .bubble_lint import fix_cjk_spaces
+
+    return fix_cjk_spaces(text)
+
+
+def _lint_bubbles(bubbles: list[str]) -> list[str]:
+    """把「一句话被拆成两条」的气泡合回一条；开关关掉时原样返回。
+
+    为什么必须在出站补一道：split_human_bubbles 是按标点和换行做的**机械**
+    切分，它只看字符位置，不看语义，所以会切在「这是哪个番的」后面，下一条
+    再接「表情包？」。半句话被拆成两个气泡，是 QQ 上最像机器人的形态之一。
+    """
+    if not bubbles:
+        return bubbles
+    max_chars = 160
+    try:
+        from .config import get_config
+
+        cfg = get_config()
+        if not bool(getattr(cfg, "bubble_lint_enable", True)):
+            return bubbles
+        max_chars = int(getattr(cfg, "bubble_merge_max_chars", 160) or 160)
+    except Exception:  # noqa: BLE001
+        pass
+    from .bubble_lint import merge_incomplete_bubbles
+
+    return merge_incomplete_bubbles(bubbles, max_chars=max_chars)
+
+
 def split_human_bubbles(
     text: str,
     *,
@@ -503,6 +549,8 @@ async def send_text_reply(
     """
     # 先剥协议残留再判空：剥完可能就什么都不剩，那就该安静不发
     text = strip_residual_markers((text or "").strip())
+    # 中文空格 → 逗号。放在判空之前：改写只删空格加标点，不会把正文改没。
+    text = _lint_cjk_spaces(text)
     if not text and sticker is None and voice is None and image is None:
         return
 
@@ -914,6 +962,8 @@ async def _send_text_reply_once(
                 require_newline=bubble_require_newline,
             )
         )
+        # 机械切分之后再补一道语义兜底：半句话被切到两条气泡里的，合回去。
+        bubbles = _lint_bubbles(bubbles)
         if len(bubbles) >= 2:
             await _typing_pause(typing_delay_ms_min // 2, typing_delay_ms_min)
             sent = 0

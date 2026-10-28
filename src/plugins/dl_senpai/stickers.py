@@ -44,6 +44,11 @@ class StickerRecord:
     collected_at: str = ""
     source_user: str = ""
     local_path: str = ""
+    # 备注与标签：qq-bridge 里对应 set_sticker_remark / sticker_note。
+    # 为什么必须有：库里几百张表情，靠 keywords 挑是「碰运气」，靠她自己写下的
+    # 备注才是「我知道这张是干嘛的」。标签用于粗分（阴阳/无语/高兴/猫）。
+    note: str = ""
+    tags: list[str] = field(default_factory=list)
 
     def to_segment(self) -> MessageSegment:
         if self.local_path and Path(self.local_path).is_file():
@@ -314,6 +319,8 @@ class StickerStore:
                     collected_at=str(item.get("collected_at", "")),
                     source_user=str(item.get("source_user", "")),
                     local_path=str(item.get("local_path", "")),
+                    note=str(item.get("note", "")),
+                    tags=[str(t) for t in item.get("tags", []) if isinstance(t, str)],
                 )
             )
         return records
@@ -330,6 +337,55 @@ class StickerStore:
 
     def count(self, session_id: str) -> int:
         return len(self.load(session_id))
+
+    def recent(self, session_id: str, limit: int = 20) -> list[StickerRecord]:
+        """按收藏时间倒序（最新的一张排第一）。
+
+        编号就是这里的下标 + 1：模型说「第 3 张」时指的一定是最新的第 3 张，
+        而不是 JSON 文件里第 3 行——文件顺序是历史顺序，对她毫无意义。
+        """
+        records = self.load(session_id)
+        ordered = sorted(records, key=lambda r: (r.collected_at, r.id), reverse=True)
+        return ordered[: max(1, limit)]
+
+    def find(self, session_id: str, ref: str) -> StickerRecord | None:
+        """按编号（1 起）或 id 前缀找一张表情。"""
+        text = str(ref or "").strip()
+        if not text:
+            return None
+        if text.isdigit():
+            recent = self.recent(session_id, limit=500)
+            index = int(text) - 1
+            return recent[index] if 0 <= index < len(recent) else None
+        for record in self.load(session_id):
+            if record.id == text or record.id.startswith(text):
+                return record
+        return None
+
+    def set_note(
+        self,
+        session_id: str,
+        ref: str,
+        note: str = "",
+        tags: list[str] | None = None,
+    ) -> StickerRecord | None:
+        """给一张表情写备注 / 追加标签。找不到返回 None。"""
+        target = self.find(session_id, ref)
+        if target is None:
+            return None
+        records = self.load(session_id)
+        for item in records:
+            if item.id != target.id:
+                continue
+            if note:
+                item.note = note[:60]
+            if tags:
+                # 去重但保留顺序：她自己写的标签顺序往往就是语义顺序
+                item.tags = list(dict.fromkeys([*item.tags, *tags]))[:8]
+            target = item
+            break
+        self.save(session_id, records)
+        return target
 
     async def collect_from_event(
         self,
@@ -369,6 +425,31 @@ class StickerStore:
                     self._seen_events.clear()
 
         segments = extract_sticker_segments(event.message)
+        if not segments:
+            return 0
+        return await self.collect_segments(
+            segments,
+            session_id=session_id,
+            context_text=context_text,
+            source_user=source_user,
+            bot=bot,
+        )
+
+    async def collect_segments(
+        self,
+        segments: list[tuple[str, dict[str, Any]]],
+        *,
+        session_id: str,
+        context_text: str = "",
+        source_user: str = "",
+        bot: Bot | None = None,
+    ) -> int:
+        """把**已经提取好的**表情段收进本子，返回新增数量。
+
+        为什么从 collect_from_event 里拆出来：自动收集（观察者拿到 MessageEvent）
+        和手动收藏（模型给 message_id，只能拿到一条消息的 segments）走同一套
+        去重、下载、合并关键词逻辑。复制一份的话，将来改下载策略必然漏改一边。
+        """
         if not segments:
             return 0
 
@@ -471,6 +552,16 @@ class StickerStore:
 
 
 _store: StickerStore | None = None
+
+
+def reset_sticker_store() -> None:
+    """清空单例。生产上素材目录不会变，只有测试需要这件事。
+
+    不加这个的话，前一个用例把单例建在临时目录上，后一个用例继续用它——
+    断言「库里应该是空的」就会莫名其妙失败，而且单跑那个文件还是绿的。
+    """
+    global _store
+    _store = None
 
 
 def get_sticker_store(config: PluginConfig | None = None) -> StickerStore:
