@@ -43,6 +43,41 @@ _REQUEST_NOISE_RE = re.compile(
 # 场景词太短就别写进提示词：只剩一个「的」或空串时写进去反而干扰模型。
 _MIN_SCENE_CHARS = 3
 
+# 命中角色档案后，草稿里出现这些内容一律不采纳。
+# 为什么必须过滤：Agent（聊天模型）写 draw prompt 时会凭记忆描述角色外貌，而且经常错——
+# 实测把艾雅法拉写成「蓬松的深紫褐色短发」（她是银白偏浅紫长发），
+# 把另一个角色写成「浅金棕长发、细框圆眼镜、羊尾巴」（那根本不是她）。
+# 这类描述一旦作为"场景"拼进提示词，就和档案里的正确设定同场出现；
+# 图片模型通常听更具体、更靠后的那段，画出来就不是本人。
+# 身份只能有一个来源：档案。
+_COLOR_WORDS = ("银白", "白", "黑", "金", "棕", "褐", "黄", "红", "紫", "蓝", "绿", "粉", "橙", "灰", "青")
+_HAIR_WORDS = ("发", "马尾", "刘海")
+_EYE_WORDS = ("瞳", "眼睛", "眼瞳")
+_BODY_WORDS = ("角", "耳", "尾", "翼", "爪", "兽")
+_CLOTH_WORDS = (
+    "衣", "服", "裙", "鞋", "袜", "帽", "披风", "斗篷", "制服", "配饰", "法杖", "眼镜", "杖",
+    "开衫", "内搭", "外套", "上衣", "裤子", "短裤", "长裤", "夹克", "衬衫", "毛衣", "袍",
+    "泳装", "睡衣", "和服", "汉服", "西装", "礼服", "校服", "背带", "腰带",
+)
+# 泛化人物词：命中档案时，这个人是谁已经确定，再说「少女/少年」只会稀释身份锚点
+_GENERIC_PERSON_WORDS = ("少女", "少年", "女孩", "男孩", "女性", "男性", "人物", "角色", "一位", "一个")
+
+
+def _clause_conflicts_identity(clause: str) -> bool:
+    """这个子句是不是在描述（可能与档案冲突的）长相或服装。"""
+    text = str(clause or "")
+    has_color = any(w in text for w in _COLOR_WORDS)
+    # 发型词不要求带颜色：「额前碎发」照样和档案里的「长发」冲突
+    if any(w in text for w in _HAIR_WORDS):
+        return True
+    if has_color and any(w in text for w in _EYE_WORDS):
+        return True
+    if any(w in text for w in _BODY_WORDS):
+        return True
+    if any(w in text for w in _CLOTH_WORDS):
+        return True
+    return any(w in text for w in _GENERIC_PERSON_WORDS)
+
 
 @dataclass(frozen=True)
 class ImagePrompt:
@@ -255,7 +290,13 @@ class ImagePromptBuilder:
         # 「在咖啡店；艾雅法拉 咖啡店」这种把名字重复一遍的废话。
         draft = (draft_prompt or "").strip()
         if draft:
-            stripped = draft
+            # 先剔掉描述长相/服装的子句，只留场景、动作、光影、构图
+            kept = [
+                c.strip()
+                for c in re.split(r"[，,。；;、\n]", draft)
+                if c.strip() and not _clause_conflicts_identity(c)
+            ]
+            stripped = "；".join(kept)
             for name in profile.all_names():
                 if name:
                     stripped = re.sub(re.escape(name), " ", stripped, flags=re.IGNORECASE)

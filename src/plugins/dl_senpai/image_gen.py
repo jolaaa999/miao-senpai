@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import uuid
 import re
 import time
 from dataclasses import dataclass
@@ -326,6 +327,12 @@ def _truncate_prompt(prompt: str, max_chars: int) -> str:
     limit = max(16, max_chars)
     if len(prompt) <= limit:
         return prompt
+    # 只留开头，不做保头保尾的「智能截断」。
+    # 试过按 60/40 保头保尾，结果把中段的服装约束（"dominant color is vivid green,
+    # dress is entirely green"）切掉了，测试立刻抓到——中段也可能有硬约束。
+    # 真正该做的是**让它别撞上这个上限**：draw_max_prompt_chars 已从 800 提到 2000，
+    # 实测完整提示词 1016~1485 字符、带问题重试约 1635，都在上限内，不会走到这里。
+    # 这里只作为最后一道闸，保开头（角色身份锚定永远在最前面）。
     return prompt[: limit - 1].rstrip() + "…"
 
 
@@ -620,6 +627,7 @@ async def generate_image_file(
     config: PluginConfig | None = None,
     *,
     reference: tuple[str, bytes] | None = None,
+    fresh: bool = False,
 ) -> Path | None:
     """出图。给了 reference 就先走图生图（images.edit），失败退化成纯文生图。
 
@@ -634,7 +642,21 @@ async def generate_image_file(
 
     ref_fp = hashlib.sha256(reference[1]).hexdigest()[:16] if reference else ""
     target = _cache_path(cfg, prompt, extra=ref_fp)
-    if target.is_file() and target.stat().st_size > 0:
+    # 缓存键只由「配置 + 参考图指纹 + 提示词」组成，**没有时间维度**。
+    # 对生图这种「每次都要一张新图」的语义，永久缓存是错的：同一句话画过一次，
+    # 之后每次再画都会拿回同一张。2026-10-28 实测：7 个不同 id 的归档文件
+    # md5 完全相同（854df67ebfcd），全部是同一个缓存文件的副本，
+    # 用户看到的就是「怎么画都是这张」。
+    # 所以生图主链路一律传 fresh=True；只有确实想要复用（批量补图）才不传。
+    if fresh:
+        logger.info(
+            f"dl_senpai draw fresh key={target.stem} prompt_len={len(prompt)}"
+        )
+    elif target.is_file() and target.stat().st_size > 0:
+        logger.info(
+            f"dl_senpai draw cache_hit key={target.stem} bytes={target.stat().st_size} "
+            f"prompt_len={len(prompt)}"
+        )
         return target
 
     client = _draw_client(cfg)
@@ -642,7 +664,9 @@ async def generate_image_file(
     size = cfg.draw_size.strip() or "1024x1024"
     quality = cfg.draw_quality.strip()
     timeout = max(30.0, float(cfg.draw_timeout))
-    tmp = target.with_suffix(".tmp.png")
+    # tmp 带随机后缀：fresh 模式下同一句提示词可能有多个任务并发算到同一个 target，
+    # 共用一个 tmp 文件会互相覆盖，最后谁先 replace 谁赢——那张图可能根本不属于这个任务。
+    tmp = target.with_suffix(f".{uuid.uuid4().hex[:6]}.tmp.png")
 
     # 先试图生图：一次就够，不跟文生图挤在同一个重试循环里，否则日志分不清
     # 到底是哪条路失败
@@ -799,9 +823,29 @@ async def build_image_segment(
     # 这是「画一张艾雅法拉」与「画一只猫」的分岔口：认出来走身份管线，
     # 认不出来一个字都不加，普通生图链路原样保留。
     from .character_resolver import resolve_character
+    from .entity_prompt import UniversalEntityPromptBuilder
+    from .image_intent import analyze_image_intent
     from .image_prompt_builder import ImagePromptBuilder
 
     resolution = resolve_character(user_request, draft_prompt=prompt, config=cfg)
+
+    # ---- 通用意图识别 ----
+    # 档案命中只是四条路里的一条。过去档案没命中就直接掉进普通生图，
+    # 于是「画犬夜叉」变成一张泛泛的古风少年。这里补上「动态解析实体」，
+    # 但成本纪律不变：命中缓存 0 次调用，未命中最多 1 次轻量解析。
+    intent = await analyze_image_intent(
+        user_request,
+        draft_prompt=prompt,
+        has_user_image=bool(reference_images),
+        config=cfg,
+    )
+    trace.image_intent = intent.type
+    trace.entity_count = len(intent.entities)
+    trace.entity_names = tuple(e.canonical_name or e.name for e in intent.entities)
+    trace.entity_source = intent.entity_source
+    trace.entity_confidence = max((e.confidence for e in intent.entities), default=0.0)
+    trace.entity_cache_hit = intent.entity_cache_hit
+    trace.explicit_overrides = intent.override_map()
     if resolution.is_known and resolution.profile is not None:
         trace.intent = "known_character_generation"
         trace.character = resolution.profile.canonical_name
@@ -842,8 +886,159 @@ async def build_image_segment(
     web_mode = _web_reference_mode(cfg) if resolution.is_known else "enabled"
     # local_only / text_only 是基准测试用来控制变量的：这两种模式下**不许**联网，
     # 否则「只用本地库」那组会偷偷被网图补上，A/B 就失去意义了。
-    want_web = reference_policy == "default"
-    if reference is None and auto_reference and want_web and cfg.draw_find_reference and web_mode != "off":
+    # 通用生图默认 text-first：不联网。
+    # 旧行为是「普通图也找一张网图当参考」，那意味着「画一只猫」要多花几秒搜索、
+    # 还可能被一张不相关的图带偏。搜图现在只服务已知实体的身份佐证，
+    # 普通图要搜必须显式打开 draw_web_reference_for_general。
+    want_web = reference_policy == "default" and (
+        intent.type == "known_entity_generation"
+        or bool(getattr(cfg, "draw_web_reference_for_general", False))
+    )
+    # ---- 参考图流水线：先凑 3 张，交叉核对后只送 1 张锚定 ----
+    # 为什么值得多花十几秒：单张参考图错了就只能错到底，没有任何东西能验证它。
+    # 三张独立搜来的图可以互相印证——两张以上都出现的特征才写进提示词，
+    # 再由视觉模型指出哪张最像，而不是盲拿 URL 顺序第一张（经常是缩略图）。
+    # 这套跑失败时下面原来的单张网搜仍然是兜底，不会让用户一张图都拿不到。
+    consensus_traits: tuple[str, ...] = ();
+    _ref_conflict = False
+    if (
+        reference is None
+        and auto_reference
+        and want_web
+        and cfg.draw_find_reference
+        and web_mode != "off"
+        # 这个开关本身就是授权：开了就允许网图锚点进 images.edit（下面是安全阀）
+        and bool(getattr(cfg, "draw_reference_pipeline", False))
+    ):
+        from .draw_pipeline import (
+            analyze_references,
+            collect_references,
+            pick_anchor,
+            traits_block,
+        )
+
+        _profile = resolution.profile if resolution.is_known else None
+        # 把档案里的设定原样交给核对步骤，让它判断「网图跟设定对不对得上」。
+        # 这一步不额外花钱：跟提取共识特征是同一个请求。
+        _expect = ""
+        if _profile is not None:
+            try:
+                _tiers = _profile.identity_tiers()
+                _expect = "\n".join(
+                    f"- {_profile.visual_identity.label(k)}：{v}"
+                    for k, v in (
+                        list(_tiers["human"]) + list(_tiers["reviewed"]) + list(_tiers["unverified"])
+                    )
+                )
+            except Exception:  # noqa: BLE001 — 拼不出来就不判一致性
+                _expect = ""
+        _subject = (
+            _profile.canonical_name if _profile is not None
+            else (intent.entities[0].name if intent.entities else "")
+        )
+        try:
+            _cands = await collect_references(
+                cfg, profile=_profile, user_request=user_request,
+                subject=_subject, user_pair=reference,
+            )
+            _analysis = await analyze_references(
+                cfg, _cands, subject=_subject, expectations=_expect
+            )
+            _anchor = pick_anchor(_cands, _analysis)
+        except Exception as exc:  # noqa: BLE001 — 流水线是增强项，失败就退回单张逻辑
+            logger.warning(
+                f"dl_senpai draw pipeline failed fallback=single "
+                f"err={type(exc).__name__}: {str(exc)[:120]}"
+            )
+            _cands, _analysis, _anchor = [], None, None
+        if _cands:
+            trace.extra["reference_candidates"] = [c.as_dict() for c in _cands]
+        if _analysis is not None:
+            trace.extra["reference_analysis"] = _analysis.as_dict()
+            consensus_traits = _analysis.traits
+        # 安全阀：至少两张候选、且视觉核对成功，才允许网图锚点进 images.edit。
+        # 单张网图正是当初被实测否掉的那条路，不能借流水线的名义绕回来。
+        # 2026-10-27 实测：搜到的三张全是棕发二创，它们互相"共识"一致，
+        # 于是 traits 把棕发写进提示词、edit 又跟着锚点走，画出来全是棕发，
+        # 白烧一张 4 分钟的图之后才被自检发现。所以一致性和共识缺一不可。
+        _anchor_ok = (
+            _anchor is not None
+            and _anchor.source != "user_image"
+            and len(_cands) >= 2
+            and _analysis is not None
+            and _analysis.ok
+            and _analysis.consistent
+        )
+        if _analysis is not None and not _analysis.consistent:
+            trace.extra["reference_conflict"] = list(_analysis.differences)
+            logger.warning(
+                f"dl_senpai draw pipeline references contradict profile "
+                f"diffs={list(_analysis.differences)[:2]} fallback=text_only"
+            )
+            # 冲突的图连"共同特征"也不能信，一并丢掉
+            consensus_traits = ()
+            # 已经确认网图跟设定不符，就别再走下面的单张网搜兜底了——
+            # 那只会在同一个搜索引擎上再找一张同样错的图，白花 40 秒再被拒一次。
+            _ref_conflict = True
+            # 记下来，7 天内不再为这个角色白搜一遍（网图源短期内不会变好）
+            try:
+                from .draw_pipeline import mark_references_unusable
+
+                mark_references_unusable(
+                    _subject, differences=_analysis.differences
+                )
+            except Exception:  # noqa: BLE001 — 记账失败不影响出图
+                pass
+        if not _anchor_ok and _anchor is not None and _anchor.source != "user_image":
+            logger.info(
+                f"dl_senpai draw pipeline anchor_rejected refs={len(_cands)} "
+                f"analysis_ok={bool(_analysis and _analysis.ok)}"
+            )
+        if _anchor_ok:
+            reference = (_anchor.name, _anchor.raw)
+            trace.reference_mode = (
+                "local_verified" if _anchor.source == "local_verified" else "web_verified"
+            )
+            trace.reference_count = 1
+            trace.reference_source = _anchor.source
+            trace.extra["reference_anchor_sha256"] = _anchor.sha256[:16]
+            logger.info(
+                f"dl_senpai draw pipeline refs={len(_cands)} anchor={_anchor.source} "
+                f"traits={len(consensus_traits)}"
+            )
+
+    # 网图黑名单：这个角色的图源刚被判过「跟设定不符」，7 天内不再联网找。
+    # 只拦「联网找图」，不拦用户自己发的图——用户给的图永远优先。
+    _web_subject = ""
+    try:
+        _web_subject = (
+            resolution.profile.canonical_name
+            if resolution.is_known and resolution.profile is not None
+            else (intent.entities[0].name if intent.entities else "")
+        )
+    except Exception:  # noqa: BLE001 — 推不出角色名就当没命中
+        _web_subject = ""
+    _ref_blocked = False
+    if _web_subject:
+        try:
+            from .draw_pipeline import references_known_unusable
+
+            _ref_blocked = references_known_unusable(_web_subject)
+        except Exception:  # noqa: BLE001 — 黑名单坏了不能挡出图
+            _ref_blocked = False
+    if _ref_blocked:
+        logger.info(
+            f"dl_senpai draw web search skipped subject={_web_subject!r} reason=known_unusable"
+        )
+    if (
+        reference is None
+        and not _ref_conflict
+        and not _ref_blocked
+        and auto_reference
+        and want_web
+        and cfg.draw_find_reference
+        and web_mode != "off"
+    ):
         from .draw_reference import find_reference_image
 
         found = await find_reference_image(
@@ -937,6 +1132,30 @@ async def build_image_segment(
         trace.human_verified_fields = built.human_verified_fields
         trace.assistant_reviewed_fields = built.assistant_reviewed_fields
         trace.unverified_fields = built.unverified_fields
+    elif intent.is_known_entity:
+        # 动态实体：本地没有档案，但有名字（可能还有少量高置信特征）。
+        # 同样跳过 enhance —— 理由和上面一样，扩写会做同义化，专有名词首当其冲。
+        built = UniversalEntityPromptBuilder().build(
+            user_request=user_request,
+            intent=intent,
+            draft_prompt=prompt,
+        )
+        prompt = _truncate_prompt(built.text, max(int(cfg.draw_max_prompt_chars), 1800))
+        identity_requirements = built.identity_block
+        if built.negatives:
+            identity_requirements += "\n禁止：" + "；".join(built.negatives)
+        trace.extra["enhance_skipped"] = "known_entity"
+        trace.extra["identity_priority"] = built.identity_priority
+        trace.character_profile_status = built.profile_status
+        # 没有人工核验字段：这些都是模型侧摘要，绝不能记成硬约束
+        trace.human_verified_fields = ()
+        trace.assistant_reviewed_fields = built.assistant_reviewed_fields
+        trace.unverified_fields = ()
+        trace.character = built.character
+        trace.franchise = built.franchise
+        trace.character_confidence = intent.confidence
+        trace.character_reason = intent.reason
+
     else:
         # 普通图：维持原有链路，行为与改动前完全一致（不许被角色管线污染）
         from .draw_cards import augment_prompt, match_character_card
@@ -954,6 +1173,7 @@ async def build_image_segment(
                 user_request=user_request,
                 reference=reference,
                 card_spec=card.spec if card is not None else "",
+                locked_entities=tuple(e.canonical_name or e.name for e in intent.entities),
             )
 
         # 官方设定仍然要压在最前面（截断之前拼，否则被截掉就等于没加）
@@ -962,28 +1182,75 @@ async def build_image_segment(
         )
         identity_requirements = card.spec if card is not None else ""
 
+    # 三张参考图的共同特征：介于「人工核验硬约束」和「单图随意描述」之间的软提示。
+    # 放在身份段之后、场景段之前，且明确标注不是硬规则，避免又变成编造。
+    _traits_text = ""
+    if consensus_traits:
+        from .draw_pipeline import traits_block
+
+        _tb = traits_block(consensus_traits)
+        if _tb:
+            _traits_text = _tb
+            prompt = _truncate_prompt(
+                f"{prompt}\n\n{_tb}", max(int(cfg.draw_max_prompt_chars), 2000)
+            )
+
     trace.final_prompt = prompt
     trace.generation_mode = "edit" if reference is not None else "text_only"
     logger.info(f"dl_senpai draw final prompt={prompt[:180]!r}")
 
-    path = await generate_image_file(prompt, cfg, reference=reference)
+    # 生图主链路每次都要新图，不吃缓存
+    path = await generate_image_file(prompt, cfg, reference=reference, fresh=True)
 
     # 出图自检：不合格就带着**具体问题**重画。
     # 为什么必须带问题：不告诉它错在哪，同一个模型会用同样的方式再错一遍。
     if path is not None and cfg.draw_verify and cfg.draw_max_retry > 0:
         from .draw_enhance import judge_image
 
-        requirements = (identity_requirements + "\n用户要求：" + (user_request or "")).strip()
+        # 服装/场景/姿势以用户要求为准。2026-10-28 实测：用户要「穿死库水」，
+        # 自检却因为「缺少黑色罗德岛制服和火山法杖」判不合格，白重画一张 60 秒。
+        # 身体特征（发色瞳色耳朵角尾巴）仍必须符合设定——那部分不能让。
+        requirements = (
+            identity_requirements
+            + "\n用户要求：" + (user_request or "")
+            + "\n判定规则：服装、场景、姿势一律以「用户要求」为准；"
+            + "用户明确指定了泳装/浴衣/便服/睡衣/校服等，缺少默认制服或标志性道具"
+            + "不算错，也不要要求补上。但发色、瞳色、耳朵、角、尾巴等身体特征"
+            + "仍必须符合设定。"
+        ).strip()
         ok, issue = await judge_image(cfg, path, requirements=requirements)
         attempts = 0
         while not ok and attempts < cfg.draw_max_retry:
             attempts += 1
+            # 身份类问题多半是参考图把设定带偏了。再拿同一张图重画只会得到
+            # 同一张错图（实测：棕褐发色，重画仍棕褐，白烧 4 分钟又超时）。
+            # 这类重试必须**换依据**：丢掉参考图和网图共识特征，只按档案画。
+            _identity_issue = bool(re.search(
+                r"发色|头发|瞳|眼睛|服装|服饰|衣|角|尾巴|配色|颜色|设定|身份|角色",
+                issue or "",
+            ))
+            _drop_reference = _identity_issue and reference is not None
+            _retry_ref = None if _drop_reference else reference
+            _base_prompt = prompt
+            if _identity_issue and _traits_text:
+                _base_prompt = _base_prompt.replace(_traits_text, "")
+            _hint = (
+                "\n（上一次参考了不准确的网图，导致设定画错；这次不要参考图，严格按角色设定画）"
+                if _drop_reference
+                else ""
+            )
             retry_prompt = _truncate_prompt(
-                f"{prompt}\n\n上一次生成的问题（这次必须修正）：{issue}",
+                f"{_base_prompt}\n\n上一次生成的问题（这次必须修正）：{issue}{_hint}",
                 cfg.draw_max_prompt_chars,
             )
-            logger.info(f"dl_senpai draw retry {attempts} issue={issue[:80]!r}")
-            retry_path = await generate_image_file(retry_prompt, cfg, reference=reference)
+            logger.info(
+                f"dl_senpai draw retry {attempts} issue={issue[:80]!r} "
+                f"drop_reference={_drop_reference}"
+            )
+            # 重画同理：命中旧缓存等于没重画
+            retry_path = await generate_image_file(
+                retry_prompt, cfg, reference=_retry_ref, fresh=True
+            )
             if retry_path is None:
                 break
             path, prompt = retry_path, retry_prompt

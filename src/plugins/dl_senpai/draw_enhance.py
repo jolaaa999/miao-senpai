@@ -110,6 +110,7 @@ async def enhance_prompt(
     user_request: str,
     reference: tuple[str, bytes] | None = None,
     card_spec: str = "",
+    locked_entities: tuple[str, ...] = (),
 ) -> str:
     """把提示词扩写成完整画面描述。
 
@@ -139,6 +140,14 @@ async def enhance_prompt(
             "与官方设定矛盾的词（例如官方写「猫耳」而草稿写「精灵耳」，就只保留猫耳）；"
             "官方设定本身也不必逐字重复，融进描述里即可。"
         )
+    if locked_entities:
+        # 实体锁定：旧版扩写会把「艾雅法拉」同义化成「羊角少女」——读起来通顺，
+        # 身份却没了。这里把名字钉进指令，并在返回前做一次硬校验。
+        instruction += (
+            "\n\n【LOCKED_ENTITY，绝对不可替换】" + " / ".join(locked_entities)
+            + "\n这个专有名词必须原样出现在结果里，一个字都不能改，"
+            "也不许换成「某位姑娘」「那位少女」这类代称或外形描述。"
+        )
     if user_request:
         instruction += "\n\n用户的原话：" + user_request[:200]
     if ref_desc:
@@ -153,6 +162,19 @@ async def enhance_prompt(
         for junk in ("好的，", "扩写如下：", "以下是扩写后的描述：", "画面描述："):
             if text.startswith(junk):
                 text = text[len(junk) :].strip()
+        if locked_entities:
+            # 校验失败就整段弃用，宁可少点润色也不能丢身份
+            from .image_intent import validate_entity_preservation
+
+            lost = [
+                name for name in locked_entities
+                if not validate_entity_preservation(name, (), text)
+            ]
+            if lost:
+                logger.warning(
+                    f"dl_senpai draw enhance dropped entity {lost} -> fallback original prompt"
+                )
+                return prompt
         logger.info(f"dl_senpai draw enhanced prompt {len(prompt)} -> {len(text)} chars")
         return text or prompt
     except Exception as exc:  # noqa: BLE001
@@ -181,11 +203,18 @@ async def judge_image(
         {
             "type": "text",
             "text": (
-                "检查这张图是否符合要求。重点看：1) 硬特征是否齐全（族属/兽耳兽尾、发色瞳色、"
-                "服装主色、标志物）；2) 面部和手部有没有明显崩坏；3) 有没有多余元素或文字错乱。\n"
-                "要求：" + requirements[:400] + "\n\n"
+                "你是校对员。只核对画面是否满足下面【验收要求】里**写明**的项目。\n\n"
+                "【验收要求】\n" + requirements[:3000] + "\n\n"
+                "【判定规则，必须遵守】\n"
+                "1. 只判定【验收要求】里明确写出的项目。要求里没写的特征，一律不算错。\n"
+                "2. **不许自己补充角色设定**。你不知道这个角色长什么样，凭印象加进来的要求"
+                "会把正确的图判成错的——实测：曾因为「缺少羊耳兽尾」判错一张完全正确的"
+                "艾雅法拉，而她的设定里根本没有兽耳兽尾。\n"
+                "3. 服装、场景、姿势以「用户要求」为准。用户指定了泳装/便服/浴衣，"
+                "缺少默认制服或标志性道具不算错，也不要要求补上。\n"
+                "4. 另外看：面部和手部有没有明显崩坏、有没有多余文字。\n\n"
                 "只输出两行：第一行「通过」或「不通过」；第二行如果不通过，用一句话说清具体问题"
-                "（例如「画成了人类耳朵，没有猫耳」），通过则留空。"
+                "（例如「头发画成了棕色，应为银白偏浅紫」），通过则留空。"
             ),
         },
         {"type": "image_url", "image_url": {"url": _data_url(raw)}},

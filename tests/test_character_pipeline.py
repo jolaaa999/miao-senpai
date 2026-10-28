@@ -212,7 +212,7 @@ def stub_generate(monkeypatch, tmp_path):
 
     calls: list[dict] = []
 
-    async def _fake_generate(prompt, config=None, *, reference=None):
+    async def _fake_generate(prompt, config=None, *, reference=None, fresh=False):
         calls.append({"prompt": prompt, "reference": reference})
         return png
 

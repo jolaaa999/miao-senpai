@@ -103,6 +103,18 @@ class ImageGenerationTrace:
     assistant_reviewed_fields: tuple[str, ...] = ()
     unverified_fields: tuple[str, ...] = ()
     hint_fields: tuple[str, ...] = ()
+
+    # ---- 通用意图与实体（本阶段新增）----
+    # 为什么单独记：出图不对时要先分清是「路径选错了」还是「路径没错、模型没画好」。
+    # 只有 image_intent 能回答第一个问题。
+    image_intent: str = ""             # general_generation / known_entity_generation / reference_generation / image_edit
+    entity_count: int = 0
+    entity_names: tuple[str, ...] = ()
+    entity_source: str = ""            # cache / dynamic_resolver / user_reference / rule / name_only
+    entity_confidence: float = 0.0
+    entity_cache_hit: bool = False
+    entity_preservation_valid: bool | None = None
+    explicit_overrides: dict[str, str] = field(default_factory=dict)
     # 身份评分（只测量，不触发重画）
     identity_score: float | None = None
     identity_dimensions: dict[str, float | None] = field(default_factory=dict)
@@ -150,6 +162,17 @@ class ImageGenerationTrace:
             "assistant_reviewed_fields": list(self.assistant_reviewed_fields) or None,
             "unverified_fields": list(self.unverified_fields) or None,
             "hint_fields": list(self.hint_fields) or None,
+            "image_intent": self.image_intent or None,
+            "entity_count": self.entity_count or None,
+            "entity_names": list(self.entity_names) or None,
+            "entities": [
+                {"name": name, "source": self.entity_source or "unknown",
+                 "confidence": round(self.entity_confidence, 3)}
+                for name in self.entity_names
+            ] if self.entity_names else None,
+            "entity_cache_hit": self.entity_cache_hit or None,
+            "entity_preservation_valid": self.entity_preservation_valid,
+            "explicit_overrides": self.explicit_overrides or None,
             "identity_score": round(self.identity_score, 3) if self.identity_score is not None else None,
             "identity_dimensions": {k: (round(v, 3) if isinstance(v, (int, float)) else v)
                                     for k, v in self.identity_dimensions.items()} or None,

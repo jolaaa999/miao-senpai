@@ -89,7 +89,9 @@ class DrawStore:
         record_id = uuid.uuid4().hex[:16]
         target = self.files_dir / f"{record_id}.png"
         try:
-            shutil.copy2(cache_path, target)
+            # copyfile 而不是 copy2：copy2 会把缓存文件的 mtime 带过来，
+            # 于是几十个不同时间归档的图全显示同一个时间戳，排查时根本分不清谁是谁。
+            shutil.copyfile(cache_path, target)
         except OSError as exc:
             logger.warning(f"dl_senpai draw archive copy failed: {exc}")
             return None

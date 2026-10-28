@@ -222,7 +222,7 @@ def stub_run(tmp_path, monkeypatch, bench):
     out.write_bytes(PNG)
     calls: dict = {"generate": [], "evaluate": [], "reference_side": []}
 
-    async def _fake_generate(prompt, config=None, *, reference=None):
+    async def _fake_generate(prompt, config=None, *, reference=None, fresh=False):
         calls["generate"].append({"reference": reference})
         return out
 

@@ -331,7 +331,7 @@ async def test_case6_local_verified_skips_web_search(monkeypatch, tmp_path) -> N
     out.write_bytes(PNG)
     calls: list[dict] = []
 
-    async def _fake(prompt, config=None, *, reference=None):
+    async def _fake(prompt, config=None, *, reference=None, fresh=False):
         calls.append({"reference": reference})
         return out
 
@@ -375,7 +375,7 @@ async def test_case6_local_only_never_falls_back_to_web(monkeypatch, tmp_path) -
     out.write_bytes(PNG)
     seen: list[dict] = []
 
-    async def _fake(prompt, config=None, *, reference=None):
+    async def _fake(prompt, config=None, *, reference=None, fresh=False):
         seen.append({"reference": reference})
         return out
 
@@ -485,7 +485,7 @@ async def test_case10_general_image_untouched(monkeypatch, tmp_path) -> None:
     out.write_bytes(PNG)
     prompts: list[str] = []
 
-    async def _fake(prompt, config=None, *, reference=None):
+    async def _fake(prompt, config=None, *, reference=None, fresh=False):
         prompts.append(prompt)
         return out
 

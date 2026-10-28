@@ -8,6 +8,8 @@ import httpx
 from nonebot import logger
 from nonebot.adapters.onebot.v11 import Bot
 
+from .msg_format import format_user_turn
+
 _STICKER_IMAGE_SUB_TYPES = {1, "1", "sticker", "emoji"}
 _STICKER_SUMMARY_HINTS = ("[动画表情]", "[表情]", "emoji", "sticker")
 _DATA_URL_RE = re.compile(r"^data:image/[\w+.-]+;base64,", re.I)
@@ -149,6 +151,14 @@ async def resolve_vision_images(
     for data in segments[: max(1, max_images)]:
         resolved = await resolve_image_data_url(bot, data)
         if resolved:
+            # 交给模型之前先归一化：几千像素的原图既费钱又会被降采样，
+            # 动图更是只吃得到第一帧（media_normalize 会拼成网格）。
+            try:
+                from .media_normalize import normalize_data_url_configured
+
+                resolved = normalize_data_url_configured(resolved)
+            except Exception:  # noqa: BLE001 — 压不了就用原图，绝不能因此丢图
+                pass
             urls.append(resolved)
         else:
             logger.warning(
@@ -216,9 +226,10 @@ def format_user_text_for_memory(
         image_count=image_count,
         sticker_count=sticker_count,
     )
+    # 前缀统一走 msg_format（和主链路同一个形态），否则写进记忆/历史的那一份
+    # 又是旧格式，模型在历史里会重新捡回「名字：内容」的读法。
     if image_count > 0 and sticker_count <= 0:
-        suffix = f" [附{image_count}张图]"
-        return f"{sender}：{body}{suffix}"
+        return format_user_turn(sender, f"{body} [附{image_count}张图]")
     if sticker_count > 0 and "表情" not in body:
-        return f"{sender}：{body} [表情]"
-    return f"{sender}：{body}" if body else f"{sender}：（空消息）"
+        return format_user_turn(sender, f"{body} [表情]")
+    return format_user_turn(sender, body)
