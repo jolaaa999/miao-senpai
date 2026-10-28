@@ -26,6 +26,12 @@ const router = createRouter({
         { path: 'speak-styles', name: 'speak-styles', component: () => import('@/views/SpeakStylesView.vue') },
         { path: 'logs', name: 'logs', component: () => import('@/views/LogsView.vue') },
         { path: 'agent-traces', name: 'agent-traces', component: () => import('@/views/AgentTracesView.vue') },
+        // v1.3.0 新增页面
+        { path: 'diary', name: 'diary', component: () => import('@/views/DiaryView.vue') },
+        { path: 'characters', name: 'characters', component: () => import('@/views/CharactersView.vue') },
+        { path: 'shop', name: 'shop', component: () => import('@/views/ShopView.vue') },
+        { path: 'trends', name: 'trends', component: () => import('@/views/TrendsView.vue') },
+        { path: 'changelog', name: 'changelog', component: () => import('@/views/ChangelogView.vue') },
       ],
     },
   ],

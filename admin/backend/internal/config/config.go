@@ -21,6 +21,14 @@ type Config struct {
 	DrawDir      string
 	TrendsDir    string
 	GroupFeaturesPath string
+	// 新增页面用到的数据路径（全部只读）
+	DiaryDir             string
+	ShopDir              string
+	CharacterCatalogPath string
+	CharacterRefDir      string
+	DrawTracePath        string
+	// 人设卡目录：与 bot 侧 DL_SENPAI_PERSONA_CARD_DIR 指向同一处
+	PersonaCardDir       string
 }
 
 func Load() Config {
@@ -76,6 +84,12 @@ func Load() Config {
 		DrawDir:     filepath.Join(root, "data", "dl_senpai", "draw"),
 		TrendsDir:   filepath.Join(root, "data", "dl_senpai", "trends"),
 		GroupFeaturesPath: filepath.Join(root, "data", "dl_senpai", "admin", "group_features.json"),
+		DiaryDir:             filepath.Join(root, "data", "dl_senpai", "diary"),
+		ShopDir:              filepath.Join(root, "data", "dl_senpai", "shop"),
+		CharacterCatalogPath: filepath.Join(root, "src", "plugins", "dl_senpai", "data", "characters.json"),
+		CharacterRefDir:      filepath.Join(root, "data", "dl_senpai", "character_references"),
+		DrawTracePath:        filepath.Join(root, "data", "dl_senpai", "draw_traces.jsonl"),
+		PersonaCardDir:       filepath.Join(root, "data", "dl_senpai", "personas"),
 	}
 }
 

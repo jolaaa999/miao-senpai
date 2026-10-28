@@ -1,7 +1,13 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
-import { consoleApi, type PersonaDraft } from '@/api/client'
-import { ElMessage } from 'element-plus'
+import { computed, onMounted, ref } from 'vue'
+import {
+  consoleApi,
+  type PersonaCardInfo,
+  type PersonaCardsSnapshot,
+  type PersonaDraft,
+  type SessionSummary,
+} from '@/api/client'
+import { ElMessage, ElMessageBox } from 'element-plus'
 
 const loading = ref(true)
 const saving = ref(false)
@@ -47,6 +53,114 @@ function formatTime(iso: string) {
   return new Date(iso).toLocaleString('zh-CN')
 }
 
+// ---------- 人设卡 ----------
+// 只做「列 / 绑 / 解绑 / 看正文 / 导出」：编辑卡正文仍直接改 md。
+// 体检（AI 味、硬规则位置）在 Python 侧，控制台再写一套规则必然漂移，
+// 那种「页面说没问题、线上却开口像客服」的坑不值得挖。
+const cards = ref<PersonaCardsSnapshot>({
+  dir: '',
+  cards: [],
+  bindings: {},
+  default_id: '',
+  note: '',
+})
+const cardsLoading = ref(false)
+const sessions = ref<SessionSummary[]>([])
+const bindSession = ref('')
+const bodyVisible = ref(false)
+const bodyText = ref('')
+const bodyTitle = ref('')
+
+const boundSessions = computed(() => {
+  const map: Record<string, string[]> = {}
+  for (const [session, cardId] of Object.entries(cards.value.bindings || {})) {
+    ;(map[cardId] ||= []).push(session)
+  }
+  return map
+})
+
+async function loadCards() {
+  cardsLoading.value = true
+  try {
+    const [cardRes, sessionRes] = await Promise.all([
+      consoleApi.personaCards(),
+      consoleApi.sessions(),
+    ])
+    cards.value = cardRes.data
+    sessions.value = sessionRes.data.items || []
+    if (!bindSession.value && sessions.value.length) {
+      bindSession.value = sessions.value[0].session_id
+    }
+  } catch {
+    ElMessage.error('人设卡读取失败')
+  } finally {
+    cardsLoading.value = false
+  }
+}
+
+function syncTag(card: PersonaCardInfo) {
+  if (card.source_synced === null) return { text: '—', type: 'info' as const }
+  return card.source_synced
+    ? { text: '= 同步', type: 'success' as const }
+    : { text: '≠ 已漂移', type: 'warning' as const }
+}
+
+async function bindCard(cardId: string) {
+  if (!bindSession.value) {
+    ElMessage.warning('先选一个会话（group:群号）')
+    return
+  }
+  try {
+    const res = await consoleApi.bindPersonaCard(bindSession.value, cardId)
+    cards.value = res.data
+    ElMessage.success(`${bindSession.value} 已切到「${cardId}」，下一句就生效`)
+  } catch (err: any) {
+    ElMessage.error(err?.response?.data?.error || '绑定失败')
+  }
+}
+
+async function unbindSession(session: string) {
+  try {
+    const res = await consoleApi.bindPersonaCard(session, '')
+    cards.value = res.data
+    ElMessage.success(`${session} 已回到 persona.py 那份`)
+  } catch (err: any) {
+    ElMessage.error(err?.response?.data?.error || '解绑失败')
+  }
+}
+
+async function showBody(cardId: string) {
+  try {
+    const res = await consoleApi.personaCardBody(cardId)
+    bodyTitle.value = `${res.data.name}（${res.data.file}）`
+    bodyText.value = res.data.body
+    bodyVisible.value = true
+  } catch {
+    ElMessage.error('读不到这张卡的正文')
+  }
+}
+
+async function exportCard() {
+  let name = ''
+  try {
+    const res = await ElMessageBox.prompt(
+      '把当前 persona.py 的人设存成一张卡（之后可以在卡上改，不影响其他会话）',
+      '导出一张卡',
+      { inputPlaceholder: '卡名，例如 学姐2', inputPattern: /^[^\\/:*?"<>|]{1,32}$/, inputErrorMessage: '不能带路径符号' },
+    )
+    name = res.value
+  } catch {
+    return
+  }
+  try {
+    const res = await consoleApi.exportPersonaCard(name)
+    cards.value = res.data
+    ElMessage.success(`已写出 data/dl_senpai/personas/${name}.md`)
+  } catch (err: any) {
+    ElMessage.error(err?.response?.data?.error || '导出失败')
+  }
+}
+
 onMounted(load)
 </script>
 
@@ -66,6 +180,81 @@ onMounted(load)
         <el-button type="primary" :loading="saving" @click="save">保存到文件</el-button>
       </div>
     </div>
+
+    <section class="glass-card panel full card-panel" v-loading="cardsLoading">
+      <h2>人设卡</h2>
+      <p class="hint">
+        一张卡 = 一份「她是谁」，存在 <code>{{ cards.dir || 'data/dl_senpai/personas' }}</code>。
+        绑定某个会话后该会话就用卡；没绑定的继续用 <code>persona.py</code> 那份。
+        这里的绑定即时生效，不用重启（改 .env 默认卡才要重启）。
+      </p>
+      <div class="card-toolbar">
+        <el-select
+          v-model="bindSession"
+          filterable
+          allow-create
+          default-first-option
+          placeholder="选择会话（group:群号 / private:QQ）"
+          class="session-pick"
+        >
+          <el-option
+            v-for="s in sessions"
+            :key="s.session_id"
+            :label="`${s.session_id}（${s.turn_count} 轮）`"
+            :value="s.session_id"
+          />
+        </el-select>
+        <el-button @click="loadCards">刷新</el-button>
+        <el-button type="primary" plain @click="exportCard">把当前人设导出成卡</el-button>
+      </div>
+
+      <el-empty v-if="!cards.cards.length" description="卡库是空的：先放个 md 进去，或用上面的导出按钮" />
+
+      <el-table v-else :data="cards.cards" size="small" class="card-table">
+        <el-table-column prop="id" label="卡名" width="150" />
+        <el-table-column prop="name" label="展示名" width="130" />
+        <el-table-column label="来源" width="120">
+          <template #default="{ row }">
+            <el-tag :type="syncTag(row).type" size="small">{{ syncTag(row).text }}</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column prop="chars" label="字数" width="80" />
+        <el-table-column label="绑定的会话" min-width="220">
+          <template #default="{ row }">
+            <template v-if="boundSessions[row.id]">
+              <el-tag
+                v-for="session in boundSessions[row.id]"
+                :key="session"
+                size="small"
+                closable
+                class="session-tag"
+                @close="unbindSession(session)"
+              >
+                {{ session }}
+              </el-tag>
+            </template>
+            <span v-else class="muted">未绑定</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="操作" width="200">
+          <template #default="{ row }">
+            <el-button link type="primary" @click="showBody(row.id)">看正文</el-button>
+            <el-button link type="primary" @click="bindCard(row.id)">绑到选中会话</el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+
+      <p class="hint card-foot">
+        默认卡：<code>{{ cards.default_id || '（无，未绑定的会话用 persona.py）' }}</code>
+        <br />
+        群里也能用 <code>/人设 &lt;卡名&gt;</code> 切换（需管理员）；「≠ 已漂移」表示这张卡是从
+        persona.py 导出后又改过（或源头后来改过），改哪份算数得先定。
+      </p>
+
+      <el-dialog v-model="bodyVisible" :title="bodyTitle" width="72%">
+        <pre class="card-body">{{ bodyText }}</pre>
+      </el-dialog>
+    </section>
 
     <div class="persona-grid">
       <section class="glass-card panel">
@@ -183,5 +372,49 @@ onMounted(load)
 
 .readonly-note {
   background: rgba(255, 255, 255, 0.55);
+}
+
+.card-panel {
+  margin-bottom: 1rem;
+}
+
+.card-toolbar {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  margin-bottom: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.session-pick {
+  min-width: 260px;
+}
+
+.card-table {
+  margin-bottom: 0.5rem;
+}
+
+.session-tag {
+  margin-right: 0.35rem;
+}
+
+.muted {
+  color: var(--senpai-muted);
+  font-size: 0.85rem;
+}
+
+.card-foot {
+  margin-top: 0.5rem;
+}
+
+.card-body {
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: 'Cascadia Code', 'Consolas', monospace;
+  font-size: 0.82rem;
+  line-height: 1.6;
+  max-height: 60vh;
+  overflow: auto;
+  margin: 0;
 }
 </style>

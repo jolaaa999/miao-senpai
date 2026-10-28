@@ -16,7 +16,13 @@ import {
   Operation,
   ChatLineRound,
   Connection,
+  Notebook,
+  Avatar,
+  Shop,
+  TrendCharts,
+  Clock,
 } from '@element-plus/icons-vue'
+import { CONSOLE_VERSION } from '@/config/changelog'
 
 const route = useRoute()
 const router = useRouter()
@@ -34,6 +40,11 @@ const navItems = [
   { path: '/group-features', name: '群功能开关', icon: Operation },
   { path: '/logs', name: '运行日志', icon: Document },
   { path: '/agent-traces', name: '调用链', icon: Connection },
+  { path: '/diary', name: '学姐日记', icon: Notebook },
+  { path: '/characters', name: '角色档案', icon: Avatar },
+  { path: '/shop', name: '服装店', icon: Shop },
+  { path: '/trends', name: '热梗缓存', icon: TrendCharts },
+  { path: '/changelog', name: '更新记录', icon: Clock },
 ]
 
 const active = computed(() => route.path)
@@ -60,6 +71,9 @@ function logout() {
           <span>{{ item.name }}</span>
         </el-menu-item>
       </el-menu>
+      <RouterLink to="/changelog" class="version-badge" title="查看更新记录">
+        v{{ CONSOLE_VERSION }}
+      </RouterLink>
       <button class="logout-btn" @click="logout">
         <el-icon><SwitchButton /></el-icon>
         退出登录
@@ -127,6 +141,26 @@ function logout() {
   background: var(--senpai-accent-soft) !important;
   color: var(--senpai-accent-deep) !important;
   font-weight: 600;
+}
+
+.version-badge {
+  display: block;
+  margin: 0 0.75rem 0.25rem;
+  padding: 0.4rem 0.5rem;
+  text-align: center;
+  font-size: 0.72rem;
+  letter-spacing: 0.06em;
+  color: var(--senpai-muted);
+  border: 1px dashed var(--senpai-border);
+  border-radius: 8px;
+  text-decoration: none;
+  transition: all 0.2s;
+
+  &:hover {
+    color: var(--senpai-accent-deep);
+    border-color: rgba(249, 115, 22, 0.4);
+    background: var(--senpai-accent-soft);
+  }
 }
 
 .logout-btn {

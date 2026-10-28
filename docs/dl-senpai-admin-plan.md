@@ -111,3 +111,33 @@ scripts/
 【不要】修改 bot.py 或 dl_senpai 插件逻辑（v1 独立服务读 JSON 即可）
 【不要】提交 .env 或真实密钥
 ```
+
+---
+
+## 九、v1.3.0 新增页面（2026-10-28）
+
+把 bot 侧最近做出来的能力接进控制台，全部为只读视图：
+
+| 页面 | 前端 | 后端接口 | 数据源 |
+|------|------|----------|--------|
+| 学姐日记 | `views/DiaryView.vue` | `GET /senpai-diary?limit=200` | `data/dl_senpai/diary/index.jsonl` |
+| 角色档案 | `views/CharactersView.vue` | `GET /character-identity?trace_limit=30` | `src/plugins/dl_senpai/data/characters.json`、`data/dl_senpai/character_references/`、`bench-*.json`、`data/dl_senpai/draw_traces.jsonl` |
+| 服装店 | `views/ShopView.vue` | `GET /outfit-shop`、`GET /outfit-shop/thumbs/:name` | `data/dl_senpai/shop/` |
+| 热梗缓存 | `views/TrendsView.vue` | `GET /trends-snapshot`（接口原有，本次补页面） | `data/dl_senpai/trends/cache.json` |
+| 更新记录 | `views/ChangelogView.vue` | 无（读前端配置） | `src/config/changelog.ts` |
+
+配套服务：`internal/services/diary.go`、`shop.go`、`character.go`。
+
+### 版本记录约定
+
+- 唯一数据源是 `admin/frontend/src/config/changelog.ts`，数组按时间倒序，`CONSOLE_VERSION` 取第一条；
+  侧栏底部与「更新记录」页都读它，不再各写一份版本号。
+- 语义化版本：**major** 整体重做、**minor** 新增页面或可写能力、**patch** 修 bug / 改文案。
+- 每次控制台有用户可见改动，同一次提交里在数组头部补一条，写清：版本号、日期、标题、
+  highlights、页面级变更、涉及接口、关联 commit。
+- `admin/frontend/package.json` 的 version 与最新一条保持一致。
+
+### 安全
+
+- 服装缩略图由后端 `ThumbPath()` 校验，只接受纯文件名，拒绝 `../` 与路径分隔符，避免目录穿越。
+- 新增接口全部挂在带 JWT 的 `auth` 路由组下，无匿名访问入口。

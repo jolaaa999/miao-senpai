@@ -240,6 +240,38 @@ export interface AgentTraceResult {
   notice: string
 }
 
+// ---------- 人设卡 ----------
+// 一张卡 = 一份「她是谁」（data/dl_senpai/personas/*.md）。
+// 绑定到某个会话后，那个会话就用卡；没绑定的继续用 persona.py 那份。
+export interface PersonaCardInfo {
+  id: string
+  name: string
+  description: string
+  groups: string[]
+  chars: number
+  file: string
+  source_ref: string
+  /** null = 没有可对账的来源；true/false = 与 persona.py 同步 / 已漂移 */
+  source_synced: boolean | null
+  updated_at: string
+}
+
+export interface PersonaCardsSnapshot {
+  dir: string
+  cards: PersonaCardInfo[]
+  /** 会话键（group:xxx / private:xxx）-> 卡 id */
+  bindings: Record<string, string>
+  default_id: string
+  note: string
+}
+
+export interface PersonaCardBody {
+  id: string
+  name: string
+  body: string
+  file: string
+}
+
 export interface PersonaDraft {
   senpai_name: string
   system_prompt: string
@@ -247,6 +279,149 @@ export interface PersonaDraft {
   monster_hunter_extra: string
   file_path: string
   updated_at: string
+}
+
+// ---------- 学姐日记（v1.3.0） ----------
+export interface DiaryEntry {
+  id: string
+  day: string
+  title: string
+  text: string
+  mood: string
+  angle: string
+  tier: string
+  tags: string[]
+  life_days: number
+  created_at: string
+}
+
+export interface DiaryDay {
+  day: string
+  count: number
+}
+
+export interface DiarySnapshot {
+  items: DiaryEntry[]
+  days: DiaryDay[]
+  total: number
+  path: string
+}
+
+// ---------- 服装店（v1.3.0） ----------
+export interface OutfitCatalogItem {
+  id: string
+  name: string
+  price: number
+  outfit_en: string
+  /** 缩略图文件名；为空表示本地没有图 */
+  thumb: string
+}
+
+export interface OutfitSlot {
+  id: string
+  name: string
+}
+
+export interface ShopGroup {
+  group_id: string
+  name: string
+  slots: OutfitSlot[]
+  current_outfit_id: string
+  current_outfit_name: string
+  slots_refresh_day: string
+  updated_at: string
+  warehouse_user_count: number
+  owned_count: number
+}
+
+export interface OutfitShopSnapshot {
+  catalog: OutfitCatalogItem[]
+  groups: ShopGroup[]
+  thumb_dir: string
+  catalog_path: string
+}
+
+// ---------- 角色档案与身份一致性（v1.3.0） ----------
+export type VerificationStatus = 'human_verified' | 'assistant_reviewed' | 'unverified'
+
+export interface CharacterField {
+  key: string
+  label: string
+  value: string
+  verification_status: VerificationStatus | string
+  verification_method: string
+  verified_at: string
+  note: string
+}
+
+export interface CharacterProfile {
+  key: string
+  canonical_name: string
+  localized_names: string[]
+  aliases: string[]
+  franchise: string
+  franchise_localized: string
+  identity_priority: string
+  confidence: number
+  profile_status: string
+  fields: CharacterField[]
+  must_preserve: string[]
+  creative_freedom: string[]
+  negative_notes: string[]
+  human_verified_count: number
+  reviewed_count: number
+  unverified_count: number
+}
+
+export interface CharacterReference {
+  manifest: string
+  character: string
+  localized_name: string
+  file: string
+  type: string
+  reference_role: string
+  verification_status: string
+  priority: number
+  source_type: string
+  verified_at: string
+  notes: string
+}
+
+export interface IdentityBenchmark {
+  strategy: string
+  file: string
+  item_count: number
+  models: string[]
+  avg_prompt_chars: number
+  /** 带人工核验参考图的条数（部分覆盖也要能看见） */
+  human_reference_count: number
+  created_from: string
+  created_to: string
+}
+
+export interface ImageTrace {
+  trace_id: string
+  character: string
+  franchise: string
+  intent: string
+  reference_mode: string
+  reference_count: number
+  generation_mode: string
+  result: string
+  elapsed_ms: number
+  final_prompt_chars: number
+  original_prompt: string
+  ts: string
+}
+
+export interface CharacterSnapshot {
+  profiles: CharacterProfile[]
+  references: CharacterReference[]
+  benchmarks: IdentityBenchmark[]
+  traces: ImageTrace[]
+  note: string
+  version: number
+  catalog: string
 }
 
 export const consoleApi = {
@@ -293,9 +468,24 @@ export const consoleApi = {
     api.get<AgentTraceResult>('/agent-traces', { params }),
   personaDraft: () => api.get<PersonaDraft>('/senpai-persona-draft'),
   savePersonaDraft: (data: Partial<PersonaDraft>) => api.put<PersonaDraft>('/senpai-persona-draft', data),
+  // 人设卡：列 / 绑（card 为空即解绑）/ 看正文 / 从 persona.py 导出一张
+  personaCards: () => api.get<PersonaCardsSnapshot>('/persona-cards'),
+  bindPersonaCard: (session: string, card: string) =>
+    api.put<PersonaCardsSnapshot>('/persona-cards/binding', { session, card }),
+  personaCardBody: (id: string) =>
+    api.get<PersonaCardBody>(`/persona-cards/${encodeURIComponent(id)}/body`),
+  exportPersonaCard: (id: string) =>
+    api.post<PersonaCardsSnapshot>('/persona-cards/export', { id }),
   speakStyles: () => api.get<SpeakStylesSnapshot>('/speak-styles'),
   setSpeakStyleActive: (id: string) => api.put<SpeakStylesSnapshot>('/speak-styles/active', { id }),
   upsertSpeakStyle: (data: Partial<SpeakStyle> & { id: string; name: string }) =>
     api.put<SpeakStylesSnapshot>('/speak-styles', data),
   deleteSpeakStyle: (id: string) => api.delete<SpeakStylesSnapshot>(`/speak-styles/${encodeURIComponent(id)}`),
+  // v1.3.0 新增：学姐日记 / 服装店 / 角色身份
+  diary: (limit = 200) => api.get<DiarySnapshot>('/senpai-diary', { params: { limit } }),
+  outfitShop: () => api.get<OutfitShopSnapshot>('/outfit-shop'),
+  shopThumb: (filename: string) =>
+    api.get<Blob>(`/outfit-shop/thumbs/${encodeURIComponent(filename)}`, { responseType: 'blob' }),
+  characterIdentity: (traceLimit = 30) =>
+    api.get<CharacterSnapshot>('/character-identity', { params: { trace_limit: traceLimit } }),
 }

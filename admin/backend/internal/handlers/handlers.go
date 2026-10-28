@@ -30,6 +30,10 @@ type Handler struct {
 	persona *services.PersonaService
 	groupFeatures *services.GroupFeaturesService
 	speakStyles   *services.SpeakStylesService
+	diary   *services.DiaryService
+	shop    *services.OutfitShopService
+	character *services.CharacterService
+	personaCards *services.PersonaCardsService
 }
 
 func New(cfg config.Config, db *gorm.DB) *Handler {
@@ -47,8 +51,12 @@ func New(cfg config.Config, db *gorm.DB) *Handler {
 		logs:    services.NewLogService(cfg.ProjectRoot),
 		traces:  services.NewTraceService(cfg.ProjectRoot),
 		persona: services.NewPersonaService(cfg.ProjectRoot),
+		personaCards: services.NewPersonaCardsService(cfg.ProjectRoot),
 		groupFeatures: services.NewGroupFeaturesService(cfg.GroupFeaturesPath),
 		speakStyles:   services.NewSpeakStylesService(cfg.ProjectRoot),
+		diary:     services.NewDiaryService(cfg.DiaryDir),
+		shop:      services.NewOutfitShopService(cfg.ShopDir, cfg.GroupFeaturesPath),
+		character: services.NewCharacterService(cfg.CharacterCatalogPath, cfg.CharacterRefDir, cfg.DrawTracePath, cfg.ProjectRoot),
 	}
 }
 
@@ -431,6 +439,69 @@ func (h *Handler) PutPersonaDraft(c *gin.Context) {
 	c.JSON(http.StatusOK, draft)
 }
 
+// GetPersonaCards 人设卡快照：卡列表 + 会话绑定表 + 默认卡。
+func (h *Handler) GetPersonaCards(c *gin.Context) {
+	snap, err := h.personaCards.Snapshot()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, snap)
+}
+
+// PutPersonaCardBinding 绑定/解绑：card 为空即解绑（同一个接口，
+// 前端少一条路径，也少一次「解绑走了另一套逻辑」的分叉）。
+func (h *Handler) PutPersonaCardBinding(c *gin.Context) {
+	var req struct {
+		Session string `json:"session" binding:"required"`
+		Card    string `json:"card"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
+		return
+	}
+	var (
+		snap *services.PersonaCardsSnapshot
+		err  error
+	)
+	if req.Card == "" {
+		snap, err = h.personaCards.Unbind(req.Session)
+	} else {
+		snap, err = h.personaCards.Bind(req.Session, req.Card)
+	}
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, snap)
+}
+
+func (h *Handler) GetPersonaCardBody(c *gin.Context) {
+	body, err := h.personaCards.Body(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, body)
+}
+
+// PostPersonaCardExport 把当前 persona.py 的正文导成一张新卡。
+func (h *Handler) PostPersonaCardExport(c *gin.Context) {
+	var req struct {
+		ID string `json:"id" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
+		return
+	}
+	snap, err := h.personaCards.Export(req.ID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, snap)
+}
+
 func (h *Handler) GetSpeakStyles(c *gin.Context) {
 	snap, err := h.speakStyles.Snapshot()
 	if err != nil {
@@ -496,6 +567,60 @@ func (h *Handler) AgentTraces(c *gin.Context) {
 	c.JSON(http.StatusOK, result)
 }
 
+// DiaryFeed 只读返回学姐的日记索引（含按天汇总）。
+// limit 默认 200，防止一次把几千条日记全塞给前端。
+func (h *Handler) DiaryFeed(c *gin.Context) {
+	limit := 200
+	if v := c.Query("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	snap, err := h.diary.List(limit)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, snap)
+}
+
+// OutfitShop 返回服装店快照：总目录 + 每个群的今日货架与已购统计。
+func (h *Handler) OutfitShop(c *gin.Context) {
+	snap, err := h.shop.Get()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, snap)
+}
+
+// ServeShopThumb 提供服装缩略图，路径由服务层校验，避免目录穿越。
+func (h *Handler) ServeShopThumb(c *gin.Context) {
+	path, err := h.shop.ThumbPath(c.Param("name"))
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+		return
+	}
+	c.File(path)
+}
+
+// CharacterIdentity 汇总角色档案 / 参考图清单 / A-B 实验 / 最近生图溯源。
+// trace_limit 控制生图溯源返回条数，默认 30。
+func (h *Handler) CharacterIdentity(c *gin.Context) {
+	limit := 30
+	if v := c.Query("trace_limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	snap, err := h.character.Get(limit)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, snap)
+}
+
 func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	api := r.Group("/x7k9-dl-senpai-console/v1")
 	api.POST("/auth/token", h.Login)
@@ -526,12 +651,20 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 		auth.PATCH("/feature-switches/:key", h.EditFeatureSwitch)
 		auth.GET("/group-features", h.ListGroupFeatures)
 		auth.PATCH("/group-features/:gid", h.PatchGroupFeature)
+		auth.GET("/senpai-diary", h.DiaryFeed)
+		auth.GET("/outfit-shop", h.OutfitShop)
+		auth.GET("/outfit-shop/thumbs/:name", h.ServeShopThumb)
+		auth.GET("/character-identity", h.CharacterIdentity)
 		auth.GET("/trends-snapshot", h.TrendsSnapshot)
 		auth.GET("/log-streams", h.ListLogStreams)
 		auth.GET("/log-streams/:id/lines", h.TailLogStream)
 		auth.GET("/agent-traces", h.AgentTraces)
 		auth.GET("/senpai-persona-draft", h.GetPersonaDraft)
 		auth.PUT("/senpai-persona-draft", h.PutPersonaDraft)
+		auth.GET("/persona-cards", h.GetPersonaCards)
+		auth.PUT("/persona-cards/binding", h.PutPersonaCardBinding)
+		auth.GET("/persona-cards/:id/body", h.GetPersonaCardBody)
+		auth.POST("/persona-cards/export", h.PostPersonaCardExport)
 		auth.GET("/speak-styles", h.GetSpeakStyles)
 		auth.PUT("/speak-styles/active", h.PutSpeakStyleActive)
 		auth.PUT("/speak-styles", h.UpsertSpeakStyle)
